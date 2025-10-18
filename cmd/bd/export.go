@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -60,6 +61,23 @@ Output to stdout by default, or use -o flag for file output.`,
 		if format != "jsonl" {
 			fmt.Fprintf(os.Stderr, "Error: only 'jsonl' format is currently supported\n")
 			os.Exit(1)
+		}
+
+		// Export command doesn't work with daemon - need direct access
+		// Ensure we have a direct store connection
+		if store == nil {
+			// Initialize store directly even if daemon is running
+			var err error
+			if dbPath == "" {
+				fmt.Fprintf(os.Stderr, "Error: no database path found\n")
+				os.Exit(1)
+			}
+			store, err = sqlite.New(dbPath)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: failed to open database: %v\n", err)
+				os.Exit(1)
+			}
+			defer store.Close()
 		}
 
 		// Build filter

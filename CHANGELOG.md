@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Batch Deletion**: Enhanced `bd delete` command with batch operations (bd-127)
+  - Delete multiple issues at once: `bd delete bd-1 bd-2 bd-3 --force`
+  - Read from file: `bd delete --from-file deletions.txt --force`
+  - Dry-run mode: `--dry-run` to preview deletions before execution
+  - Cascade mode: `--cascade` to recursively delete all dependents
+  - Force mode: `--force` to orphan dependents instead of failing
+  - Atomic transactions: all deletions succeed or none do
+  - Comprehensive statistics: tracks deleted issues, dependencies, labels, and events
+
+### Fixed
+- **Critical**: `bd list --status all` showing 0 issues (bd-148)
+  - Status filter now treats "all" as special value meaning "show all statuses"
+  - Previously treated "all" as literal status value, matching no issues
+
 ## [0.9.9] - 2025-10-17
 
 ### Added

@@ -338,6 +338,58 @@ bd update bd-1 --status in_progress --json
 bd close bd-1 --json
 ```
 
+### Deleting Issues
+
+Delete one or more issues, with automatic cleanup of references and dependencies:
+
+```bash
+# Single issue deletion (preview mode)
+bd delete bd-1
+
+# Force single deletion
+bd delete bd-1 --force
+
+# Batch deletion
+bd delete bd-1 bd-2 bd-3 --force
+
+# Delete from file (one ID per line, supports # comments)
+bd delete --from-file deletions.txt --force
+
+# Dry-run mode (preview without changes)
+bd delete --from-file deletions.txt --dry-run
+
+# Cascade deletion (recursively delete dependents)
+bd delete bd-1 --cascade --force
+
+# Force deletion (orphan dependents instead of failing)
+bd delete bd-1 --force
+
+# JSON output
+bd delete bd-1 bd-2 --force --json
+```
+
+The delete operation:
+- Removes all dependency links (both directions)
+- Updates text references to `[deleted:ID]` in connected issues
+- Deletes the issue from database and JSONL
+- Atomic: all deletions succeed or none do
+
+**Dependency handling:**
+- **Default**: Fails if any issue has dependents not in deletion set
+- **`--cascade`**: Recursively deletes all dependent issues
+- **`--force`**: Deletes and orphans dependents (use with caution)
+
+**File format** for `--from-file`:
+```text
+# Cleanup test issues
+bd-100
+bd-101
+bd-102
+
+# Another batch
+bd-200
+```
+
 ### Renaming Prefix
 
 Change the issue prefix for all issues in your database. This is useful if your prefix is too long or you want to standardize naming.
@@ -488,6 +540,13 @@ bd create "Fix navbar bug"  # Uses ~/myproject/.beads/myapp.db
 # Override for a different project
 bd --db ~/otherproject/.beads/other.db list
 ```
+
+### Environment Variables
+
+- `BEADS_DB` - Override database path
+- `BEADS_AUTO_START_DAEMON` - Enable/disable automatic daemon start (default: `true`). Set to `false` or `0` to disable.
+- `BD_ACTOR` - Set actor name for change tracking (defaults to `$USER`)
+- `BD_DEBUG` - Enable debug logging for troubleshooting
 
 ## Dependency Model
 
@@ -870,6 +929,8 @@ bd daemon --status
 bd daemon --stop
 ```
 
+**Note:** As of v0.9.11, the daemon **automatically starts** when you run any `bd` command if it's not already running. You typically don't need to manually start it. The auto-start feature can be disabled by setting `BEADS_AUTO_START_DAEMON=false` or using the `--no-daemon` flag.
+
 The daemon will:
 - Poll for changes at configurable intervals (default: 5 minutes)
 - Export pending database changes to JSONL
@@ -887,6 +948,7 @@ bd daemon --auto-push                 # Auto-push commits (requires auto-commit)
 bd daemon --log /var/log/bd.log       # Custom log file path
 bd daemon --status                    # Show daemon status
 bd daemon --stop                      # Stop running daemon
+bd daemon --global                    # Run as global daemon (see below)
 ```
 
 The daemon is ideal for:
@@ -896,6 +958,205 @@ The daemon is ideal for:
 - CI/CD pipelines that track issue status
 
 The daemon gracefully shuts down on SIGTERM and maintains a PID file at `.beads/daemon.pid` for process management.
+
+#### Global Daemon for Multiple Projects
+
+**New in v0.9.11:** Run a single daemon to serve all your projects system-wide:
+
+```bash
+# Start global daemon (serves all repos)
+bd daemon --global
+
+# Check global daemon status
+bd daemon --status --global
+
+# Stop global daemon
+bd daemon --stop --global
+```
+
+**Local vs Global Daemon:**
+
+| Mode | Socket Location | Use Case |
+|------|----------------|----------|
+| **Local** (default) | `.beads/bd.sock` | Single project, per-repo daemon |
+| **Global** (`--global`) | `~/.beads/bd.sock` | Multiple projects, system-wide daemon |
+
+**When to use global daemon:**
+- ✅ Working on multiple beads-enabled projects
+- ✅ Want one daemon process for all repos
+- ✅ Better resource usage (one daemon vs many)
+- ✅ Automatic fallback for CLI commands
+
+**How it works:**
+1. Global daemon creates socket at `~/.beads/bd.sock`
+2. CLI commands check local socket first, then fall back to global
+3. Daemon serves requests from any repository
+4. Each repo still has its own database at `.beads/*.db`
+
+**Architecture:**
+```mermaid
+graph TB
+    subgraph "Global Daemon Setup"
+        GD[bd daemon --global<br/>~/.beads/bd.sock]
+        
+        subgraph "Project 1: webapp"
+            P1DB[.beads/webapp.db]
+            P1JSON[.beads/issues.jsonl]
+        end
+        
+        subgraph "Project 2: api"
+            P2DB[.beads/api.db]
+            P2JSON[.beads/issues.jsonl]
+        end
+        
+        subgraph "Project 3: docs"
+            P3DB[.beads/docs.db]
+            P3JSON[.beads/issues.jsonl]
+        end
+        
+        MCP[MCP Server<br/>beads-mcp]
+        CLI[CLI Commands<br/>bd ready, bd create, etc.]
+        
+        MCP -->|Unix Socket| GD
+        CLI -->|Unix Socket| GD
+        
+        GD -->|cwd: ~/projects/webapp| P1DB
+        GD -->|cwd: ~/projects/api| P2DB
+        GD -->|cwd: ~/projects/docs| P3DB
+        
+        P1DB -.->|export| P1JSON
+        P2DB -.->|export| P2JSON
+        P3DB -.->|export| P3JSON
+    end
+    
+    style GD fill:#1a1a2e,stroke:#16c5c5,stroke-width:3px,color:#fff
+    style MCP fill:#0f3460,stroke:#16c5c5,stroke-width:2px,color:#fff
+    style CLI fill:#0f3460,stroke:#16c5c5,stroke-width:2px,color:#fff
+    style P1DB fill:#16213e,stroke:#16c5c5,color:#fff
+    style P2DB fill:#16213e,stroke:#16c5c5,color:#fff
+    style P3DB fill:#16213e,stroke:#16c5c5,color:#fff
+    style P1JSON fill:#16213e,stroke:#e94560,color:#fff
+    style P2JSON fill:#16213e,stroke:#e94560,color:#fff
+    style P3JSON fill:#16213e,stroke:#e94560,color:#fff
+```
+
+**Example: Multi-repo workflow**
+```bash
+# Start global daemon once
+bd daemon --global --auto-commit --auto-push
+
+# Work on different projects - daemon handles all of them
+cd ~/projects/webapp && bd create "Fix navigation bug" -p 1
+cd ~/projects/api && bd create "Add rate limiting" -p 1
+cd ~/projects/docs && bd create "Update API guide" -p 2
+
+# All commands use the same global daemon automatically
+cd ~/projects/webapp && bd ready     # Uses global daemon
+cd ~/projects/api && bd ready         # Uses global daemon
+```
+
+**Note:** Global daemon doesn't require git repos, making it suitable for non-git projects or multi-repo setups.
+
+#### Multi-Repository Commands with `bd repos`
+
+**New in v0.9.12:** When using a global daemon, use `bd repos` to view and manage work across all cached repositories.
+
+```bash
+# List all cached repositories
+bd repos list
+
+# View ready work across all repos
+bd repos ready
+
+# Group ready work by repository
+bd repos ready --group
+
+# Filter by priority
+bd repos ready --priority 1
+
+# Filter by assignee
+bd repos ready --assignee alice
+
+# View combined statistics
+bd repos stats
+
+# Clear repository cache (free resources)
+bd repos clear-cache
+```
+
+**Example output:**
+
+```bash
+$ bd repos list
+
+📁 Cached Repositories (3):
+
+/Users/alice/projects/webapp
+  Prefix:       webapp-
+  Issue Count:  45
+  Status:       active
+
+/Users/alice/projects/api
+  Prefix:       api-
+  Issue Count:  12
+  Status:       active
+
+/Users/alice/projects/docs
+  Prefix:       docs-
+  Issue Count:  8
+  Status:       active
+
+$ bd repos ready --group
+
+📋 Ready work across 3 repositories:
+
+/Users/alice/projects/webapp (4 issues):
+  1. [P1] webapp-23: Fix navigation bug
+     Estimate: 30 min
+  2. [P2] webapp-45: Add loading spinner
+     Estimate: 15 min
+  ...
+
+/Users/alice/projects/api (2 issues):
+  1. [P0] api-10: Fix critical auth bug
+     Estimate: 60 min
+  2. [P1] api-12: Add rate limiting
+     Estimate: 45 min
+
+$ bd repos stats
+
+📊 Combined Statistics Across All Repositories:
+
+Total Issues:      65
+Open:              23
+In Progress:       5
+Closed:            37
+Blocked:           3
+Ready:             15
+
+📁 Per-Repository Breakdown:
+
+/Users/alice/projects/webapp:
+  Total: 45  Ready: 10  Blocked: 2
+
+/Users/alice/projects/api:
+  Total: 12  Ready: 3  Blocked: 1
+
+/Users/alice/projects/docs:
+  Total: 8  Ready: 2  Blocked: 0
+```
+
+**Requirements:**
+- Global daemon must be running (`bd daemon --global`)
+- At least one command has been run in each repository (to cache it)
+- `--json` flag available for programmatic use
+
+**Use cases:**
+- Get an overview of all active projects
+- Find highest-priority work across all repos
+- Balance workload across multiple projects
+- Track overall progress and statistics
+- Identify which repos need attention
 
 ### Optional: Git Hooks for Immediate Sync
 
@@ -1010,6 +1271,7 @@ Each project gets its own `.beads/` directory with its own database and JSONL fi
 - Multiple agents working on different projects simultaneously → No conflicts
 - Same machine, different repos → Each finds its own `.beads/*.db` automatically
 - Agents in subdirectories → bd walks up to find the project root (like git)
+- **Global daemon** → One daemon process serves all projects (v0.9.11+)
 
 **Limitation:** Issues cannot reference issues in other projects. Each database is isolated by design. If you need cross-project tracking, initialize bd in a parent directory that contains both projects.
 
@@ -1024,6 +1286,8 @@ cd ~/work/api && bd ready --json       # Uses ~/work/api/.beads/api.db
 # No conflicts! Completely isolated databases.
 ```
 
+**Recommended for multi-project setups:** Use the global daemon (`bd daemon --global`) to serve all projects with a single daemon process. See [Global Daemon for Multiple Projects](#global-daemon-for-multiple-projects) above.
+
 ### How do I migrate from GitHub Issues / Jira / Linear?
 
 We don't have automated migration tools yet, but you can:
@@ -1035,7 +1299,7 @@ See [examples/](examples/) for scripting patterns. Contributions welcome!
 
 ### Is this production-ready?
 
-**Current status: Alpha (v0.9.9)**
+**Current status: Alpha (v0.9.10)**
 
 bd is in active development and being dogfooded on real projects. The core functionality (create, update, dependencies, ready work, collision resolution) is stable and well-tested. However:
 

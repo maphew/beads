@@ -1,8 +1,9 @@
 """MCP tools for beads issue tracker."""
 
+import os
 from typing import Annotated
 
-from .bd_client import BdClient, BdError
+from .bd_client import create_bd_client, BdClientBase, BdError
 from .models import (
     AddDependencyParams,
     BlockedIssue,
@@ -22,7 +23,7 @@ from .models import (
 )
 
 # Global client instance - initialized on first use
-_client: BdClient | None = None
+_client: BdClientBase | None = None
 _version_checked: bool = False
 
 # Default constants
@@ -30,24 +31,33 @@ DEFAULT_ISSUE_TYPE: IssueType = "task"
 DEFAULT_DEPENDENCY_TYPE: DependencyType = "blocks"
 
 
-async def _get_client() -> BdClient:
+async def _get_client() -> BdClientBase:
     """Get a BdClient instance, creating it on first use.
 
     Performs version check on first initialization.
+    Uses daemon client if available, falls back to CLI client.
 
     Returns:
-        Configured BdClient instance (config loaded automatically)
+        Configured BdClientBase instance (config loaded automatically)
 
     Raises:
         BdError: If bd is not installed or version is incompatible
     """
     global _client, _version_checked
     if _client is None:
-        _client = BdClient()
+        # Check if daemon should be used (default: yes)
+        use_daemon = os.environ.get("BEADS_USE_DAEMON", "1") == "1"
+        workspace_root = os.environ.get("BEADS_WORKING_DIR")
+        
+        _client = create_bd_client(
+            prefer_daemon=use_daemon,
+            working_dir=workspace_root
+        )
 
-    # Check version once per server lifetime
+    # Check version once per server lifetime (only for CLI client)
     if not _version_checked:
-        await _client._check_version()
+        if hasattr(_client, '_check_version'):
+            await _client._check_version()
         _version_checked = True
 
     return _client

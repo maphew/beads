@@ -33,5 +33,10 @@ Thumbs.db
 *.db-wal
 *.db-shm
 
+# Daemon runtime files
+.beads/daemon.log
+.beads/daemon.pid
+.beads/bd.sock
+
 # Keep JSONL exports (source of truth for git)
 !.beads/*.jsonl

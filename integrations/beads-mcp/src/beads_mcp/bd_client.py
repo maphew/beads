@@ -1,9 +1,11 @@
-"""Client for interacting with bd (beads) CLI."""
+"""Client for interacting with bd (beads) CLI and daemon."""
 
 import asyncio
 import json
 import os
 import re
+from abc import ABC, abstractmethod
+from typing import List, Optional
 
 from .config import load_config
 from .models import (
@@ -69,7 +71,66 @@ class BdVersionError(BdError):
     pass
 
 
-class BdClient:
+class BdClientBase(ABC):
+    """Abstract base class for bd clients (CLI or daemon)."""
+
+    @abstractmethod
+    async def ready(self, params: Optional[ReadyWorkParams] = None) -> List[Issue]:
+        """Get ready work (issues with no blockers)."""
+        pass
+
+    @abstractmethod
+    async def list_issues(self, params: Optional[ListIssuesParams] = None) -> List[Issue]:
+        """List issues with optional filters."""
+        pass
+
+    @abstractmethod
+    async def show(self, params: ShowIssueParams) -> Issue:
+        """Show detailed issue information."""
+        pass
+
+    @abstractmethod
+    async def create(self, params: CreateIssueParams) -> Issue:
+        """Create a new issue."""
+        pass
+
+    @abstractmethod
+    async def update(self, params: UpdateIssueParams) -> Issue:
+        """Update an existing issue."""
+        pass
+
+    @abstractmethod
+    async def close(self, params: CloseIssueParams) -> List[Issue]:
+        """Close one or more issues."""
+        pass
+
+    @abstractmethod
+    async def reopen(self, params: ReopenIssueParams) -> List[Issue]:
+        """Reopen one or more closed issues."""
+        pass
+
+    @abstractmethod
+    async def add_dependency(self, params: AddDependencyParams) -> None:
+        """Add a dependency between issues."""
+        pass
+
+    @abstractmethod
+    async def stats(self) -> Stats:
+        """Get repository statistics."""
+        pass
+
+    @abstractmethod
+    async def blocked(self) -> List[BlockedIssue]:
+        """Get blocked issues."""
+        pass
+
+    @abstractmethod
+    async def init(self, params: Optional[InitParams] = None) -> str:
+        """Initialize a new beads database."""
+        pass
+
+
+class BdCliClient(BdClientBase):
     """Client for calling bd CLI commands and parsing JSON output."""
 
     bd_path: str
@@ -540,3 +601,94 @@ class BdClient:
             )
 
         return stdout.decode()
+
+
+# Backwards compatibility alias
+BdClient = BdCliClient
+
+
+def create_bd_client(
+    prefer_daemon: bool = False,
+    bd_path: Optional[str] = None,
+    beads_db: Optional[str] = None,
+    actor: Optional[str] = None,
+    no_auto_flush: Optional[bool] = None,
+    no_auto_import: Optional[bool] = None,
+    working_dir: Optional[str] = None,
+) -> BdClientBase:
+    """Create a bd client (daemon or CLI-based).
+
+    Args:
+        prefer_daemon: If True, attempt to use daemon client first, fall back to CLI
+        bd_path: Path to bd executable (for CLI client)
+        beads_db: Path to beads database (for CLI client)
+        actor: Actor name for audit trail
+        no_auto_flush: Disable auto-flush (CLI only)
+        no_auto_import: Disable auto-import (CLI only)
+        working_dir: Working directory for database discovery
+
+    Returns:
+        BdClientBase implementation (daemon or CLI)
+
+    Note:
+        If prefer_daemon is True and daemon is not running, falls back to CLI client.
+        To check if daemon is running without falling back, use BdDaemonClient directly.
+    """
+    if prefer_daemon:
+        try:
+            from .bd_daemon_client import BdDaemonClient
+            from pathlib import Path
+
+            # Check if daemon socket exists before creating client
+            # Walk up from working_dir to find .beads/bd.sock, then check global
+            search_dir = Path(working_dir) if working_dir else Path.cwd()
+            socket_found = False
+
+            current = search_dir.resolve()
+            while True:
+                beads_dir = current / ".beads"
+                if beads_dir.is_dir():
+                    sock_path = beads_dir / "bd.sock"
+                    if sock_path.exists():
+                        socket_found = True
+                        break
+                    # Found .beads but no socket - check global before giving up
+                    break
+
+                # Move up one directory
+                parent = current.parent
+                if parent == current:
+                    # Reached filesystem root - check global
+                    break
+                current = parent
+
+            # If no local socket, check global daemon socket at ~/.beads/bd.sock
+            if not socket_found:
+                global_sock_path = Path.home() / ".beads" / "bd.sock"
+                if global_sock_path.exists():
+                    socket_found = True
+
+            if socket_found:
+                # Daemon is running, use it
+                client = BdDaemonClient(
+                    working_dir=working_dir,
+                    actor=actor,
+                )
+                return client
+            # No socket found, fall through to CLI client
+        except ImportError:
+            # Daemon client not available (shouldn't happen but be defensive)
+            pass
+        except Exception:
+            # If daemon setup fails for any reason, fall back to CLI
+            pass
+
+    # Use CLI client
+    return BdCliClient(
+        bd_path=bd_path,
+        beads_db=beads_db,
+        actor=actor,
+        no_auto_flush=no_auto_flush,
+        no_auto_import=no_auto_import,
+        working_dir=working_dir,
+    )

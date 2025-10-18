@@ -70,16 +70,27 @@ async def mcp_client(bd_executable, temp_db, monkeypatch):
 
     # Reset client before test
     tools._client = None
+    
+    # Reset context environment variables
+    os.environ.pop("BEADS_CONTEXT_SET", None)
+    os.environ.pop("BEADS_WORKING_DIR", None)
+    os.environ.pop("BEADS_DB", None)
 
     # Create a pre-configured client with explicit paths (bypasses config loading)
-    tools._client = BdClient(bd_path=bd_executable, beads_db=temp_db)
+    temp_dir = os.path.dirname(temp_db)
+    tools._client = BdClient(bd_path=bd_executable, beads_db=temp_db, working_dir=temp_dir)
 
     # Create test client
     async with Client(mcp) as client:
+        # Automatically set context for the tests
+        await client.call_tool("set_context", {"workspace_root": temp_dir})
         yield client
 
-    # Reset client after test
+    # Reset client and context after test
     tools._client = None
+    os.environ.pop("BEADS_CONTEXT_SET", None)
+    os.environ.pop("BEADS_WORKING_DIR", None)
+    os.environ.pop("BEADS_DB", None)
 
 
 @pytest.mark.asyncio

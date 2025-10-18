@@ -8,7 +8,7 @@ import (
 
 const (
 	// Version is the current version of bd
-	Version = "0.9.9"
+	Version = "0.9.10"
 	// Build can be set via ldflags at compile time
 	Build = "dev"
 )

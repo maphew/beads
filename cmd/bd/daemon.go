@@ -46,20 +46,21 @@ Use --status to check if daemon is running.`,
 		autoCommit, _ := cmd.Flags().GetBool("auto-commit")
 		autoPush, _ := cmd.Flags().GetBool("auto-push")
 		logFile, _ := cmd.Flags().GetString("log")
+		global, _ := cmd.Flags().GetBool("global")
 
 		if interval <= 0 {
 			fmt.Fprintf(os.Stderr, "Error: interval must be positive (got %v)\n", interval)
 			os.Exit(1)
 		}
 
-		pidFile, err := getPIDFilePath()
+		pidFile, err := getPIDFilePath(global)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
 
 		if status {
-			showDaemonStatus(pidFile)
+			showDaemonStatus(pidFile, global)
 			return
 		}
 
@@ -71,12 +72,20 @@ Use --status to check if daemon is running.`,
 		// Check if daemon is already running
 		if isRunning, pid := isDaemonRunning(pidFile); isRunning {
 			fmt.Fprintf(os.Stderr, "Error: daemon already running (PID %d)\n", pid)
-			fmt.Fprintf(os.Stderr, "Use 'bd daemon --stop' to stop it first\n")
+			fmt.Fprintf(os.Stderr, "Use 'bd daemon --stop%s' to stop it first\n", boolToFlag(global, " --global"))
 			os.Exit(1)
 		}
 
-		// Validate we're in a git repo
-		if !isGitRepo() {
+		// Global daemon doesn't support auto-commit/auto-push (no sync loop)
+		if global && (autoCommit || autoPush) {
+			fmt.Fprintf(os.Stderr, "Error: --auto-commit and --auto-push are not supported with --global\n")
+			fmt.Fprintf(os.Stderr, "Hint: global daemon runs in routing mode and doesn't perform background sync\n")
+			fmt.Fprintf(os.Stderr, "      Use local daemon (without --global) for auto-commit/auto-push features\n")
+			os.Exit(1)
+		}
+
+		// Validate we're in a git repo (skip for global daemon)
+		if !global && !isGitRepo() {
 			fmt.Fprintf(os.Stderr, "Error: not in a git repository\n")
 			fmt.Fprintf(os.Stderr, "Hint: run 'git init' to initialize a repository\n")
 			os.Exit(1)
@@ -90,13 +99,17 @@ Use --status to check if daemon is running.`,
 		}
 
 		// Start daemon
-		fmt.Printf("Starting bd daemon (interval: %v, auto-commit: %v, auto-push: %v)\n",
-			interval, autoCommit, autoPush)
+		scope := "local"
+		if global {
+			scope = "global"
+		}
+		fmt.Printf("Starting bd daemon (%s, interval: %v, auto-commit: %v, auto-push: %v)\n",
+			scope, interval, autoCommit, autoPush)
 		if logFile != "" {
 			fmt.Printf("Logging to: %s\n", logFile)
 		}
 
-		startDaemon(interval, autoCommit, autoPush, logFile, pidFile)
+		startDaemon(interval, autoCommit, autoPush, logFile, pidFile, global)
 	},
 }
 
@@ -107,7 +120,22 @@ func init() {
 	daemonCmd.Flags().Bool("stop", false, "Stop running daemon")
 	daemonCmd.Flags().Bool("status", false, "Show daemon status")
 	daemonCmd.Flags().String("log", "", "Log file path (default: .beads/daemon.log)")
+	daemonCmd.Flags().Bool("global", false, "Run as global daemon (socket at ~/.beads/bd.sock)")
 	rootCmd.AddCommand(daemonCmd)
+}
+
+func getGlobalBeadsDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("cannot get home directory: %w", err)
+	}
+	
+	beadsDir := filepath.Join(home, ".beads")
+	if err := os.MkdirAll(beadsDir, 0700); err != nil {
+		return "", fmt.Errorf("cannot create global beads directory: %w", err)
+	}
+	
+	return beadsDir, nil
 }
 
 func ensureBeadsDir() (string, error) {
@@ -132,19 +160,43 @@ func ensureBeadsDir() (string, error) {
 	return beadsDir, nil
 }
 
-func getPIDFilePath() (string, error) {
-	beadsDir, err := ensureBeadsDir()
+func boolToFlag(condition bool, flag string) string {
+	if condition {
+		return flag
+	}
+	return ""
+}
+
+func getPIDFilePath(global bool) (string, error) {
+	var beadsDir string
+	var err error
+	
+	if global {
+		beadsDir, err = getGlobalBeadsDir()
+	} else {
+		beadsDir, err = ensureBeadsDir()
+	}
+	
 	if err != nil {
 		return "", err
 	}
 	return filepath.Join(beadsDir, "daemon.pid"), nil
 }
 
-func getLogFilePath(userPath string) (string, error) {
+func getLogFilePath(userPath string, global bool) (string, error) {
 	if userPath != "" {
 		return userPath, nil
 	}
-	beadsDir, err := ensureBeadsDir()
+	
+	var beadsDir string
+	var err error
+	
+	if global {
+		beadsDir, err = getGlobalBeadsDir()
+	} else {
+		beadsDir, err = ensureBeadsDir()
+	}
+	
 	if err != nil {
 		return "", err
 	}
@@ -175,15 +227,19 @@ func isDaemonRunning(pidFile string) (bool, int) {
 	return true, pid
 }
 
-func showDaemonStatus(pidFile string) {
+func showDaemonStatus(pidFile string, global bool) {
 	if isRunning, pid := isDaemonRunning(pidFile); isRunning {
-		fmt.Printf("✓ Daemon is running (PID %d)\n", pid)
+		scope := "local"
+		if global {
+			scope = "global"
+		}
+		fmt.Printf("✓ Daemon is running (PID %d, %s)\n", pid, scope)
 		
 		if info, err := os.Stat(pidFile); err == nil {
 			fmt.Printf("  Started: %s\n", info.ModTime().Format("2006-01-02 15:04:05"))
 		}
 		
-		logPath, err := getLogFilePath("")
+		logPath, err := getLogFilePath("", global)
 		if err == nil {
 			if _, err := os.Stat(logPath); err == nil {
 				fmt.Printf("  Log: %s\n", logPath)
@@ -229,15 +285,15 @@ func stopDaemon(pidFile string) {
 	}
 }
 
-func startDaemon(interval time.Duration, autoCommit, autoPush bool, logFile, pidFile string) {
-	logPath, err := getLogFilePath(logFile)
+func startDaemon(interval time.Duration, autoCommit, autoPush bool, logFile, pidFile string, global bool) {
+	logPath, err := getLogFilePath(logFile, global)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 
 	if os.Getenv("BD_DAEMON_FOREGROUND") == "1" {
-		runDaemonLoop(interval, autoCommit, autoPush, logPath, pidFile)
+		runDaemonLoop(interval, autoCommit, autoPush, logPath, pidFile, global)
 		return
 	}
 
@@ -259,10 +315,13 @@ func startDaemon(interval time.Duration, autoCommit, autoPush bool, logFile, pid
 	if logFile != "" {
 		args = append(args, "--log", logFile)
 	}
+	if global {
+		args = append(args, "--global")
+	}
 
 	cmd := exec.Command(exe, args...)
 	cmd.Env = append(os.Environ(), "BD_DAEMON_FOREGROUND=1")
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	configureDaemonProcess(cmd)
 	
 	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
 	if err != nil {
@@ -392,7 +451,7 @@ func importToJSONLWithStore(ctx context.Context, store storage.Storage, jsonlPat
 	return nil
 }
 
-func runDaemonLoop(interval time.Duration, autoCommit, autoPush bool, logPath, pidFile string) {
+func runDaemonLoop(interval time.Duration, autoCommit, autoPush bool, logPath, pidFile string, global bool) {
 	logF, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error opening log file: %v\n", err)
@@ -441,8 +500,58 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush bool, logPath, p
 
 	log("Daemon started (interval: %v, auto-commit: %v, auto-push: %v)", interval, autoCommit, autoPush)
 
-	// Open SQLite database (daemon owns exclusive connection)
-	// Use the same dbPath resolution logic as other commands
+	// Global daemon runs in routing mode without opening a database
+	if global {
+		globalDir, err := getGlobalBeadsDir()
+		if err != nil {
+			log("Error: cannot get global beads directory: %v", err)
+			os.Exit(1)
+		}
+		socketPath := filepath.Join(globalDir, "bd.sock")
+		
+		// Create server with nil storage - uses per-request routing
+		server := rpc.NewServer(socketPath, nil)
+		
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		
+		// Start RPC server in background
+		serverErrChan := make(chan error, 1)
+		go func() {
+			log("Starting global RPC server: %s", socketPath)
+			if err := server.Start(ctx); err != nil {
+				log("RPC server error: %v", err)
+				serverErrChan <- err
+			}
+		}()
+		
+		// Wait for server to start or fail
+		select {
+		case err := <-serverErrChan:
+			log("RPC server failed to start: %v", err)
+			os.Exit(1)
+		case <-time.After(2 * time.Second):
+			log("Global RPC server started")
+		}
+		
+		// Wait for shutdown signal
+		sigChan := make(chan os.Signal, 1)
+		signal.Notify(sigChan, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
+		
+		sig := <-sigChan
+		log("Received signal: %v", sig)
+		log("Shutting down global daemon...")
+		
+		cancel()
+		if err := server.Stop(); err != nil {
+			log("Error stopping server: %v", err)
+		}
+		
+		log("Global daemon stopped")
+		return
+	}
+
+	// Local daemon mode - open database and run sync loop
 	daemonDBPath := dbPath
 	if daemonDBPath == "" {
 		// Try to find database in current repo

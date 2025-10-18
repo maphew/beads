@@ -29,7 +29,7 @@ var listCmd = &cobra.Command{
 		filter := types.IssueFilter{
 			Limit: limit,
 		}
-		if status != "" {
+		if status != "" && status != "all" {
 			s := types.Status(status)
 			filter.Status = &s
 		}

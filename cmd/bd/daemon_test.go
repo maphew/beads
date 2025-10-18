@@ -23,7 +23,7 @@ func TestGetPIDFilePath(t *testing.T) {
 	defer func() { dbPath = oldDBPath }()
 
 	dbPath = filepath.Join(tmpDir, ".beads", "test.db")
-	pidFile, err := getPIDFilePath()
+	pidFile, err := getPIDFilePath(false) // test local daemon
 	if err != nil {
 		t.Fatalf("getPIDFilePath failed: %v", err)
 	}
@@ -65,7 +65,7 @@ func TestGetLogFilePath(t *testing.T) {
 			defer func() { dbPath = oldDBPath }()
 			dbPath = tt.dbPath
 
-			result, err := getLogFilePath(tt.userPath)
+			result, err := getLogFilePath(tt.userPath, false) // test local daemon
 			if err != nil {
 				t.Fatalf("getLogFilePath failed: %v", err)
 			}

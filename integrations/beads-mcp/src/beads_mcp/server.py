@@ -1,6 +1,10 @@
 """FastMCP server for beads issue tracker."""
 
+import asyncio
 import os
+import subprocess
+from functools import wraps
+from typing import Callable, TypeVar
 
 from fastmcp import FastMCP
 
@@ -20,14 +24,89 @@ from beads_mcp.tools import (
     beads_update_issue,
 )
 
+T = TypeVar("T")
+
 # Create FastMCP server
 mcp = FastMCP(
     name="Beads",
     instructions="""
 We track work in Beads (bd) instead of Markdown.
 Check the resource beads://quickstart to see how.
+
+IMPORTANT: Call set_context with your workspace root before any write operations.
 """,
 )
+
+
+def require_context(func: Callable[..., T]) -> Callable[..., T]:
+    """Decorator to enforce context has been set before write operations.
+    
+    Only enforces if BEADS_REQUIRE_CONTEXT=1 is set in environment.
+    This allows backward compatibility while adding safety for multi-repo setups.
+    """
+    @wraps(func)
+    async def wrapper(*args, **kwargs):
+        # Only enforce if explicitly enabled
+        if os.environ.get("BEADS_REQUIRE_CONTEXT") == "1":
+            if not os.environ.get("BEADS_CONTEXT_SET"):
+                raise ValueError(
+                    "Context not set. Call set_context with your workspace root before performing write operations."
+                )
+        return await func(*args, **kwargs)
+    return wrapper
+
+
+def _find_beads_db(workspace_root: str) -> str | None:
+    """Find .beads/*.db by walking up from workspace_root.
+    
+    Args:
+        workspace_root: Starting directory to search from
+        
+    Returns:
+        Absolute path to first .db file found in .beads/, None otherwise
+    """
+    import glob
+    current = os.path.abspath(workspace_root)
+    
+    while True:
+        beads_dir = os.path.join(current, ".beads")
+        if os.path.isdir(beads_dir):
+            # Find any .db file in .beads/
+            db_files = glob.glob(os.path.join(beads_dir, "*.db"))
+            if db_files:
+                return db_files[0]  # Return first .db file found
+        
+        parent = os.path.dirname(current)
+        if parent == current:  # Reached root
+            break
+        current = parent
+    
+    return None
+
+
+def _resolve_workspace_root(path: str) -> str:
+    """Resolve workspace root to git repo root if inside a git repo.
+    
+    Args:
+        path: Directory path to resolve
+        
+    Returns:
+        Git repo root if inside git repo, otherwise the original path
+    """
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception:
+        pass
+    
+    return os.path.abspath(path)
 
 
 # Register quickstart resource
@@ -38,6 +117,65 @@ async def get_quickstart() -> str:
     Read this first to understand how to use beads (bd) commands.
     """
     return await beads_quickstart()
+
+
+# Context management tools
+@mcp.tool(
+    name="set_context",
+    description="Set the workspace root directory for all bd operations. Call this first!",
+)
+async def set_context(workspace_root: str) -> str:
+    """Set workspace root directory and discover the beads database.
+    
+    Args:
+        workspace_root: Absolute path to workspace/project root directory
+        
+    Returns:
+        Confirmation message with resolved paths
+    """
+    # Resolve to git repo root if possible
+    resolved_root = _resolve_workspace_root(workspace_root)
+    
+    # Find beads database
+    db_path = _find_beads_db(resolved_root)
+    
+    if db_path is None:
+        return (
+            f"Warning: No .beads/beads.db found in or above {resolved_root}. "
+            "You may need to run 'bd init' first. Context set but database not found."
+        )
+    
+    # Update environment for bd_client
+    os.environ["BEADS_WORKING_DIR"] = resolved_root
+    os.environ["BEADS_DB"] = db_path
+    os.environ["BEADS_CONTEXT_SET"] = "1"
+    
+    return (
+        f"Context set successfully:\n"
+        f"  Workspace root: {resolved_root}\n"
+        f"  Database: {db_path}"
+    )
+
+
+@mcp.tool(
+    name="where_am_i",
+    description="Show current workspace context and database path",
+)
+async def where_am_i() -> str:
+    """Show current workspace context for debugging."""
+    if not os.environ.get("BEADS_CONTEXT_SET"):
+        return (
+            "Context not set. Call set_context with your workspace root first.\n"
+            f"Current process CWD: {os.getcwd()}\n"
+            f"BEADS_WORKING_DIR env: {os.environ.get('BEADS_WORKING_DIR', 'NOT SET')}\n"
+            f"BEADS_DB env: {os.environ.get('BEADS_DB', 'NOT SET')}"
+        )
+    
+    return (
+        f"Workspace root: {os.environ.get('BEADS_WORKING_DIR', 'NOT SET')}\n"
+        f"Database: {os.environ.get('BEADS_DB', 'NOT SET')}\n"
+        f"Actor: {os.environ.get('BEADS_ACTOR', 'NOT SET')}"
+    )
 
 
 # Register all tools
@@ -86,6 +224,7 @@ async def show_issue(issue_id: str) -> Issue:
     description="""Create a new issue (bug, feature, task, epic, or chore) with optional design,
 acceptance criteria, and dependencies.""",
 )
+@require_context
 async def create_issue(
     title: str,
     description: str = "",
@@ -120,6 +259,7 @@ async def create_issue(
     description="""Update an existing issue's status, priority, assignee, design notes,
 or acceptance criteria. Use this to claim work (set status=in_progress).""",
 )
+@require_context
 async def update_issue(
     issue_id: str,
     status: IssueStatus | None = None,
@@ -149,6 +289,7 @@ async def update_issue(
     name="close",
     description="Close (complete) an issue. Mark work as done when you've finished implementing/fixing it.",
 )
+@require_context
 async def close_issue(issue_id: str, reason: str = "Completed") -> list[Issue]:
     """Close (complete) an issue."""
     return await beads_close_issue(issue_id=issue_id, reason=reason)
@@ -158,6 +299,7 @@ async def close_issue(issue_id: str, reason: str = "Completed") -> list[Issue]:
     name="reopen",
     description="Reopen one or more closed issues. Sets status to 'open' and clears closed_at timestamp.",
 )
+@require_context
 async def reopen_issue(issue_ids: list[str], reason: str | None = None) -> list[Issue]:
     """Reopen one or more closed issues."""
     return await beads_reopen_issue(issue_ids=issue_ids, reason=reason)
@@ -168,6 +310,7 @@ async def reopen_issue(issue_ids: list[str], reason: str | None = None) -> list[
     description="""Add a dependency between issues. Types: blocks (hard blocker),
 related (soft link), parent-child (epic/subtask), discovered-from (found during work).""",
 )
+@require_context
 async def add_dependency(
     from_id: str,
     to_id: str,
@@ -204,6 +347,7 @@ async def blocked() -> list[BlockedIssue]:
     description="""Initialize bd in current directory. Creates .beads/ directory and
 database with optional custom prefix for issue IDs.""",
 )
+@require_context
 async def init(prefix: str | None = None) -> str:
     """Initialize bd in current directory."""
     return await beads_init(prefix=prefix)
@@ -231,9 +375,14 @@ async def debug_env() -> str:
     return "".join(info)
 
 
+async def async_main() -> None:
+    """Async entry point for the MCP server."""
+    await mcp.run_async(transport="stdio")
+
+
 def main() -> None:
     """Entry point for the MCP server."""
-    mcp.run()
+    asyncio.run(async_main())
 
 
 if __name__ == "__main__":

@@ -9,10 +9,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/fatih/color"
@@ -22,6 +24,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
+	"golang.org/x/mod/semver"
 )
 
 var (
@@ -103,6 +106,25 @@ var rootCmd = &cobra.Command{
 				}
 				return // Skip direct storage initialization
 			}
+			
+			// Daemon not running - try auto-start if enabled
+			if shouldAutoStartDaemon() {
+				if os.Getenv("BD_DEBUG") != "" {
+					fmt.Fprintf(os.Stderr, "Debug: attempting to auto-start daemon\n")
+				}
+				if tryAutoStartDaemon(socketPath) {
+					// Retry connection after auto-start
+					client, err := rpc.TryConnect(socketPath)
+					if err == nil && client != nil {
+						daemonClient = client
+						if os.Getenv("BD_DEBUG") != "" {
+							fmt.Fprintf(os.Stderr, "Debug: connected to auto-started daemon at %s\n", socketPath)
+						}
+						return // Skip direct storage initialization
+					}
+				}
+			}
+			
 			if os.Getenv("BD_DEBUG") != "" {
 				fmt.Fprintf(os.Stderr, "Debug: daemon not available, using direct mode\n")
 			}
@@ -167,10 +189,174 @@ var rootCmd = &cobra.Command{
 	},
 }
 
+// shouldAutoStartDaemon checks if daemon auto-start is enabled
+func shouldAutoStartDaemon() bool {
+	// Check environment variable (default: true)
+	autoStart := strings.ToLower(strings.TrimSpace(os.Getenv("BEADS_AUTO_START_DAEMON")))
+	if autoStart != "" {
+		// Accept common falsy values
+		return autoStart != "false" && autoStart != "0" && autoStart != "no" && autoStart != "off"
+	}
+	return true // Default to enabled
+}
+
+// tryAutoStartDaemon attempts to start the daemon in the background
+// Returns true if daemon was started successfully and socket is ready
+func tryAutoStartDaemon(socketPath string) bool {
+	// Check if we've failed recently (exponential backoff)
+	if !canRetryDaemonStart() {
+		if os.Getenv("BD_DEBUG") != "" {
+			fmt.Fprintf(os.Stderr, "Debug: skipping auto-start due to recent failures\n")
+		}
+		return false
+	}
+	
+	// Use lockfile to prevent multiple processes from starting daemon simultaneously
+	lockPath := socketPath + ".startlock"
+	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		// Someone else is already starting daemon, wait for socket readiness
+		if os.Getenv("BD_DEBUG") != "" {
+			fmt.Fprintf(os.Stderr, "Debug: another process is starting daemon, waiting for readiness\n")
+		}
+		return waitForSocketReadiness(socketPath, 5*time.Second)
+	}
+	
+	// Write our PID to lockfile
+	fmt.Fprintf(lockFile, "%d\n", os.Getpid())
+	lockFile.Close()
+	defer os.Remove(lockPath)
+	
+	// Determine if we should start global or local daemon
+	isGlobal := false
+	if home, err := os.UserHomeDir(); err == nil {
+		globalSocket := filepath.Join(home, ".beads", "bd.sock")
+		if socketPath == globalSocket {
+			isGlobal = true
+		}
+	}
+	
+	// Build daemon command using absolute path for security
+	binPath, err := os.Executable()
+	if err != nil {
+		binPath = os.Args[0] // Fallback
+	}
+	
+	args := []string{"daemon"}
+	if isGlobal {
+		args = append(args, "--global")
+	}
+	
+	// Start daemon in background with proper I/O redirection
+	cmd := exec.Command(binPath, args...)
+	
+	// Redirect stdio to /dev/null to prevent daemon output in foreground
+	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+	if err == nil {
+		cmd.Stdout = devNull
+		cmd.Stderr = devNull
+		cmd.Stdin = devNull
+		defer devNull.Close()
+	}
+	
+	// Set working directory to database directory for local daemon
+	if !isGlobal && dbPath != "" {
+		cmd.Dir = filepath.Dir(dbPath)
+	}
+	
+	// Detach from parent process
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setpgid: true,
+	}
+	
+	if err := cmd.Start(); err != nil {
+		recordDaemonStartFailure()
+		if os.Getenv("BD_DEBUG") != "" {
+			fmt.Fprintf(os.Stderr, "Debug: failed to start daemon: %v\n", err)
+		}
+		return false
+	}
+	
+	// Reap the process to avoid zombies
+	go cmd.Wait()
+	
+	// Wait for socket to be ready with actual connection test
+	if waitForSocketReadiness(socketPath, 5*time.Second) {
+		recordDaemonStartSuccess()
+		return true
+	}
+	
+	recordDaemonStartFailure()
+	if os.Getenv("BD_DEBUG") != "" {
+		fmt.Fprintf(os.Stderr, "Debug: daemon socket not ready after 5 seconds\n")
+	}
+	return false
+}
+
+// waitForSocketReadiness waits for daemon socket to be ready by testing actual connections
+func waitForSocketReadiness(socketPath string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		// Try actual connection, not just file existence
+		client, err := rpc.TryConnect(socketPath)
+		if err == nil && client != nil {
+			client.Close()
+			return true
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return false
+}
+
+// Daemon start failure tracking for exponential backoff
+var (
+	lastDaemonStartAttempt time.Time
+	daemonStartFailures    int
+)
+
+func canRetryDaemonStart() bool {
+	if daemonStartFailures == 0 {
+		return true
+	}
+	
+	// Exponential backoff: 5s, 10s, 20s, 40s, 80s, 120s (capped at 120s)
+	backoff := time.Duration(5*(1<<uint(daemonStartFailures-1))) * time.Second
+	if backoff > 120*time.Second {
+		backoff = 120 * time.Second
+	}
+	
+	return time.Since(lastDaemonStartAttempt) > backoff
+}
+
+func recordDaemonStartSuccess() {
+	daemonStartFailures = 0
+}
+
+func recordDaemonStartFailure() {
+	lastDaemonStartAttempt = time.Now()
+	daemonStartFailures++
+	// No cap needed - backoff is capped at 120s in canRetryDaemonStart
+}
+
 // getSocketPath returns the daemon socket path based on the database location
+// If no local socket exists, check for global socket at ~/.beads/bd.sock
 func getSocketPath() string {
-	// Socket lives in same directory as database: .beads/bd.sock
-	return filepath.Join(filepath.Dir(dbPath), "bd.sock")
+	// First check local socket (same directory as database: .beads/bd.sock)
+	localSocket := filepath.Join(filepath.Dir(dbPath), "bd.sock")
+	if _, err := os.Stat(localSocket); err == nil {
+		return localSocket
+	}
+	
+	// Fall back to global socket at ~/.beads/bd.sock
+	if home, err := os.UserHomeDir(); err == nil {
+		globalSocket := filepath.Join(home, ".beads", "bd.sock")
+		if _, err := os.Stat(globalSocket); err == nil {
+			return globalSocket
+		}
+	}
+	
+	// Default to local socket even if it doesn't exist
+	return localSocket
 }
 
 // outputJSON outputs data as pretty-printed JSON
@@ -504,17 +690,23 @@ func checkVersionMismatch() {
 
 	// Compare versions: warn if binary is older than database
 	if dbVersion != Version {
-		// Simple string comparison is sufficient for detecting version mismatch
-		// We're not trying to parse semantic versions, just detect "different"
 		yellow := color.New(color.FgYellow, color.Bold).SprintFunc()
 		fmt.Fprintf(os.Stderr, "\n%s\n", yellow("⚠️  WARNING: Version mismatch detected!"))
 		fmt.Fprintf(os.Stderr, "%s\n", yellow(fmt.Sprintf("⚠️  Your bd binary (v%s) differs from the database version (v%s)", Version, dbVersion)))
 
-		// Determine if binary is likely older (heuristic: lower version number)
-		if Version < dbVersion {
+		// Use semantic version comparison (requires v prefix)
+		binaryVer := "v" + Version
+		dbVer := "v" + dbVersion
+		
+		// semver.Compare returns -1 if binaryVer < dbVer, 0 if equal, 1 if binaryVer > dbVer
+		cmp := semver.Compare(binaryVer, dbVer)
+		
+		if cmp < 0 {
+			// Binary is older than database
 			fmt.Fprintf(os.Stderr, "%s\n", yellow("⚠️  Your binary appears to be OUTDATED."))
 			fmt.Fprintf(os.Stderr, "%s\n\n", yellow("⚠️  Some features may not work correctly. Rebuild: go build -o bd ./cmd/bd"))
-		} else {
+		} else if cmp > 0 {
+			// Binary is newer than database
 			fmt.Fprintf(os.Stderr, "%s\n", yellow("⚠️  Your binary appears NEWER than the database."))
 			fmt.Fprintf(os.Stderr, "%s\n\n", yellow("⚠️  The database will be upgraded automatically."))
 			// Update stored version to current
@@ -953,6 +1145,7 @@ var createCmd = &cobra.Command{
 		explicitID, _ := cmd.Flags().GetString("id")
 		externalRef, _ := cmd.Flags().GetString("external-ref")
 		deps, _ := cmd.Flags().GetStringSlice("deps")
+		forceCreate, _ := cmd.Flags().GetBool("force")
 
 		// Validate explicit ID format if provided (prefix-number)
 		if explicitID != "" {
@@ -966,6 +1159,30 @@ var createCmd = &cobra.Command{
 			if _, err := fmt.Sscanf(parts[1], "%d", new(int)); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: invalid ID format '%s' (numeric suffix required, e.g., 'bd-42')\n", explicitID)
 				os.Exit(1)
+			}
+			
+			// Validate prefix matches database prefix (unless --force is used)
+			if !forceCreate {
+				requestedPrefix := parts[0]
+				ctx := context.Background()
+				
+				// Get database prefix from config
+				var dbPrefix string
+				if daemonClient != nil {
+					// Using daemon - need to get config via RPC
+					// For now, skip validation in daemon mode (needs RPC enhancement)
+				} else {
+					// Direct mode - check config
+					dbPrefix, _ = store.GetConfig(ctx, "issue_prefix")
+				}
+				
+				if dbPrefix != "" && dbPrefix != requestedPrefix {
+					fmt.Fprintf(os.Stderr, "Error: prefix mismatch detected\n")
+					fmt.Fprintf(os.Stderr, "  This database uses prefix '%s-', but you specified '%s-'\n", dbPrefix, requestedPrefix)
+					fmt.Fprintf(os.Stderr, "  Did you mean to create '%s-%s'?\n", dbPrefix, parts[1])
+					fmt.Fprintf(os.Stderr, "  Use --force to create with mismatched prefix anyway\n")
+					os.Exit(1)
+				}
 			}
 		}
 
@@ -1109,6 +1326,7 @@ func init() {
 	createCmd.Flags().String("id", "", "Explicit issue ID (e.g., 'bd-42' for partitioning)")
 	createCmd.Flags().String("external-ref", "", "External reference (e.g., 'gh-9', 'jira-ABC')")
 	createCmd.Flags().StringSlice("deps", []string{}, "Dependencies in format 'type:id' or 'id' (e.g., 'discovered-from:bd-20,blocks:bd-15' or 'bd-20')")
+	createCmd.Flags().Bool("force", false, "Force creation even if prefix doesn't match database prefix")
 	rootCmd.AddCommand(createCmd)
 }
 
@@ -1129,9 +1347,15 @@ var showCmd = &cobra.Command{
 			if jsonOutput {
 				fmt.Println(string(resp.Data))
 			} else {
+				// Check if issue exists (daemon returns null for non-existent issues)
+				if string(resp.Data) == "null" || len(resp.Data) == 0 {
+					fmt.Fprintf(os.Stderr, "Issue %s not found\n", args[0])
+					os.Exit(1)
+				}
+
 				// Parse response and use existing formatting code
 				type IssueDetails struct {
-					*types.Issue
+					types.Issue
 					Labels       []string       `json:"labels,omitempty"`
 					Dependencies []*types.Issue `json:"dependencies,omitempty"`
 					Dependents   []*types.Issue `json:"dependents,omitempty"`
@@ -1141,7 +1365,7 @@ var showCmd = &cobra.Command{
 					fmt.Fprintf(os.Stderr, "Error parsing response: %v\n", err)
 					os.Exit(1)
 				}
-				issue := details.Issue
+				issue := &details.Issue
 
 				cyan := color.New(color.FgCyan).SprintFunc()
 				
