@@ -1,8 +1,12 @@
 """FastMCP server for beads issue tracker."""
 
 import asyncio
+import atexit
+import logging
 import os
+import signal
 import subprocess
+import sys
 from functools import wraps
 from typing import Callable, TypeVar
 
@@ -24,7 +28,18 @@ from beads_mcp.tools import (
     beads_update_issue,
 )
 
+# Setup logging for lifecycle events
+logger = logging.getLogger(__name__)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+
 T = TypeVar("T")
+
+# Global state for cleanup
+_daemon_clients: list = []
+_cleanup_done = False
 
 # Create FastMCP server
 mcp = FastMCP(
@@ -36,6 +51,49 @@ Check the resource beads://quickstart to see how.
 IMPORTANT: Call set_context with your workspace root before any write operations.
 """,
 )
+
+
+def cleanup() -> None:
+    """Clean up resources on exit.
+    
+    Closes daemon connections and removes temp files.
+    Safe to call multiple times.
+    """
+    global _cleanup_done
+    
+    if _cleanup_done:
+        return
+    
+    _cleanup_done = True
+    logger.info("Cleaning up beads-mcp resources...")
+    
+    # Close all daemon client connections
+    for client in _daemon_clients:
+        try:
+            if hasattr(client, 'close'):
+                client.close()
+                logger.debug(f"Closed daemon client: {client}")
+        except Exception as e:
+            logger.warning(f"Error closing daemon client: {e}")
+    
+    _daemon_clients.clear()
+    logger.info("Cleanup complete")
+
+
+def signal_handler(signum: int, frame) -> None:
+    """Handle termination signals gracefully."""
+    sig_name = signal.Signals(signum).name
+    logger.info(f"Received {sig_name}, shutting down gracefully...")
+    cleanup()
+    sys.exit(0)
+
+
+# Register cleanup handlers
+atexit.register(cleanup)
+signal.signal(signal.SIGTERM, signal_handler)
+signal.signal(signal.SIGINT, signal_handler)
+
+logger.info("beads-mcp server initialized with lifecycle management")
 
 
 def require_context(func: Callable[..., T]) -> Callable[..., T]:

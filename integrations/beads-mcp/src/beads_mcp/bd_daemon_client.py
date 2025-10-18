@@ -424,3 +424,14 @@ class BdDaemonClient(BdClientBase):
             return True
         except (DaemonNotRunningError, DaemonConnectionError, DaemonError):
             return False
+
+    def close(self) -> None:
+        """Close daemon client connections and cleanup resources.
+        
+        This is called during MCP server shutdown to ensure clean termination.
+        Since we use asyncio.open_unix_connection which closes per-request,
+        there's no persistent connection to close. This method is a no-op
+        but exists for API consistency.
+        """
+        # No persistent connections to close - each request opens/closes its own
+        pass

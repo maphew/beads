@@ -78,15 +78,29 @@ func (s *SQLiteStorage) GetReadyWork(ctx context.Context, filter types.WorkFilte
 
 		-- Step 3: Select ready issues (excluding all blocked)
 		SELECT i.id, i.title, i.description, i.design, i.acceptance_criteria, i.notes,
-		       i.status, i.priority, i.issue_type, i.assignee, i.estimated_minutes,
-		       i.created_at, i.updated_at, i.closed_at, i.external_ref
+		i.status, i.priority, i.issue_type, i.assignee, i.estimated_minutes,
+		i.created_at, i.updated_at, i.closed_at, i.external_ref
 		FROM issues i
 		WHERE %s
-		  AND NOT EXISTS (
-		    SELECT 1 FROM blocked_transitively WHERE issue_id = i.id
-		  )
-		ORDER BY i.priority ASC, i.created_at ASC
-		%s
+		AND NOT EXISTS (
+		SELECT 1 FROM blocked_transitively WHERE issue_id = i.id
+		)
+		ORDER BY 
+		  -- Hybrid sort: recent issues (48 hours) by priority, then oldest-first
+	  CASE 
+	    WHEN datetime(i.created_at) >= datetime('now', '-48 hours') THEN 0
+	    ELSE 1
+	  END ASC,
+	  CASE 
+	    WHEN datetime(i.created_at) >= datetime('now', '-48 hours') THEN i.priority
+	    ELSE NULL
+	  END ASC,
+	  CASE 
+	    WHEN datetime(i.created_at) < datetime('now', '-48 hours') THEN i.created_at
+	    ELSE NULL
+	  END ASC,
+	  i.created_at ASC
+	%s
 	`, whereSQL, limitSQL)
 
 	rows, err := s.db.QueryContext(ctx, query, args...)

@@ -24,7 +24,7 @@ type Storage interface {
 	GetDependents(ctx context.Context, issueID string) ([]*types.Issue, error)
 	GetDependencyRecords(ctx context.Context, issueID string) ([]*types.Dependency, error)
 	GetAllDependencyRecords(ctx context.Context) (map[string][]*types.Dependency, error)
-	GetDependencyTree(ctx context.Context, issueID string, maxDepth int) ([]*types.TreeNode, error)
+	GetDependencyTree(ctx context.Context, issueID string, maxDepth int, showAllPaths bool) ([]*types.TreeNode, error)
 	DetectCycles(ctx context.Context) ([][]*types.Issue, error)
 
 	// Labels

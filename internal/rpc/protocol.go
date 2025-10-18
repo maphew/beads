@@ -9,6 +9,7 @@ import (
 // Operation constants for all bd commands
 const (
 	OpPing           = "ping"
+	OpHealth         = "health"
 	OpCreate         = "create"
 	OpUpdate         = "update"
 	OpClose          = "close"
@@ -135,6 +136,18 @@ type LabelRemoveArgs struct {
 type PingResponse struct {
 	Message string `json:"message"`
 	Version string `json:"version"`
+}
+
+// HealthResponse is the response for a health check operation
+type HealthResponse struct {
+	Status          string  `json:"status"`           // "healthy", "degraded", "unhealthy"
+	Version         string  `json:"version"`
+	Uptime          float64 `json:"uptime_seconds"`
+	CacheSize       int     `json:"cache_size"`
+	CacheHits       int64   `json:"cache_hits"`
+	CacheMisses     int64   `json:"cache_misses"`
+	DBResponseTime  float64 `json:"db_response_ms"`
+	Error           string  `json:"error,omitempty"`
 }
 
 // BatchArgs represents arguments for batch operations

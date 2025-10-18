@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -820,5 +821,98 @@ func TestGetReadyWorkIncludesInProgress(t *testing.T) {
 	}
 	if readyIDs[issue5.ID] {
 		t.Errorf("Expected %s (closed) to NOT be ready", issue5.ID)
+	}
+}
+
+func TestExplainQueryPlanReadyWork(t *testing.T) {
+	store, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	blocker := &types.Issue{Title: "Blocker", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
+	epic1 := &types.Issue{Title: "Epic", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeEpic}
+	task1 := &types.Issue{Title: "Task", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
+	task2 := &types.Issue{Title: "Ready Task", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+
+	store.CreateIssue(ctx, blocker, "test-user")
+	store.CreateIssue(ctx, epic1, "test-user")
+	store.CreateIssue(ctx, task1, "test-user")
+	store.CreateIssue(ctx, task2, "test-user")
+
+	store.AddDependency(ctx, &types.Dependency{IssueID: epic1.ID, DependsOnID: blocker.ID, Type: types.DepBlocks}, "test-user")
+	store.AddDependency(ctx, &types.Dependency{IssueID: task1.ID, DependsOnID: epic1.ID, Type: types.DepParentChild}, "test-user")
+
+	query := `
+		EXPLAIN QUERY PLAN
+		WITH RECURSIVE
+		  blocked_directly AS (
+		    SELECT DISTINCT d.issue_id
+		    FROM dependencies d
+		    JOIN issues blocker ON d.depends_on_id = blocker.id
+		    WHERE d.type = 'blocks'
+		      AND blocker.status IN ('open', 'in_progress', 'blocked')
+		  ),
+		  blocked_transitively AS (
+		    SELECT issue_id, 0 as depth
+		    FROM blocked_directly
+		    UNION ALL
+		    SELECT d.issue_id, bt.depth + 1
+		    FROM blocked_transitively bt
+		    JOIN dependencies d ON d.depends_on_id = bt.issue_id
+		    WHERE d.type = 'parent-child'
+		      AND bt.depth < 50
+		  )
+		SELECT i.id, i.title, i.description, i.design, i.acceptance_criteria, i.notes,
+		       i.status, i.priority, i.issue_type, i.assignee, i.estimated_minutes,
+		       i.created_at, i.updated_at, i.closed_at, i.external_ref
+		FROM issues i
+		WHERE i.status IN ('open', 'in_progress')
+		  AND NOT EXISTS (
+		    SELECT 1 FROM blocked_transitively WHERE issue_id = i.id
+		  )
+		ORDER BY 
+		  CASE WHEN datetime(i.created_at) >= datetime('now', '-48 hours') THEN 0 ELSE 1 END ASC,
+		  CASE WHEN datetime(i.created_at) >= datetime('now', '-48 hours') THEN i.priority ELSE NULL END ASC,
+		  CASE WHEN datetime(i.created_at) < datetime('now', '-48 hours') THEN i.created_at ELSE NULL END ASC,
+		  i.created_at ASC
+	`
+
+	rows, err := store.db.QueryContext(ctx, query)
+	if err != nil {
+		t.Fatalf("EXPLAIN QUERY PLAN failed: %v", err)
+	}
+	defer rows.Close()
+
+	var planLines []string
+	for rows.Next() {
+		var id, parent, notused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
+			t.Fatalf("Failed to scan EXPLAIN output: %v", err)
+		}
+		planLines = append(planLines, detail)
+	}
+
+	if len(planLines) == 0 {
+		t.Fatal("No query plan output received")
+	}
+
+	t.Logf("Query plan:")
+	for i, line := range planLines {
+		t.Logf("  %d: %s", i, line)
+	}
+
+	foundTableScan := false
+	for _, line := range planLines {
+		if strings.Contains(line, "SCAN TABLE issues") || 
+		   strings.Contains(line, "SCAN TABLE dependencies") {
+			foundTableScan = true
+			t.Errorf("Found table scan in query plan: %s", line)
+		}
+	}
+
+	if foundTableScan {
+		t.Error("Query plan contains table scans - indexes may not be used efficiently")
 	}
 }

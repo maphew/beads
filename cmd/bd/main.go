@@ -8,10 +8,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -43,7 +45,6 @@ var (
 	needsFullExport   = false // Set to true when IDs change (renumber, rename-prefix)
 	flushMutex        sync.Mutex
 	flushTimer        *time.Timer
-	flushDebounce     = 5 * time.Second
 	storeMutex        sync.Mutex // Protects store access from background goroutine
 	storeActive       = false    // Tracks if store is available
 	flushFailureCount = 0        // Consecutive flush failures
@@ -189,6 +190,24 @@ var rootCmd = &cobra.Command{
 	},
 }
 
+// getDebounceDuration returns the auto-flush debounce duration
+// Configurable via BEADS_FLUSH_DEBOUNCE (e.g., "500ms", "10s")
+// Defaults to 5 seconds if not set or invalid
+func getDebounceDuration() time.Duration {
+	envVal := os.Getenv("BEADS_FLUSH_DEBOUNCE")
+	if envVal == "" {
+		return 5 * time.Second
+	}
+	
+	duration, err := time.ParseDuration(envVal)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: invalid BEADS_FLUSH_DEBOUNCE value '%s', using default 5s\n", envVal)
+		return 5 * time.Second
+	}
+	
+	return duration
+}
+
 // shouldAutoStartDaemon checks if daemon auto-start is enabled
 func shouldAutoStartDaemon() bool {
 	// Check environment variable (default: true)
@@ -198,6 +217,100 @@ func shouldAutoStartDaemon() bool {
 		return autoStart != "false" && autoStart != "0" && autoStart != "no" && autoStart != "off"
 	}
 	return true // Default to enabled
+}
+
+// shouldUseGlobalDaemon determines if global daemon should be preferred
+// based on environment variables, config, or heuristics (multi-repo detection)
+func shouldUseGlobalDaemon() bool {
+	// Check explicit environment variable first
+	if pref := os.Getenv("BEADS_PREFER_GLOBAL_DAEMON"); pref != "" {
+		return pref == "1" || strings.ToLower(pref) == "true"
+	}
+	
+	// Heuristic: detect multiple beads repositories
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return false
+	}
+	
+	// Count .beads directories under home
+	repoCount := 0
+	maxDepth := 5 // Don't scan too deep
+	
+	var countRepos func(string, int) error
+	countRepos = func(dir string, depth int) error {
+		if depth > maxDepth || repoCount > 3 {
+			return filepath.SkipDir
+		}
+		
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return nil // Skip directories we can't read
+		}
+		
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			
+			name := entry.Name()
+			
+			// Skip hidden dirs except .beads
+			if strings.HasPrefix(name, ".") && name != ".beads" {
+				continue
+			}
+			
+			// Skip common large directories
+			if name == "node_modules" || name == "vendor" || name == "target" || name == ".git" {
+				continue
+			}
+			
+			path := filepath.Join(dir, name)
+			
+			// Check if this is a .beads directory with a database
+			if name == ".beads" {
+				dbPath := filepath.Join(path, "db.sqlite")
+				if _, err := os.Stat(dbPath); err == nil {
+					repoCount++
+					if repoCount > 3 {
+						return filepath.SkipDir
+					}
+				}
+				continue
+			}
+			
+			// Recurse into subdirectories
+			if depth < maxDepth {
+				countRepos(path, depth+1)
+			}
+		}
+		return nil
+	}
+	
+	// Scan common project directories
+	projectDirs := []string{
+		filepath.Join(home, "src"),
+		filepath.Join(home, "projects"),
+		filepath.Join(home, "code"),
+		filepath.Join(home, "workspace"),
+		filepath.Join(home, "dev"),
+	}
+	
+	for _, dir := range projectDirs {
+		if _, err := os.Stat(dir); err == nil {
+			countRepos(dir, 0)
+			if repoCount > 3 {
+				break
+			}
+		}
+	}
+	
+	if os.Getenv("BD_DEBUG") != "" {
+		fmt.Fprintf(os.Stderr, "Debug: found %d beads repositories, prefer global: %v\n", repoCount, repoCount > 3)
+	}
+	
+	// Use global daemon if we found more than 3 repositories
+	return repoCount > 3
 }
 
 // tryAutoStartDaemon attempts to start the daemon in the background
@@ -211,15 +324,40 @@ func tryAutoStartDaemon(socketPath string) bool {
 		return false
 	}
 	
+	// Fast path: check if daemon is already healthy
+	client, err := rpc.TryConnect(socketPath)
+	if err == nil && client != nil {
+		client.Close()
+		if os.Getenv("BD_DEBUG") != "" {
+			fmt.Fprintf(os.Stderr, "Debug: daemon already running and healthy\n")
+		}
+		return true
+	}
+	
 	// Use lockfile to prevent multiple processes from starting daemon simultaneously
 	lockPath := socketPath + ".startlock"
 	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
-		// Someone else is already starting daemon, wait for socket readiness
+		// Someone else is starting daemon, wait for socket readiness
 		if os.Getenv("BD_DEBUG") != "" {
 			fmt.Fprintf(os.Stderr, "Debug: another process is starting daemon, waiting for readiness\n")
 		}
-		return waitForSocketReadiness(socketPath, 5*time.Second)
+		if waitForSocketReadiness(socketPath, 5*time.Second) {
+			return true
+		}
+		
+		// Socket still not ready - check if lock is stale
+		if lockPID, err := readPIDFromFile(lockPath); err == nil {
+			if !isPIDAlive(lockPID) {
+				if os.Getenv("BD_DEBUG") != "" {
+					fmt.Fprintf(os.Stderr, "Debug: lock is stale (PID %d dead), removing and retrying\n", lockPID)
+				}
+				os.Remove(lockPath)
+				// Retry once
+				return tryAutoStartDaemon(socketPath)
+			}
+		}
+		return false
 	}
 	
 	// Write our PID to lockfile
@@ -227,12 +365,54 @@ func tryAutoStartDaemon(socketPath string) bool {
 	lockFile.Close()
 	defer os.Remove(lockPath)
 	
+	// Under lock: check for stale socket and clean up if necessary
+	if _, err := os.Stat(socketPath); err == nil {
+		// Socket exists - check if it's truly stale by trying a quick connect
+		if canDialSocket(socketPath, 200*time.Millisecond) {
+			// Another daemon is running - it must have started between our check and lock acquisition
+			if os.Getenv("BD_DEBUG") != "" {
+				fmt.Fprintf(os.Stderr, "Debug: daemon started by another process\n")
+			}
+			return true
+		}
+		
+		// Socket exists but not responding - check if PID is alive before removing
+		pidFile := getPIDFileForSocket(socketPath)
+		if pidFile != "" {
+			if pid, err := readPIDFromFile(pidFile); err == nil && isPIDAlive(pid) {
+				// Daemon process is alive but socket not responding - wait for it
+				if os.Getenv("BD_DEBUG") != "" {
+					fmt.Fprintf(os.Stderr, "Debug: daemon PID %d alive, waiting for socket\n", pid)
+				}
+				return waitForSocketReadiness(socketPath, 5*time.Second)
+			}
+		}
+		
+		// Socket is stale (connect failed and PID dead/missing) - safe to remove
+		if os.Getenv("BD_DEBUG") != "" {
+			fmt.Fprintf(os.Stderr, "Debug: socket is stale, cleaning up\n")
+		}
+		os.Remove(socketPath)
+		if pidFile != "" {
+			os.Remove(pidFile)
+		}
+	}
+	
 	// Determine if we should start global or local daemon
+	// If requesting local socket, check if we should suggest global instead
 	isGlobal := false
 	if home, err := os.UserHomeDir(); err == nil {
 		globalSocket := filepath.Join(home, ".beads", "bd.sock")
 		if socketPath == globalSocket {
 			isGlobal = true
+		} else if shouldUseGlobalDaemon() {
+			// User has multiple repos, but requested local daemon
+			// Auto-start global daemon instead and log suggestion
+			isGlobal = true
+			socketPath = globalSocket
+			if os.Getenv("BD_DEBUG") != "" {
+				fmt.Fprintf(os.Stderr, "Debug: detected multiple repos, auto-starting global daemon\n")
+			}
 		}
 	}
 	
@@ -293,15 +473,61 @@ func tryAutoStartDaemon(socketPath string) bool {
 	return false
 }
 
+// getPIDFileForSocket returns the PID file path for a given socket path
+func getPIDFileForSocket(socketPath string) string {
+	// PID file is in same directory as socket, named daemon.pid
+	dir := filepath.Dir(socketPath)
+	return filepath.Join(dir, "daemon.pid")
+}
+
+// readPIDFromFile reads a PID from a file
+func readPIDFromFile(path string) (int, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, err
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		return 0, err
+	}
+	return pid, nil
+}
+
+// isPIDAlive checks if a process with the given PID is running
+func isPIDAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	err = process.Signal(syscall.Signal(0))
+	return err == nil
+}
+
+// canDialSocket attempts a quick dial to the socket with a timeout
+func canDialSocket(socketPath string, timeout time.Duration) bool {
+	conn, err := net.DialTimeout("unix", socketPath, timeout)
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
+}
+
 // waitForSocketReadiness waits for daemon socket to be ready by testing actual connections
 func waitForSocketReadiness(socketPath string, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		// Try actual connection, not just file existence
-		client, err := rpc.TryConnect(socketPath)
-		if err == nil && client != nil {
-			client.Close()
-			return true
+		// Use quick dial with short timeout per attempt
+		if canDialSocket(socketPath, 200*time.Millisecond) {
+			// Socket is dialable - do a final health check
+			client, err := rpc.TryConnect(socketPath)
+			if err == nil && client != nil {
+				client.Close()
+				return true
+			}
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -737,7 +963,7 @@ func markDirtyAndScheduleFlush() {
 	}
 
 	// Schedule new flush
-	flushTimer = time.AfterFunc(flushDebounce, func() {
+	flushTimer = time.AfterFunc(getDebounceDuration(), func() {
 		flushToJSONL()
 	})
 }
@@ -761,7 +987,7 @@ func markDirtyAndScheduleFullExport() {
 	}
 
 	// Schedule new flush
-	flushTimer = time.AfterFunc(flushDebounce, func() {
+	flushTimer = time.AfterFunc(getDebounceDuration(), func() {
 		flushToJSONL()
 	})
 }

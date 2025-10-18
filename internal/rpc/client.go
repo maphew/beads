@@ -17,7 +17,7 @@ type Client struct {
 }
 
 // TryConnect attempts to connect to the daemon socket
-// Returns nil if no daemon is running
+// Returns nil if no daemon is running or unhealthy
 func TryConnect(socketPath string) (*Client, error) {
 	if _, err := os.Stat(socketPath); os.IsNotExist(err) {
 		if os.Getenv("BD_DEBUG") != "" {
@@ -40,12 +40,26 @@ func TryConnect(socketPath string) (*Client, error) {
 		timeout:    30 * time.Second,
 	}
 
-	if err := client.Ping(); err != nil {
+	health, err := client.Health()
+	if err != nil {
 		if os.Getenv("BD_DEBUG") != "" {
-			fmt.Fprintf(os.Stderr, "Debug: ping failed: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Debug: health check failed: %v\n", err)
 		}
 		conn.Close()
 		return nil, nil
+	}
+
+	if health.Status == "unhealthy" {
+		if os.Getenv("BD_DEBUG") != "" {
+			fmt.Fprintf(os.Stderr, "Debug: daemon unhealthy: %s\n", health.Error)
+		}
+		conn.Close()
+		return nil, nil
+	}
+
+	if os.Getenv("BD_DEBUG") != "" {
+		fmt.Fprintf(os.Stderr, "Debug: connected to daemon (status: %s, uptime: %.1fs, cache: %d)\n",
+			health.Status, health.Uptime, health.CacheSize)
 	}
 
 	return client, nil
@@ -129,6 +143,21 @@ func (c *Client) Ping() error {
 	}
 
 	return nil
+}
+
+// Health sends a health check request to verify the daemon is healthy
+func (c *Client) Health() (*HealthResponse, error) {
+	resp, err := c.Execute(OpHealth, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var health HealthResponse
+	if err := json.Unmarshal(resp.Data, &health); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal health response: %w", err)
+	}
+
+	return &health, nil
 }
 
 // Create creates a new issue via the daemon

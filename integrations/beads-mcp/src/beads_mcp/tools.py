@@ -1,9 +1,12 @@
 """MCP tools for beads issue tracker."""
 
 import os
-from typing import Annotated
+from typing import Annotated, TYPE_CHECKING
 
 from .bd_client import create_bd_client, BdClientBase, BdError
+
+if TYPE_CHECKING:
+    from typing import List
 from .models import (
     AddDependencyParams,
     BlockedIssue,
@@ -25,10 +28,26 @@ from .models import (
 # Global client instance - initialized on first use
 _client: BdClientBase | None = None
 _version_checked: bool = False
+_client_registered: bool = False
 
 # Default constants
 DEFAULT_ISSUE_TYPE: IssueType = "task"
 DEFAULT_DEPENDENCY_TYPE: DependencyType = "blocks"
+
+
+def _register_client_for_cleanup(client: BdClientBase) -> None:
+    """Register client with server cleanup system.
+    
+    This ensures daemon connections are properly closed on server shutdown.
+    Import is deferred to avoid circular dependency.
+    """
+    try:
+        from . import server
+        if hasattr(server, '_daemon_clients'):
+            server._daemon_clients.append(client)
+    except (ImportError, AttributeError):
+        # Server module not available or cleanup not initialized - that's ok
+        pass
 
 
 async def _get_client() -> BdClientBase:
@@ -43,7 +62,7 @@ async def _get_client() -> BdClientBase:
     Raises:
         BdError: If bd is not installed or version is incompatible
     """
-    global _client, _version_checked
+    global _client, _version_checked, _client_registered
     if _client is None:
         # Check if daemon should be used (default: yes)
         use_daemon = os.environ.get("BEADS_USE_DAEMON", "1") == "1"
@@ -53,6 +72,11 @@ async def _get_client() -> BdClientBase:
             prefer_daemon=use_daemon,
             working_dir=workspace_root
         )
+        
+        # Register for cleanup on first creation
+        if not _client_registered:
+            _register_client_for_cleanup(_client)
+            _client_registered = True
 
     # Check version once per server lifetime (only for CLI client)
     if not _version_checked:

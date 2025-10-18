@@ -9,7 +9,9 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -18,24 +20,60 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
+// StorageCacheEntry holds a cached storage with metadata for eviction
+type StorageCacheEntry struct {
+	store      storage.Storage
+	lastAccess time.Time
+}
+
 // Server represents the RPC server that runs in the daemon
 type Server struct {
-	socketPath string
-	storage    storage.Storage // Default storage (for backward compat)
-	listener   net.Listener
-	mu         sync.RWMutex
-	shutdown   bool
-	// Per-request storage routing
-	storageCache map[string]storage.Storage // path -> storage
-	cacheMu      sync.RWMutex
+	socketPath   string
+	storage      storage.Storage // Default storage (for backward compat)
+	listener     net.Listener
+	mu           sync.RWMutex
+	shutdown     bool
+	shutdownChan chan struct{}
+	stopOnce     sync.Once
+	// Per-request storage routing with eviction support
+	storageCache   map[string]*StorageCacheEntry // repoRoot -> entry
+	cacheMu        sync.RWMutex
+	maxCacheSize   int
+	cacheTTL       time.Duration
+	cleanupTicker  *time.Ticker
+	// Health and metrics
+	startTime    time.Time
+	cacheHits    int64
+	cacheMisses  int64
 }
 
 // NewServer creates a new RPC server
 func NewServer(socketPath string, store storage.Storage) *Server {
+	// Parse config from env vars
+	maxCacheSize := 50 // default
+	if env := os.Getenv("BEADS_DAEMON_MAX_CACHE_SIZE"); env != "" {
+		// Parse as integer
+		var size int
+		if _, err := fmt.Sscanf(env, "%d", &size); err == nil && size > 0 {
+			maxCacheSize = size
+		}
+	}
+	
+	cacheTTL := 30 * time.Minute // default
+	if env := os.Getenv("BEADS_DAEMON_CACHE_TTL"); env != "" {
+		if ttl, err := time.ParseDuration(env); err == nil && ttl > 0 {
+			cacheTTL = ttl
+		}
+	}
+
 	return &Server{
 		socketPath:   socketPath,
 		storage:      store,
-		storageCache: make(map[string]storage.Storage),
+		storageCache: make(map[string]*StorageCacheEntry),
+		maxCacheSize: maxCacheSize,
+		cacheTTL:     cacheTTL,
+		shutdownChan: make(chan struct{}),
+		startTime:    time.Now(),
 	}
 }
 
@@ -62,6 +100,7 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 
 	go s.handleSignals()
+	go s.runCleanupLoop()
 
 	for {
 		conn, err := s.listener.Accept()
@@ -81,34 +120,68 @@ func (s *Server) Start(ctx context.Context) error {
 
 // Stop stops the RPC server and cleans up resources
 func (s *Server) Stop() error {
-	s.mu.Lock()
-	s.shutdown = true
-	s.mu.Unlock()
+	var err error
+	s.stopOnce.Do(func() {
+		s.mu.Lock()
+		s.shutdown = true
+		s.mu.Unlock()
 
-	if s.listener != nil {
-		if err := s.listener.Close(); err != nil {
-			return fmt.Errorf("failed to close listener: %w", err)
+		// Signal cleanup goroutine to stop
+		close(s.shutdownChan)
+
+		// Close all cached storage connections outside lock
+		s.cacheMu.Lock()
+		stores := make([]storage.Storage, 0, len(s.storageCache))
+		for _, entry := range s.storageCache {
+			stores = append(stores, entry.store)
 		}
-	}
+		s.storageCache = make(map[string]*StorageCacheEntry)
+		s.cacheMu.Unlock()
 
-	if err := s.removeOldSocket(); err != nil {
-		return fmt.Errorf("failed to remove socket: %w", err)
-	}
+		// Close stores without holding lock
+		for _, store := range stores {
+			if closeErr := store.Close(); closeErr != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to close storage: %v\n", closeErr)
+			}
+		}
 
-	return nil
+		if s.listener != nil {
+			if closeErr := s.listener.Close(); closeErr != nil {
+				err = fmt.Errorf("failed to close listener: %w", closeErr)
+				return
+			}
+		}
+
+		if removeErr := s.removeOldSocket(); removeErr != nil {
+			err = fmt.Errorf("failed to remove socket: %w", removeErr)
+		}
+	})
+	return err
 }
 
 func (s *Server) ensureSocketDir() error {
 	dir := filepath.Dir(s.socketPath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
 	}
+	// Best-effort tighten permissions if directory already existed
+	_ = os.Chmod(dir, 0700)
 	return nil
 }
 
 func (s *Server) removeOldSocket() error {
 	if _, err := os.Stat(s.socketPath); err == nil {
-		if err := os.Remove(s.socketPath); err != nil {
+		// Socket exists - check if it's stale before removing
+		// Try to connect to see if a daemon is actually using it
+		conn, err := net.DialTimeout("unix", s.socketPath, 500*time.Millisecond)
+		if err == nil {
+			// Socket is active - another daemon is running
+			conn.Close()
+			return fmt.Errorf("socket %s is in use by another daemon", s.socketPath)
+		}
+		
+		// Socket is stale - safe to remove
+		if err := os.Remove(s.socketPath); err != nil && !os.IsNotExist(err) {
 			return err
 		}
 	}
@@ -120,6 +193,72 @@ func (s *Server) handleSignals() {
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	<-sigChan
 	s.Stop()
+}
+
+// runCleanupLoop periodically evicts stale storage connections
+func (s *Server) runCleanupLoop() {
+	s.cleanupTicker = time.NewTicker(5 * time.Minute)
+	defer s.cleanupTicker.Stop()
+
+	for {
+		select {
+		case <-s.cleanupTicker.C:
+			s.evictStaleStorage()
+		case <-s.shutdownChan:
+			return
+		}
+	}
+}
+
+// evictStaleStorage removes idle connections and enforces cache size limits
+func (s *Server) evictStaleStorage() {
+	now := time.Now()
+	toClose := []storage.Storage{}
+	
+	s.cacheMu.Lock()
+
+	// First pass: evict TTL-expired entries
+	for path, entry := range s.storageCache {
+		if now.Sub(entry.lastAccess) > s.cacheTTL {
+			toClose = append(toClose, entry.store)
+			delete(s.storageCache, path)
+		}
+	}
+
+	// Second pass: enforce max cache size with LRU eviction
+	if len(s.storageCache) > s.maxCacheSize {
+		// Build sorted list of entries by lastAccess
+		type cacheItem struct {
+			path  string
+			entry *StorageCacheEntry
+		}
+		items := make([]cacheItem, 0, len(s.storageCache))
+		for path, entry := range s.storageCache {
+			items = append(items, cacheItem{path, entry})
+		}
+
+		// Sort by lastAccess (oldest first) with sort.Slice
+		sort.Slice(items, func(i, j int) bool {
+			return items[i].entry.lastAccess.Before(items[j].entry.lastAccess)
+		})
+
+		// Evict oldest entries until we're under the limit
+		numToEvict := len(s.storageCache) - s.maxCacheSize
+		for i := 0; i < numToEvict && i < len(items); i++ {
+			toClose = append(toClose, items[i].entry.store)
+			delete(s.storageCache, items[i].path)
+		}
+	}
+
+	// Unlock before closing to avoid holding lock during Close
+	s.cacheMu.Unlock()
+
+	// Close connections synchronously
+	for _, store := range toClose {
+		if err := store.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to close evicted storage: %v\n", err)
+		}
+	}
 }
 
 func (s *Server) handleConnection(conn net.Conn) {
@@ -153,6 +292,8 @@ func (s *Server) handleRequest(req *Request) Response {
 	switch req.Operation {
 	case OpPing:
 		return s.handlePing(req)
+	case OpHealth:
+		return s.handleHealth(req)
 	case OpCreate:
 		return s.handleCreate(req)
 	case OpUpdate:
@@ -255,6 +396,66 @@ func (s *Server) handlePing(_ *Request) Response {
 	return Response{
 		Success: true,
 		Data:    data,
+	}
+}
+
+func (s *Server) handleHealth(req *Request) Response {
+	start := time.Now()
+	
+	store, err := s.getStorageForRequest(req)
+	if err != nil {
+		data, _ := json.Marshal(HealthResponse{
+			Status:  "unhealthy",
+			Version: "0.9.8",
+			Uptime:  time.Since(s.startTime).Seconds(),
+			Error:   fmt.Sprintf("storage error: %v", err),
+		})
+		return Response{
+			Success: false,
+			Data:    data,
+			Error:   fmt.Sprintf("storage error: %v", err),
+		}
+	}
+
+	healthCtx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	status := "healthy"
+	dbError := ""
+	
+	_, pingErr := store.GetStatistics(healthCtx)
+	dbResponseMs := time.Since(start).Seconds() * 1000
+	
+	if pingErr != nil {
+		status = "unhealthy"
+		dbError = pingErr.Error()
+	} else if dbResponseMs > 500 {
+		status = "degraded"
+	}
+
+	s.cacheMu.RLock()
+	cacheSize := len(s.storageCache)
+	s.cacheMu.RUnlock()
+
+	health := HealthResponse{
+		Status:         status,
+		Version:        "0.9.8",
+		Uptime:         time.Since(s.startTime).Seconds(),
+		CacheSize:      cacheSize,
+		CacheHits:      atomic.LoadInt64(&s.cacheHits),
+		CacheMisses:    atomic.LoadInt64(&s.cacheMisses),
+		DBResponseTime: dbResponseMs,
+	}
+	
+	if dbError != "" {
+		health.Error = dbError
+	}
+
+	data, _ := json.Marshal(health)
+	return Response{
+		Success: status != "unhealthy",
+		Data:    data,
+		Error:   dbError,
 	}
 }
 
@@ -711,19 +912,28 @@ func (s *Server) getStorageForRequest(req *Request) (storage.Storage, error) {
 		return s.storage, nil
 	}
 
-	// Check cache first
-	s.cacheMu.RLock()
-	cached, ok := s.storageCache[req.Cwd]
-	s.cacheMu.RUnlock()
-	if ok {
-		return cached, nil
-	}
-
-	// Find database for this cwd
+	// Find database for this cwd (to get the canonical repo root)
 	dbPath := s.findDatabaseForCwd(req.Cwd)
 	if dbPath == "" {
 		return nil, fmt.Errorf("no .beads database found for path: %s", req.Cwd)
 	}
+
+	// Canonicalize key to repo root (parent of .beads directory)
+	beadsDir := filepath.Dir(dbPath)
+	repoRoot := filepath.Dir(beadsDir)
+
+	// Check cache first with write lock (to avoid race on lastAccess update)
+	s.cacheMu.Lock()
+	defer s.cacheMu.Unlock()
+	
+	if entry, ok := s.storageCache[repoRoot]; ok {
+		// Update last access time (safe under Lock)
+		entry.lastAccess = time.Now()
+		atomic.AddInt64(&s.cacheHits, 1)
+		return entry.store, nil
+	}
+	
+	atomic.AddInt64(&s.cacheMisses, 1)
 
 	// Open storage
 	store, err := sqlite.New(dbPath)
@@ -731,10 +941,22 @@ func (s *Server) getStorageForRequest(req *Request) (storage.Storage, error) {
 		return nil, fmt.Errorf("failed to open database at %s: %w", dbPath, err)
 	}
 
-	// Cache it
-	s.cacheMu.Lock()
-	s.storageCache[req.Cwd] = store
+	// Cache it with current timestamp
+	s.storageCache[repoRoot] = &StorageCacheEntry{
+		store:      store,
+		lastAccess: time.Now(),
+	}
+
+	// Enforce LRU immediately to prevent FD spikes between cleanup ticks
+	needEvict := len(s.storageCache) > s.maxCacheSize
 	s.cacheMu.Unlock()
+	
+	if needEvict {
+		s.evictStaleStorage()
+	}
+
+	// Re-acquire lock for defer
+	s.cacheMu.Lock()
 
 	return store, nil
 }
@@ -784,9 +1006,9 @@ func (s *Server) handleReposList(_ *Request) Response {
 	defer s.cacheMu.RUnlock()
 
 	repos := make([]RepoInfo, 0, len(s.storageCache))
-	for path, store := range s.storageCache {
+	for path, entry := range s.storageCache {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		stats, err := store.GetStatistics(ctx)
+		stats, err := entry.store.GetStatistics(ctx)
 		cancel()
 		if err != nil {
 			continue
@@ -795,7 +1017,7 @@ func (s *Server) handleReposList(_ *Request) Response {
 		// Extract prefix from a sample issue
 		filter := types.IssueFilter{Limit: 1}
 		ctx2, cancel2 := context.WithTimeout(context.Background(), 1*time.Second)
-		issues, err := store.SearchIssues(ctx2, "", filter)
+		issues, err := entry.store.SearchIssues(ctx2, "", filter)
 		cancel2()
 		prefix := ""
 		if err == nil && len(issues) > 0 && len(issues[0].ID) > 0 {
@@ -813,7 +1035,7 @@ func (s *Server) handleReposList(_ *Request) Response {
 			Path:       path,
 			Prefix:     prefix,
 			IssueCount: stats.TotalIssues,
-			LastAccess: "active",
+			LastAccess: entry.lastAccess.Format(time.RFC3339),
 		})
 	}
 
@@ -839,7 +1061,7 @@ func (s *Server) handleReposReady(req *Request) Response {
 
 	if args.GroupByRepo {
 		result := make([]RepoReadyWork, 0, len(s.storageCache))
-		for path, store := range s.storageCache {
+		for path, entry := range s.storageCache {
 			filter := types.WorkFilter{
 				Status: types.StatusOpen,
 				Limit:  args.Limit,
@@ -852,7 +1074,7 @@ func (s *Server) handleReposReady(req *Request) Response {
 			}
 
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			issues, err := store.GetReadyWork(ctx, filter)
+			issues, err := entry.store.GetReadyWork(ctx, filter)
 			cancel()
 			if err != nil || len(issues) == 0 {
 				continue
@@ -873,7 +1095,7 @@ func (s *Server) handleReposReady(req *Request) Response {
 
 	// Flat list of all ready issues across all repos
 	allIssues := make([]ReposReadyIssue, 0)
-	for path, store := range s.storageCache {
+	for path, entry := range s.storageCache {
 		filter := types.WorkFilter{
 			Status: types.StatusOpen,
 			Limit:  args.Limit,
@@ -886,7 +1108,7 @@ func (s *Server) handleReposReady(req *Request) Response {
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		issues, err := store.GetReadyWork(ctx, filter)
+		issues, err := entry.store.GetReadyWork(ctx, filter)
 		cancel()
 		if err != nil {
 			continue
@@ -916,9 +1138,9 @@ func (s *Server) handleReposStats(_ *Request) Response {
 	perRepo := make(map[string]types.Statistics)
 	errors := make(map[string]string)
 
-	for path, store := range s.storageCache {
+	for path, entry := range s.storageCache {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		stats, err := store.GetStatistics(ctx)
+		stats, err := entry.store.GetStatistics(ctx)
 		cancel()
 		if err != nil {
 			errors[path] = err.Error()
@@ -957,10 +1179,10 @@ func (s *Server) handleReposClearCache(_ *Request) Response {
 	// to avoid holding lock during potentially slow Close() operations
 	s.cacheMu.Lock()
 	stores := make([]storage.Storage, 0, len(s.storageCache))
-	for _, store := range s.storageCache {
-		stores = append(stores, store)
+	for _, entry := range s.storageCache {
+		stores = append(stores, entry.store)
 	}
-	s.storageCache = make(map[string]storage.Storage)
+	s.storageCache = make(map[string]*StorageCacheEntry)
 	s.cacheMu.Unlock()
 
 	// Close all storage connections without holding lock

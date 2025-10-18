@@ -450,10 +450,11 @@ func (s *SQLiteStorage) GetAllDependencyRecords(ctx context.Context) (map[string
 	return depsMap, nil
 }
 
-// GetDependencyTree returns the full dependency tree with deduplication
-// When multiple paths lead to the same node (diamond dependencies), the node
-// appears only once at its shallowest depth in the tree.
-func (s *SQLiteStorage) GetDependencyTree(ctx context.Context, issueID string, maxDepth int) ([]*types.TreeNode, error) {
+// GetDependencyTree returns the full dependency tree with optional deduplication
+// When showAllPaths is false (default), nodes appearing via multiple paths (diamond dependencies)
+// appear only once at their shallowest depth in the tree.
+// When showAllPaths is true, all paths are shown with duplicate nodes at different depths.
+func (s *SQLiteStorage) GetDependencyTree(ctx context.Context, issueID string, maxDepth int, showAllPaths bool) ([]*types.TreeNode, error) {
 	if maxDepth <= 0 {
 		maxDepth = 50
 	}
@@ -542,17 +543,20 @@ func (s *SQLiteStorage) GetDependencyTree(ctx context.Context, issueID string, m
 
 		node.Truncated = node.Depth == maxDepth
 
-		// Deduplicate: only include a node the first time we see it (shallowest depth)
-		// Since we ORDER BY depth, priority, id - the first occurrence is at minimum depth
-		if prevDepth, exists := seen[node.ID]; exists {
-			// We've seen this node before at depth prevDepth
-			// Skip this duplicate occurrence
-			_ = prevDepth // Avoid unused variable warning
-			continue
-		}
+		// Deduplicate only if showAllPaths is false
+		if !showAllPaths {
+			// Only include a node the first time we see it (shallowest depth)
+			// Since we ORDER BY depth, priority, id - the first occurrence is at minimum depth
+			if prevDepth, exists := seen[node.ID]; exists {
+				// We've seen this node before at depth prevDepth
+				// Skip this duplicate occurrence
+				_ = prevDepth // Avoid unused variable warning
+				continue
+			}
 
-		// Mark this node as seen at this depth
-		seen[node.ID] = node.Depth
+			// Mark this node as seen at this depth
+			seen[node.ID] = node.Depth
+		}
 		nodes = append(nodes, &node)
 	}
 

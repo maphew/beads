@@ -206,7 +206,7 @@ func TestGetDependencyTree(t *testing.T) {
 	store.AddDependency(ctx, &types.Dependency{IssueID: issue3.ID, DependsOnID: issue2.ID, Type: types.DepBlocks}, "test-user")
 
 	// Get tree starting from issue3
-	tree, err := store.GetDependencyTree(ctx, issue3.ID, 10)
+	tree, err := store.GetDependencyTree(ctx, issue3.ID, 10, false)
 	if err != nil {
 		t.Fatalf("GetDependencyTree failed: %v", err)
 	}

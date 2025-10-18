@@ -177,8 +177,9 @@ var depTreeCmd = &cobra.Command{
 			defer store.Close()
 		}
 
+		showAllPaths, _ := cmd.Flags().GetBool("show-all-paths")
 		ctx := context.Background()
-		tree, err := store.GetDependencyTree(ctx, args[0], 50)
+		tree, err := store.GetDependencyTree(ctx, args[0], 50, showAllPaths)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
@@ -274,6 +275,7 @@ var depCyclesCmd = &cobra.Command{
 
 func init() {
 	depAddCmd.Flags().StringP("type", "t", "blocks", "Dependency type (blocks|related|parent-child|discovered-from)")
+	depTreeCmd.Flags().Bool("show-all-paths", false, "Show all paths to nodes (no deduplication for diamond dependencies)")
 	depCmd.AddCommand(depAddCmd)
 	depCmd.AddCommand(depRemoveCmd)
 	depCmd.AddCommand(depTreeCmd)
