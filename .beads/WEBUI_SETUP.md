@@ -103,58 +103,6 @@ bd ready
 bd ready --db .beads/issues.db
 ```
 
-## Quick Reference
-
-### Common Web-UI Commands
-
-```bash
-# Check ready work in web-ui
-bd ready --db .beads/webui.db --json
-
-# Create a new web-ui feature
-bd create "Feature description" -t feature -p 1 -d "Details" --db .beads/webui.db --json
-
-# Create a web-ui bug
-bd create "Bug description" -t bug -p 1 --db .beads/webui.db --json
-
-# Claim a web-ui task
-bd update webui-5 --status in_progress --db .beads/webui.db --json
-
-# Add a label to web-ui issue
-bd label add webui-3 ui-component --db .beads/webui.db --json
-
-# Link web-ui issue to upstream issue
-bd dep add webui-5 bd-105 --type related --db .beads/webui.db --json
-
-# Close a web-ui task
-bd close webui-2 --reason "Completed" --db .beads/webui.db --json
-
-# Show web-ui dependency tree
-bd dep tree webui-1 --db .beads/webui.db
-
-# List all web-ui issues
-bd list --db .beads/webui.db --json
-
-# Export web-ui issues
-bd export --db .beads/webui.db -o .beads/webui.jsonl
-```
-
-### Comparing Databases
-
-```bash
-# List main project issues
-bd list --db .beads/issues.db
-
-# List web-ui issues
-bd list --db .beads/webui.db
-
-# Show stats for main project
-bd stats --db .beads/issues.db
-
-# Show stats for web-ui
-bd stats --db .beads/webui.db
-```
-
 ## Initialization
 
 If the web-ui database doesn't exist, initialize it:
@@ -223,4 +171,4 @@ bd create "Task" -p 1 --db .beads/webui.db
 
 - Read [`UPSTREAM_SYNC.md`](.beads/UPSTREAM_SYNC.md) to learn how to track and import main project changes
 - Read [`WEBUI_WORKFLOW.md`](.beads/WEBUI_WORKFLOW.md) for development workflow patterns
-- Check [`AGENTS.md`](../AGENTS.md) for general beads issue tracking patterns
+- Check [`AGENTS.md`](../AGENTS.md) for general beads workflow and commands

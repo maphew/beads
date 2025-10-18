@@ -188,24 +188,6 @@ Quick reference:
 bd import -i upstream-issues.jsonl --db .beads/webui.db --json
 ```
 
-## Issue Types and Priorities
-
-### Issue Types
-
-- `bug` - Something broken in web-ui
-- `feature` - New web-ui functionality
-- `task` - Work item (tests, docs, refactoring)
-- `epic` - Large feature composed of multiple web-ui issues
-- `chore` - Maintenance work (dependencies, tooling)
-
-### Priorities
-
-- `0` - Critical (security, data loss, broken builds)
-- `1` - High (major features, important bugs)
-- `2` - Medium (nice-to-have features, minor bugs)
-- `3` - Low (polish, optimization)
-- `4` - Backlog (future ideas)
-
 ## Troubleshooting
 
 ### "Database not found" error
@@ -265,7 +247,7 @@ bd create "New task" -p 1 --db .beads/webui.db --json
 - [`.beads/WEBUI_SETUP.md`](.beads/WEBUI_SETUP.md) - Setup and configuration guide
 - [`.beads/UPSTREAM_SYNC.md`](.beads/UPSTREAM_SYNC.md) - Upstream tracking workflow
 - [`.beads/WEBUI_WORKFLOW.md`](.beads/WEBUI_WORKFLOW.md) - Development workflow patterns
-- [`AGENTS.md`](../AGENTS.md) - Main beads agent instructions (upstream project)
+- [`AGENTS.md`](../AGENTS.md) - General beads workflow and commands (upstream project)
 
 ## Questions?
 

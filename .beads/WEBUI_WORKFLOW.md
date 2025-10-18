@@ -268,4 +268,4 @@ See [`.beads/UPSTREAM_SYNC.md`](.beads/UPSTREAM_SYNC.md) for detailed instructio
 
 - [`.beads/WEBUI_SETUP.md`](.beads/WEBUI_SETUP.md) - Setup and configuration
 - [`.beads/UPSTREAM_SYNC.md`](.beads/UPSTREAM_SYNC.md) - Upstream tracking workflow
-- [`AGENTS.md`](../AGENTS.md) - General beads workflow and commands
+- [`AGENTS.md`](../AGENTS.md) - General beads workflow and commands (upstream project)
