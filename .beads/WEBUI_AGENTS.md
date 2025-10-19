@@ -5,17 +5,23 @@ This document covers **only the differences** from the main beads project ([`AGE
 ## Key Differences from Upstream
 
 ### Database & Prefix
-- **Database**: `.beads/webui.db` (vs `.beads/issues.db` upstream)
+- **Database**: `.beads/webui.db` (vs `.beads/bd.db` upstream)
 - **Issue prefix**: `webui-` (vs `bd-` upstream)
 - **Environment variable**: Set `BEADS_DB=.beads/webui.db` to avoid `--db` flags
 
-### All Commands Require Database Specification
+### CRITICAL: All Commands Require Explicit Database Specification
 ```bash
-# Always specify --db or set BEADS_DB=.beads/webui.db
-bd ready --db .beads/webui.db --json
-bd create "New task" -p 1 --db .beads/webui.db --json
-bd update webui-3 --status in_progress --db .beads/webui.db --json
+# ❌ WRONG: Will use main project database
+bd ready --json
+
+# ✅ CORRECT: Always specify --db or set BEADS_DB
+export BEADS_DB=.beads/webui.db
+bd ready --json
+bd create "New task" -p 1 --json
+bd update webui-3 --status in_progress --json
 ```
+
+**Why this matters:** The global daemon does not automatically route requests based on working directory. You MUST use `--db` flags or `BEADS_DB` environment variable to ensure operations affect the correct database.
 
 ### Upstream Issue Integration
 - Import upstream issues with `bd import -i upstream-issues.jsonl --db .beads/webui.db`

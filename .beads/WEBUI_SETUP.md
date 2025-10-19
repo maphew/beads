@@ -159,9 +159,9 @@ bd create "Task" -p 1 --db .beads/webui.db
 
 ## Best Practices
 
-1. **Always specify --db flag** when working with web-ui issues to avoid confusion
-2. **Use environment variables** for your primary database to reduce typing
-3. **Keep databases separate** - don't mix web-ui and main project issues
+1. **CRITICAL: Always specify database** - The global daemon does NOT automatically route based on working directory. Always use `--db` flag or `BEADS_DB` environment variable.
+2. **Use environment variables** for your primary database to reduce typing: `export BEADS_DB=.beads/webui.db`
+3. **Keep databases separate** - never mix web-ui and main project issues
 4. **Export regularly** - web-ui issues auto-sync to `.beads/webui.jsonl`
 5. **Verify database** before running commands - check `echo $BEADS_DB` or use `--db` explicitly
 6. **Use labels** to categorize web-ui work (e.g., `ui`, `backend`, `integration`)
