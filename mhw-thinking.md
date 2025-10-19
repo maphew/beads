@@ -63,3 +63,8 @@ To see:
 ```
 git diff --unified=20 .beads/issues.jsonl | head -100
 ```
+
+...snip...
+
+
+**Amp:** For future sessions, you can simply say: "If you discover any significant issues or incidents, create a beads issue documenting the problem, root cause, and resolution - just like we did with the database contamination issue (bd-156, 2025-10-18)."
