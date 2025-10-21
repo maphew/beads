@@ -92,3 +92,8 @@ context:
 .../Orchestrator
 .../Model Qwen3 Coder 480B A35B
 ...work happens...
+
+-----
+06:50 2025-10-21
+
+Qwen finished making stand-alone webui ($3.30), but created it as git repo inside a git repo. I'm not sure if that's the right thing to do or not. I was thinking I'd continue with webui project as long lived fork, but am now questioning the wisdom of that. Maybe better to make a complete break, and only use the public beads api. Yeah, let's do that.
