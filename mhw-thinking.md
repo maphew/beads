@@ -12,7 +12,6 @@ Does this make sense to you?
 work happened, commit 6111a4a66172e55fc6e2e8f5be702169696488d7 to b3231601d25acf5f1081fb0841c167de4fd08fb1
 
 -----
-
 11:35 2025-10-18
 
 Regular usage:
@@ -50,7 +49,6 @@ proved that asking Grok to do the same job twice can yield a better result!
 
 
 ----
-
 22:36 2025-10-18
 
 **Amp code**
@@ -68,3 +66,29 @@ git diff --unified=20 .beads/issues.jsonl | head -100
 
 
 **Amp:** For future sessions, you can simply say: "If you discover any significant issues or incidents, create a beads issue documenting the problem, root cause, and resolution - just like we did with the database contamination issue (bd-156, 2025-10-18)."
+
+-----
+13:30 2025-10-19
+
+**prompt:**
+we need split web-ui into an independent program from bd. Upstream wants bd to stay focussed on CLI and agents as primary users.
+currently the prototype is a branch from the main repo (web-ui).
+package the prototype into it's own isolated program, that we can use as initial checkin to a new repo.
+
+**enhanced:**
+We need to split the web-ui into an independent program separate from bd. Upstream requirements mandate that bd remains focused on CLI and agents as primary users. Currently, the web-ui prototype exists as a branch from the main repository. Your task is to package this prototype into a completely isolated standalone program that can serve as the initial commit for a new dedicated repository, ensuring all dependencies, configurations, and build processes are self-contained and properly decoupled from the original bd codebase.
+
+**enhanced 2x**
+We need to split the web-ui into an independent program separate from bd. Upstream requirements mandate that bd remains focused on CLI and agents as primary users. Currently, the web-ui prototype exists as a branch from the main repository. Your task is to package this prototype into a completely isolated standalone program that can serve as the initial commit for a new dedicated repository, ensuring all dependencies, configurations, and build processes are self-contained and properly decoupled from the original bd codebase.
+
+Verify that the new repository can be cloned, built, and run independently without requiring access to the original bd repository or its dependencies. Ensure all documentation is updated to reflect the standalone nature of the application, including setup instructions, development guidelines, and contribution workflows. The final deliverable should be a clean repository structure ready for immediate publication with a complete commit history starting from this initial standalone version.
+
+context:
+@/.beads/WEBUI_SETUP.md 
+@/.beads/WEBUI_AGENTS.md 
+@/.beads/WEBUI_WORKFLOW.md 
+@/.beads/UPSTREAM_SYNC.md
+
+.../Orchestrator
+.../Model Qwen3 Coder 480B A35B
+...work happens...

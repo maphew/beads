@@ -22,6 +22,7 @@ type (
 	Status     = types.Status
 	IssueType  = types.IssueType
 	WorkFilter = types.WorkFilter
+	IssueFilter = types.IssueFilter
 )
 
 // Status constants
