@@ -60,9 +60,10 @@ var showCmd = &cobra.Command{
 				if jsonOutput {
 					type IssueDetails struct {
 						types.Issue
-						Labels       []string       `json:"labels,omitempty"`
-						Dependencies []*types.Issue `json:"dependencies,omitempty"`
-						Dependents   []*types.Issue `json:"dependents,omitempty"`
+						Labels       []string         `json:"labels,omitempty"`
+						Dependencies []*types.Issue   `json:"dependencies,omitempty"`
+						Dependents   []*types.Issue   `json:"dependents,omitempty"`
+						Comments     []*types.Comment `json:"comments,omitempty"`
 					}
 					var details IssueDetails
 					if err := json.Unmarshal(resp.Data, &details); err == nil {
@@ -81,9 +82,10 @@ var showCmd = &cobra.Command{
 					// Parse response and use existing formatting code
 					type IssueDetails struct {
 						types.Issue
-						Labels       []string       `json:"labels,omitempty"`
-						Dependencies []*types.Issue `json:"dependencies,omitempty"`
-						Dependents   []*types.Issue `json:"dependents,omitempty"`
+						Labels       []string         `json:"labels,omitempty"`
+						Dependencies []*types.Issue   `json:"dependencies,omitempty"`
+						Dependents   []*types.Issue   `json:"dependents,omitempty"`
+						Comments     []*types.Comment `json:"comments,omitempty"`
 					}
 					var details IssueDetails
 					if err := json.Unmarshal(resp.Data, &details); err != nil {
@@ -170,6 +172,13 @@ var showCmd = &cobra.Command{
 						fmt.Printf("\nBlocks (%d):\n", len(details.Dependents))
 						for _, dep := range details.Dependents {
 							fmt.Printf("  ← %s: %s [P%d]\n", dep.ID, dep.Title, dep.Priority)
+						}
+					}
+
+					if len(details.Comments) > 0 {
+						fmt.Printf("\nComments (%d):\n", len(details.Comments))
+						for _, comment := range details.Comments {
+							fmt.Printf("  [%s at %s]\n  %s\n\n", comment.Author, comment.CreatedAt.Format("2006-01-02 15:04"), comment.Text)
 						}
 					}
 

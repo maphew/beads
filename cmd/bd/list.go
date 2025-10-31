@@ -130,7 +130,11 @@ var listCmd = &cobra.Command{
 			} else {
 				fmt.Printf("\nFound %d issues:\n\n", len(issues))
 				for _, issue := range issues {
-					fmt.Printf("%s [P%d] [%s] %s\n", issue.ID, issue.Priority, issue.IssueType, issue.Status)
+					commentIndicator := ""
+					if issue.CommentCount > 0 {
+						commentIndicator = fmt.Sprintf(" 💬 %d", issue.CommentCount)
+					}
+					fmt.Printf("%s [P%d] [%s] %s%s\n", issue.ID, issue.Priority, issue.IssueType, issue.Status, commentIndicator)
 					fmt.Printf("  %s\n", issue.Title)
 					if issue.Assignee != "" {
 						fmt.Printf("  Assignee: %s\n", issue.Assignee)
@@ -174,9 +178,11 @@ var listCmd = &cobra.Command{
 		}
 
 		if jsonOutput {
-			// Populate labels for JSON output
+			// Populate labels and comment counts for JSON output
 			for _, issue := range issues {
 				issue.Labels, _ = store.GetLabels(ctx, issue.ID)
+				comments, _ := store.GetIssueComments(ctx, issue.ID)
+				issue.CommentCount = len(comments)
 			}
 			outputJSON(issues)
 			return
@@ -184,10 +190,18 @@ var listCmd = &cobra.Command{
 
 		fmt.Printf("\nFound %d issues:\n\n", len(issues))
 		for _, issue := range issues {
-			// Load labels for display
+			// Load labels and comments for display
 			labels, _ := store.GetLabels(ctx, issue.ID)
+			comments, _ := store.GetIssueComments(ctx, issue.ID)
+			issue.Labels = labels
+			issue.CommentCount = len(comments)
 
-			fmt.Printf("%s [P%d] [%s] %s\n", issue.ID, issue.Priority, issue.IssueType, issue.Status)
+			commentIndicator := ""
+			if issue.CommentCount > 0 {
+				commentIndicator = fmt.Sprintf(" 💬 %d", issue.CommentCount)
+			}
+
+			fmt.Printf("%s [P%d] [%s] %s%s\n", issue.ID, issue.Priority, issue.IssueType, issue.Status, commentIndicator)
 			fmt.Printf("  %s\n", issue.Title)
 			if issue.Assignee != "" {
 				fmt.Printf("  Assignee: %s\n", issue.Assignee)

@@ -24,7 +24,7 @@ List beads issues with optional filtering.
 
 ## Output Formats
 
-- Default: Human-readable table
+- Default: Human-readable table with comment indicators (💬 N shows number of comments)
 - `--json`: JSON format for scripting
 - `--format digraph`: Graph format for golang.org/x/tools/cmd/digraph
 - `--format dot`: Graphviz DOT format

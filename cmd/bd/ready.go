@@ -85,7 +85,11 @@ var readyCmd = &cobra.Command{
 			fmt.Printf("\n%s Ready work (%d issues with no blockers):\n\n", cyan("📋"), len(issues))
 
 			for i, issue := range issues {
-				fmt.Printf("%d. [P%d] %s: %s\n", i+1, issue.Priority, issue.ID, issue.Title)
+				commentIndicator := ""
+				if issue.CommentCount > 0 {
+					commentIndicator = fmt.Sprintf(" 💬 %d", issue.CommentCount)
+				}
+				fmt.Printf("%d. [P%d] %s: %s%s\n", i+1, issue.Priority, issue.ID, issue.Title, commentIndicator)
 				if issue.EstimatedMinutes != nil {
 					fmt.Printf("   Estimate: %d min\n", *issue.EstimatedMinutes)
 				}
@@ -137,7 +141,14 @@ var readyCmd = &cobra.Command{
 		fmt.Printf("\n%s Ready work (%d issues with no blockers):\n\n", cyan("📋"), len(issues))
 
 		for i, issue := range issues {
-			fmt.Printf("%d. [P%d] %s: %s\n", i+1, issue.Priority, issue.ID, issue.Title)
+			comments, _ := store.GetIssueComments(ctx, issue.ID)
+			issue.CommentCount = len(comments)
+			
+			commentIndicator := ""
+			if issue.CommentCount > 0 {
+				commentIndicator = fmt.Sprintf(" 💬 %d", issue.CommentCount)
+			}
+			fmt.Printf("%d. [P%d] %s: %s%s\n", i+1, issue.Priority, issue.ID, issue.Title, commentIndicator)
 			if issue.EstimatedMinutes != nil {
 				fmt.Printf("   Estimate: %d min\n", *issue.EstimatedMinutes)
 			}

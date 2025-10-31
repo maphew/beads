@@ -32,6 +32,7 @@ type Issue struct {
 	Labels             []string       `json:"labels,omitempty"` // Populated only for export/import
 	Dependencies       []*Dependency  `json:"dependencies,omitempty"` // Populated only for export/import
 	Comments           []*Comment     `json:"comments,omitempty"`     // Populated only for export/import
+	CommentCount       int            `json:"comment_count,omitempty"` // Number of comments for list display
 }
 
 // ComputeContentHash creates a deterministic hash of the issue's content.

@@ -307,10 +307,14 @@ func (s *Server) handleList(req *Request) Response {
 		}
 	}
 
-	// Populate labels for each issue
+	// Populate labels and comment counts for each issue
 	for _, issue := range issues {
 		labels, _ := store.GetLabels(ctx, issue.ID)
 		issue.Labels = labels
+		
+		// Get comment count for this issue
+		comments, _ := store.GetIssueComments(ctx, issue.ID)
+		issue.CommentCount = len(comments)
 	}
 
 	data, _ := json.Marshal(issues)
@@ -365,17 +369,19 @@ func (s *Server) handleShow(req *Request) Response {
 		}
 	}
 
-	// Populate labels, dependencies, and dependents
+	// Populate labels, dependencies, dependents, and comments
 	labels, _ := store.GetLabels(ctx, issue.ID)
 	deps, _ := store.GetDependencies(ctx, issue.ID)
 	dependents, _ := store.GetDependents(ctx, issue.ID)
+	comments, _ := store.GetIssueComments(ctx, issue.ID)
 
 	// Create detailed response with related data
 	type IssueDetails struct {
 		*types.Issue
-		Labels       []string       `json:"labels,omitempty"`
-		Dependencies []*types.Issue `json:"dependencies,omitempty"`
-		Dependents   []*types.Issue `json:"dependents,omitempty"`
+		Labels       []string         `json:"labels,omitempty"`
+		Dependencies []*types.Issue   `json:"dependencies,omitempty"`
+		Dependents   []*types.Issue   `json:"dependents,omitempty"`
+		Comments     []*types.Comment `json:"comments,omitempty"`
 	}
 
 	details := &IssueDetails{
@@ -383,6 +389,7 @@ func (s *Server) handleShow(req *Request) Response {
 		Labels:       labels,
 		Dependencies: deps,
 		Dependents:   dependents,
+		Comments:     comments,
 	}
 
 	data, _ := json.Marshal(details)
@@ -420,6 +427,12 @@ func (s *Server) handleReady(req *Request) Response {
 			Success: false,
 			Error:   fmt.Sprintf("failed to get ready work: %v", err),
 		}
+	}
+
+	// Populate comment counts for each issue
+	for _, issue := range issues {
+		comments, _ := store.GetIssueComments(ctx, issue.ID)
+		issue.CommentCount = len(comments)
 	}
 
 	data, _ := json.Marshal(issues)
