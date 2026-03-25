@@ -143,7 +143,8 @@ func (c *Client) doRequest(ctx context.Context, method, urlStr string, body inte
 
 // FetchIssues retrieves issues from GitLab with optional filtering by state.
 // state can be: "opened", "closed", or "all".
-func (c *Client) FetchIssues(ctx context.Context, state string) ([]Issue, error) {
+// If fetchLinks is true, also fetches issue links for each issue.
+func (c *Client) FetchIssues(ctx context.Context, state string, fetchLinks bool) ([]Issue, error) {
 	var allIssues []Issue
 	page := 1
 
@@ -174,6 +175,16 @@ func (c *Client) FetchIssues(ctx context.Context, state string) ([]Issue, error)
 			return nil, fmt.Errorf("failed to parse issues response: %w", err)
 		}
 
+		if fetchLinks {
+			for i := range issues {
+				links, err := c.GetIssueLinks(ctx, issues[i].IID)
+				if err != nil {
+					continue
+				}
+				issues[i].LinkedIssues = links
+			}
+		}
+
 		allIssues = append(allIssues, issues...)
 
 		// Check for next page
@@ -194,7 +205,8 @@ func (c *Client) FetchIssues(ctx context.Context, state string) ([]Issue, error)
 
 // FetchIssuesSince retrieves issues from GitLab that have been updated since the given time.
 // This enables incremental sync by only fetching issues modified after the last sync.
-func (c *Client) FetchIssuesSince(ctx context.Context, state string, since time.Time) ([]Issue, error) {
+// If fetchLinks is true, also fetches issue links for each issue.
+func (c *Client) FetchIssuesSince(ctx context.Context, state string, since time.Time, fetchLinks bool) ([]Issue, error) {
 	var allIssues []Issue
 	page := 1
 
@@ -226,6 +238,16 @@ func (c *Client) FetchIssuesSince(ctx context.Context, state string, since time.
 		var issues []Issue
 		if err := json.Unmarshal(respBody, &issues); err != nil {
 			return nil, fmt.Errorf("failed to parse issues response: %w", err)
+		}
+
+		if fetchLinks {
+			for i := range issues {
+				links, err := c.GetIssueLinks(ctx, issues[i].IID)
+				if err != nil {
+					continue
+				}
+				issues[i].LinkedIssues = links
+			}
 		}
 
 		allIssues = append(allIssues, issues...)

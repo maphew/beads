@@ -119,7 +119,7 @@ func TestFetchIssues_Success(t *testing.T) {
 	client := NewClient("test-token", server.URL, "123")
 	ctx := context.Background()
 
-	issues, err := client.FetchIssues(ctx, "opened")
+	issues, err := client.FetchIssues(ctx, "opened", false)
 	if err != nil {
 		t.Fatalf("FetchIssues() error = %v", err)
 	}
@@ -157,7 +157,7 @@ func TestFetchIssues_Pagination(t *testing.T) {
 	client := NewClient("token", server.URL, "123")
 	ctx := context.Background()
 
-	issues, err := client.FetchIssues(ctx, "all")
+	issues, err := client.FetchIssues(ctx, "all", false)
 	if err != nil {
 		t.Fatalf("FetchIssues() error = %v", err)
 	}
@@ -182,7 +182,7 @@ func TestFetchIssuesSince(t *testing.T) {
 	client := NewClient("token", server.URL, "123")
 	ctx := context.Background()
 
-	_, err := client.FetchIssuesSince(ctx, "all", since)
+	_, err := client.FetchIssuesSince(ctx, "all", since, false)
 	if err != nil {
 		t.Fatalf("FetchIssuesSince() error = %v", err)
 	}
@@ -335,7 +335,7 @@ func TestRateLimiting(t *testing.T) {
 	client := NewClient("token", server.URL, "123")
 	ctx := context.Background()
 
-	issues, err := client.FetchIssues(ctx, "all")
+	issues, err := client.FetchIssues(ctx, "all", false)
 	if err != nil {
 		t.Fatalf("FetchIssues() error = %v, want success after retry", err)
 	}
@@ -705,7 +705,7 @@ func TestFetchIssuesSince_Error(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
-	_, err := client.FetchIssuesSince(ctx, "all", time.Now().Add(-24*time.Hour))
+	_, err := client.FetchIssuesSince(ctx, "all", time.Now().Add(-24*time.Hour), false)
 	if err == nil {
 		t.Fatal("FetchIssuesSince() error = nil, want error for 500")
 	}
@@ -730,7 +730,7 @@ func TestServerErrorRetry(t *testing.T) {
 			client := NewClient("token", server.URL, "123")
 			ctx := context.Background()
 
-			issues, err := client.FetchIssues(ctx, "all")
+			issues, err := client.FetchIssues(ctx, "all", false)
 			if err != nil {
 				t.Fatalf("FetchIssues() error = %v, want success after retry on %d", err, code)
 			}
@@ -855,7 +855,7 @@ func TestFetchIssuesSince_PaginationLimit(t *testing.T) {
 	client := NewClient("token", server.URL, "123")
 	ctx := context.Background()
 
-	_, err := client.FetchIssuesSince(ctx, "all", time.Now().Add(-24*time.Hour))
+	_, err := client.FetchIssuesSince(ctx, "all", time.Now().Add(-24*time.Hour), false)
 
 	// Should error due to pagination limit exceeded
 	if err == nil {
@@ -891,7 +891,7 @@ func TestFetchIssues_ContextCancellation(t *testing.T) {
 		cancel()
 	}()
 
-	issues, err := client.FetchIssues(ctx, "all")
+	issues, err := client.FetchIssues(ctx, "all", false)
 
 	// Should return an error that stops the loop (context cancellation OR pagination limit)
 	if err == nil {

@@ -78,10 +78,11 @@ func (t *Tracker) FetchIssues(ctx context.Context, opts tracker.FetchOptions) ([
 		state = "opened"
 	}
 
+	// Always fetch issue links so dependencies are synced
 	if opts.Since != nil {
-		issues, err = t.client.FetchIssuesSince(ctx, state, *opts.Since)
+		issues, err = t.client.FetchIssuesSince(ctx, state, *opts.Since, true)
 	} else {
-		issues, err = t.client.FetchIssues(ctx, state)
+		issues, err = t.client.FetchIssues(ctx, state, true)
 	}
 	if err != nil {
 		return nil, err

@@ -151,9 +151,15 @@ func GitLabIssueToBeads(gl *Issue, config *MappingConfig) *IssueConversion {
 		issue.UpdatedAt = *gl.UpdatedAt
 	}
 
+	// Convert issue links to dependencies
+	var deps []DependencyInfo
+	if len(gl.LinkedIssues) > 0 {
+		deps = issueLinksToDependencies(gl.IID, gl.LinkedIssues, config)
+	}
+
 	return &IssueConversion{
 		Issue:        issue,
-		Dependencies: []DependencyInfo{},
+		Dependencies: deps,
 	}
 }
 

@@ -68,6 +68,10 @@ type Issue struct {
 
 	// Links contains related URLs (populated in some API responses)
 	Links *IssueLinks `json:"links,omitempty"`
+
+	// LinkedIssues contains issue links (blocks, blocked_by, relates_to)
+	// Populated when fetching issues with linked resources
+	LinkedIssues []IssueLink `json:"-"`
 }
 
 // IssueLinks contains related URLs for an issue.
