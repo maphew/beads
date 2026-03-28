@@ -437,21 +437,37 @@ var listCmd = &cobra.Command{
 			s := types.StatusOpen
 			filter.Status = &s
 		} else if status != "" && status != "all" {
-			s := types.Status(status)
-			// Validate --status value (bd-ttno)
+			// Get custom statuses for validation
 			var customStatuses []string
 			if store != nil {
 				cs, _ := store.GetCustomStatuses(rootCtx)
 				customStatuses = cs
 			}
-			if !s.IsValidWithCustom(customStatuses) {
-				validList := "open, in_progress, blocked, deferred, closed, pinned, hooked"
-				if len(customStatuses) > 0 {
-					validList += ", " + strings.Join(customStatuses, ", ")
-				}
-				FatalError("invalid status %q (valid: %s)", status, validList)
+			validList := "open, in_progress, blocked, deferred, closed, pinned, hooked"
+			if len(customStatuses) > 0 {
+				validList += ", " + strings.Join(customStatuses, ", ")
 			}
-			filter.Status = &s
+
+			// Support comma-separated status values (OR semantics)
+			statusParts := strings.Split(status, ",")
+			if len(statusParts) > 1 {
+				// Multiple statuses - use Statuses slice with OR semantics
+				for _, part := range statusParts {
+					part = strings.TrimSpace(part)
+					s := types.Status(part)
+					if !s.IsValidWithCustom(customStatuses) {
+						FatalError("invalid status %q (valid: %s)", part, validList)
+					}
+					filter.Statuses = append(filter.Statuses, s)
+				}
+			} else {
+				// Single status - use Status pointer
+				s := types.Status(status)
+				if !s.IsValidWithCustom(customStatuses) {
+					FatalError("invalid status %q (valid: %s)", status, validList)
+				}
+				filter.Status = &s
+			}
 		}
 
 		// Default to non-closed/non-pinned issues unless --all, --pinned, or explicit --status (GH#788, bd-uhcg)
@@ -949,7 +965,7 @@ var listCmd = &cobra.Command{
 }
 
 func init() {
-	listCmd.Flags().StringP("status", "s", "", "Filter by stored status (open, in_progress, blocked, deferred, closed). Note: dependency-blocked issues use 'bd blocked'")
+	listCmd.Flags().StringP("status", "s", "", "Filter by stored status (open, in_progress, blocked, deferred, closed). Supports comma-separated values for OR filtering (e.g., 'open,in_progress'). Note: dependency-blocked issues use 'bd blocked'")
 	listCmd.Flags().String("state", "", "Alias for --status")
 	_ = listCmd.Flags().MarkHidden("state")
 	registerPriorityFlag(listCmd, "")

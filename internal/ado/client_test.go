@@ -671,7 +671,7 @@ func TestBuildPullWIQL(t *testing.T) {
 			since:   &since,
 			filters: nil,
 			contains: []string{
-				"[System.ChangedDate] >= '2024-06-01T00:00:00Z'",
+				"[System.ChangedDate] >= '2024-06-01'",
 			},
 		},
 		{
@@ -710,7 +710,7 @@ func TestBuildPullWIQL(t *testing.T) {
 			contains: []string{
 				"[System.TeamProject] = 'testproject'",
 				"[System.IsDeleted] = false",
-				"[System.ChangedDate] >= '2024-06-01T00:00:00Z'",
+				"[System.ChangedDate] >= '2024-06-01'",
 				`[System.AreaPath] UNDER 'MyProject\\Backend'`,
 				`[System.IterationPath] UNDER 'MyProject\\Sprint 1'`,
 				"[System.WorkItemType] IN ('Bug')",

@@ -1049,6 +1049,10 @@ type IssueFilter struct {
 	// Wisp type filtering (TTL-based compaction classification)
 	WispType *WispType // Filter by wisp type (nil = any, heartbeat/ping/patrol/gc_report/recovery/error/escalation)
 
+	// Status filtering: either a single Status (Status) or multiple statuses (Statuses)
+	// Statuses uses OR semantics: issue must have one of the specified statuses
+	Statuses []Status // Multiple statuses with OR semantics (mutually exclusive with Status)
+
 	// Status exclusion (for default non-closed behavior)
 	ExcludeStatus []Status // Exclude issues with these statuses
 

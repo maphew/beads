@@ -40,6 +40,17 @@ func renderStatusIcon(status types.Status) string {
 	return ui.RenderStatusIcon(string(status))
 }
 
+// renderStatusIconWithBlocked returns the appropriate status icon, considering
+// whether the issue is blocked by open dependencies. When an issue has open
+// blockers, it shows the blocked icon (●) even if the stored status is "open".
+// This ensures bd list shows the same blocked status that bd blocked uses.
+func renderStatusIconWithBlocked(status types.Status, hasOpenBlockers bool) string {
+	if hasOpenBlockers && status != types.StatusClosed && status != types.StatusDeferred {
+		return ui.RenderStatusIcon("blocked")
+	}
+	return ui.RenderStatusIcon(string(status))
+}
+
 // formatPrettyIssue formats a single issue for pretty output
 // Uses semantic colors: status icon colored, priority P0/P1 colored, rest neutral
 func formatPrettyIssue(issue *types.Issue) string {
@@ -235,7 +246,9 @@ func formatIssueCompact(buf *strings.Builder, issue *types.Issue, labels []strin
 	}
 
 	// Get styled status icon
-	statusIcon := renderStatusIcon(issue.Status)
+	// If issue has open blockers, show blocked status icon instead of stored status
+	isBlockedByOpenDeps := len(blockedBy) > 0
+	statusIcon := renderStatusIconWithBlocked(issue.Status, isBlockedByOpenDeps)
 
 	if issue.Status == types.StatusClosed {
 		// Closed issues: entire line muted (fades visually)

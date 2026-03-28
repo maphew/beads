@@ -280,6 +280,14 @@ func (t *doltTransaction) SearchIssues(ctx context.Context, query string, filter
 		whereClauses = append(whereClauses, "status = ?")
 		args = append(args, *filter.Status)
 	}
+	if len(filter.Statuses) > 0 {
+		placeholders := make([]string, len(filter.Statuses))
+		for i, s := range filter.Statuses {
+			placeholders[i] = "?"
+			args = append(args, string(s))
+		}
+		whereClauses = append(whereClauses, fmt.Sprintf("status IN (%s)", strings.Join(placeholders, ",")))
+	}
 	if len(filter.ExcludeStatus) > 0 {
 		placeholders := make([]string, len(filter.ExcludeStatus))
 		for i, s := range filter.ExcludeStatus {

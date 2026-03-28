@@ -343,7 +343,7 @@ func (c *Client) buildPullWIQL(since *time.Time, filters *PullFilters) string {
 	if since != nil {
 		clauses = append(clauses, fmt.Sprintf(
 			"[System.ChangedDate] >= '%s'",
-			since.UTC().Format("2006-01-02T15:04:05Z"),
+			since.UTC().Format("2006-01-02"),
 		))
 	}
 	if filters != nil {
