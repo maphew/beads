@@ -81,7 +81,8 @@ mapfile -t public_files < <(
         'integrations/**' \
         'npm-package/**' \
         'scripts/**' \
-        'winget/**'
+        'winget/**' \
+    | grep -v '^scripts/check-release-consistency\.sh$'
 )
 
 old_repo_refs="$(
