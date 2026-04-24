@@ -488,15 +488,8 @@ func executeBootstrapPlan(plan BootstrapPlan, cfg *configfile.Config, nonInterac
 
 func executeInitAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.Config) error {
 	prefix := inferPrefix(cfg)
-	dbName := cfg.GetDoltDatabase()
 
-	s, err := newDoltStore(ctx, &dolt.Config{
-		Path:            doltserver.ResolveDoltDir(plan.BeadsDir),
-		Database:        dbName,
-		CreateIfMissing: true,
-		AutoStart:       true,
-		BeadsDir:        plan.BeadsDir,
-	})
+	s, err := newDoltStore(ctx, bootstrapDoltConfig(plan.BeadsDir, cfg))
 	if err != nil {
 		return fmt.Errorf("create database: %w", err)
 	}
@@ -515,15 +508,8 @@ func executeInitAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.
 
 func executeRestoreAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.Config) error {
 	prefix := inferPrefix(cfg)
-	dbName := cfg.GetDoltDatabase()
 
-	s, err := newDoltStore(ctx, &dolt.Config{
-		Path:            doltserver.ResolveDoltDir(plan.BeadsDir),
-		Database:        dbName,
-		CreateIfMissing: true,
-		AutoStart:       true,
-		BeadsDir:        plan.BeadsDir,
-	})
+	s, err := newDoltStore(ctx, bootstrapDoltConfig(plan.BeadsDir, cfg))
 	if err != nil {
 		return fmt.Errorf("create database: %w", err)
 	}
@@ -546,15 +532,8 @@ func executeRestoreAction(ctx context.Context, plan BootstrapPlan, cfg *configfi
 
 func executeJSONLImportAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.Config) error {
 	prefix := inferPrefix(cfg)
-	dbName := cfg.GetDoltDatabase()
 
-	s, err := newDoltStore(ctx, &dolt.Config{
-		Path:            doltserver.ResolveDoltDir(plan.BeadsDir),
-		Database:        dbName,
-		CreateIfMissing: true,
-		AutoStart:       true,
-		BeadsDir:        plan.BeadsDir,
-	})
+	s, err := newDoltStore(ctx, bootstrapDoltConfig(plan.BeadsDir, cfg))
 	if err != nil {
 		return fmt.Errorf("create database: %w", err)
 	}
@@ -578,6 +557,34 @@ func executeJSONLImportAction(ctx context.Context, plan BootstrapPlan, cfg *conf
 
 	fmt.Fprintf(os.Stderr, "Imported %d issues from %s\n", count, plan.JSONLFile)
 	return nil
+}
+
+func bootstrapDoltConfig(beadsDir string, cfg *configfile.Config) *dolt.Config {
+	if cfg == nil {
+		cfg = configfile.DefaultConfig()
+	}
+
+	resolved := doltserver.DefaultConfig(beadsDir)
+	serverMode := cfg.IsDoltServerMode() || doltserver.IsSharedServerMode()
+	autoStart := !doltserver.IsAutoStartDisabled() && resolved.Mode != doltserver.ServerModeExternal
+
+	return &dolt.Config{
+		Path:            doltserver.ResolveDoltDir(beadsDir),
+		BeadsDir:        beadsDir,
+		Database:        cfg.GetDoltDatabase(),
+		CreateIfMissing: true,
+		AutoStart:       autoStart,
+		ServerMode:      serverMode,
+		ServerHost:      cfg.GetDoltServerHost(),
+		ServerPort:      resolved.Port,
+		ServerSocket:    cfg.GetDoltServerSocket(),
+		ServerUser:      cfg.GetDoltServerUser(),
+		ServerPassword:  cfg.GetDoltServerPasswordForPort(resolved.Port),
+		ServerTLS:       cfg.GetDoltServerTLS(),
+		RemoteUser:      os.Getenv("DOLT_REMOTE_USER"),
+		RemotePassword:  os.Getenv("DOLT_REMOTE_PASSWORD"),
+		SyncRemote:      resolveSyncRemote(),
+	}
 }
 
 func executeSyncAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.Config) error {

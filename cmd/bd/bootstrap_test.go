@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/doltserver"
 )
 
 func snapshotBootstrapEnv(t *testing.T) func() {
@@ -256,6 +258,146 @@ func TestDetectBootstrapAction_ServerModeProbeErrorStopsWithReason(t *testing.T)
 	}
 	if !strings.Contains(plan.Reason, "permission denied") {
 		t.Fatalf("expected probe error in plan reason, got %#v", plan)
+	}
+}
+
+func TestBootstrapDoltConfigHonorsServerMode(t *testing.T) {
+	t.Setenv("BEADS_DOLT_DATA_DIR", "")
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "4301")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "1")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_DOLT_PASSWORD", "env-secret")
+	t.Setenv("DOLT_REMOTE_USER", "remote-user")
+	t.Setenv("DOLT_REMOTE_PASSWORD", "remote-secret")
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &configfile.Config{
+		DoltMode:       configfile.DoltModeServer,
+		DoltServerHost: "db.example",
+		DoltServerUser: "beads",
+		DoltDatabase:   "beads_prod",
+		DoltServerTLS:  true,
+	}
+
+	got := bootstrapDoltConfig(beadsDir, cfg)
+	if !got.ServerMode {
+		t.Fatal("bootstrap config should use server mode")
+	}
+	if got.AutoStart {
+		t.Fatal("bootstrap config should not auto-start externally managed server endpoints")
+	}
+	if got.Path != doltserver.ResolveDoltDir(beadsDir) {
+		t.Fatalf("Path = %q, want %q", got.Path, doltserver.ResolveDoltDir(beadsDir))
+	}
+	if got.BeadsDir != beadsDir {
+		t.Fatalf("BeadsDir = %q, want %q", got.BeadsDir, beadsDir)
+	}
+	if got.Database != "beads_prod" {
+		t.Fatalf("Database = %q, want beads_prod", got.Database)
+	}
+	if got.ServerHost != "db.example" {
+		t.Fatalf("ServerHost = %q, want db.example", got.ServerHost)
+	}
+	if got.ServerPort != 4301 {
+		t.Fatalf("ServerPort = %d, want 4301", got.ServerPort)
+	}
+	if got.ServerUser != "beads" {
+		t.Fatalf("ServerUser = %q, want beads", got.ServerUser)
+	}
+	if got.ServerPassword != "env-secret" {
+		t.Fatalf("ServerPassword = %q, want env-secret", got.ServerPassword)
+	}
+	if !got.ServerTLS {
+		t.Fatal("ServerTLS = false, want true")
+	}
+	if got.RemoteUser != "remote-user" || got.RemotePassword != "remote-secret" {
+		t.Fatalf("remote auth = %q/%q, want remote-user/remote-secret", got.RemoteUser, got.RemotePassword)
+	}
+	if !got.CreateIfMissing {
+		t.Fatal("CreateIfMissing = false, want true")
+	}
+}
+
+func TestBootstrapNonSyncActionsUseServerMode(t *testing.T) {
+	t.Setenv("BEADS_DOLT_DATA_DIR", "")
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "1")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "1")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+
+	for _, tt := range []struct {
+		name string
+		run  func(context.Context, BootstrapPlan, *configfile.Config) error
+		plan func(string) BootstrapPlan
+	}{
+		{
+			name: "init",
+			run:  executeInitAction,
+			plan: func(beadsDir string) BootstrapPlan {
+				return BootstrapPlan{Action: "init", BeadsDir: beadsDir, Database: "server_bootstrap"}
+			},
+		},
+		{
+			name: "restore",
+			run:  executeRestoreAction,
+			plan: func(beadsDir string) BootstrapPlan {
+				return BootstrapPlan{
+					Action:    "restore",
+					BeadsDir:  beadsDir,
+					Database:  "server_bootstrap",
+					BackupDir: filepath.Join(filepath.Dir(beadsDir), "backup"),
+				}
+			},
+		},
+		{
+			name: "jsonl-import",
+			run:  executeJSONLImportAction,
+			plan: func(beadsDir string) BootstrapPlan {
+				return BootstrapPlan{
+					Action:    "jsonl-import",
+					BeadsDir:  beadsDir,
+					Database:  "server_bootstrap",
+					JSONLFile: filepath.Join(beadsDir, "issues.jsonl"),
+				}
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			beadsDir := filepath.Join(tmpDir, ".beads")
+			if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+				t.Fatal(err)
+			}
+
+			cfg := &configfile.Config{
+				DoltMode:       configfile.DoltModeServer,
+				DoltServerHost: "127.0.0.1",
+				DoltServerUser: "root",
+				DoltDatabase:   "server_bootstrap",
+			}
+			if err := cfg.Save(beadsDir); err != nil {
+				t.Fatalf("save metadata: %v", err)
+			}
+
+			err := tt.run(t.Context(), tt.plan(beadsDir), cfg)
+			if err == nil {
+				t.Fatal("expected server connection error")
+			}
+			if !strings.Contains(err.Error(), "create database") {
+				t.Fatalf("expected create database error, got %v", err)
+			}
+			if _, statErr := os.Stat(filepath.Join(beadsDir, "embeddeddolt")); !os.IsNotExist(statErr) {
+				t.Fatalf("non-sync bootstrap action created embedded DB path; stat err = %v", statErr)
+			}
+		})
 	}
 }
 
