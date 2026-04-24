@@ -139,11 +139,15 @@ func TestCompactSuite(t *testing.T) {
 		defer func() { jsonOutput = savedJSONOutput }()
 
 		// Actually call runCompactStats to increase coverage
-		runCompactStats(ctx, s)
+		if err := runCompactStats(nil, ctx, s); err != nil {
+			t.Fatalf("runCompactStats: %v", err)
+		}
 
 		// Also test with JSON output
 		jsonOutput = true
-		runCompactStats(ctx, s)
+		if err := runCompactStats(nil, ctx, s); err != nil {
+			t.Fatalf("runCompactStats JSON: %v", err)
+		}
 	})
 
 	t.Run("CompactStatsJSON", func(t *testing.T) {
@@ -168,7 +172,9 @@ func TestCompactSuite(t *testing.T) {
 		defer func() { jsonOutput = savedJSONOutput }()
 
 		// Should not panic and should execute JSON path
-		runCompactStats(ctx, s)
+		if err := runCompactStats(nil, ctx, s); err != nil {
+			t.Fatalf("runCompactStats: %v", err)
+		}
 	})
 
 	t.Run("RunCompactSingleDryRun", func(t *testing.T) {
