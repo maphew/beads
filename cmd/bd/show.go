@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -141,41 +142,7 @@ var showCmd = &cobra.Command{
 
 			if jsonOutput {
 				// Include labels, dependencies (with metadata), dependents (with metadata), and comments in JSON output
-				details := &types.IssueDetails{Issue: *issue}
-				details.Labels, _ = issueStore.GetLabels(ctx, issue.ID) // Best effort: show issue even if label fetch fails
-
-				// Get dependencies with metadata (dependency_type field)
-				details.Dependencies, _ = issueStore.GetDependenciesWithMetadata(ctx, issue.ID) // Best effort: show issue even if deps unavailable
-				details.Dependents, _ = issueStore.GetDependentsWithMetadata(ctx, issue.ID)     // Best effort: show issue even if dependents unavailable
-
-				details.Comments, _ = issueStore.GetIssueComments(ctx, issue.ID) // Best effort: show issue even if comments unavailable
-
-				// Epic progress: count children status for epic issues
-				if issue.IssueType == types.TypeEpic && details.Dependents != nil {
-					total, closed := 0, 0
-					for _, dep := range details.Dependents {
-						if dep.DependencyType == types.DepParentChild {
-							total++
-							if dep.Issue.Status == types.StatusClosed {
-								closed++
-							}
-						}
-					}
-					if total > 0 {
-						details.EpicTotalChildren = &total
-						details.EpicClosedChildren = &closed
-						closeable := total == closed
-						details.EpicCloseable = &closeable
-					}
-				}
-
-				// Compute parent from dependencies
-				for _, dep := range details.Dependencies {
-					if dep.DependencyType == types.DepParentChild {
-						details.Parent = &dep.ID
-						break
-					}
-				}
+				details := buildShowIssueDetails(ctx, issueStore, issue)
 				allDetails = append(allDetails, details)
 				result.Close() // Close before continuing to next iteration
 				continue
@@ -387,6 +354,43 @@ var showCmd = &cobra.Command{
 			SetLastTouchedID(args[0])
 		}
 	},
+}
+
+func buildShowIssueDetails(ctx context.Context, s storage.DoltStorage, issue *types.Issue) *types.IssueDetails {
+	details := &types.IssueDetails{Issue: *issue}
+	details.Labels, _ = s.GetLabels(ctx, issue.ID) // Best effort: show issue even if label fetch fails
+
+	// Get dependencies with metadata (dependency_type field).
+	details.Dependencies, _ = s.GetDependenciesWithMetadata(ctx, issue.ID) // Best effort
+	details.Dependents, _ = s.GetDependentsWithMetadata(ctx, issue.ID)     // Best effort
+	details.Comments, _ = s.GetIssueComments(ctx, issue.ID)                // Best effort
+
+	// Epic progress: count children status for epic issues.
+	if issue.IssueType == types.TypeEpic && details.Dependents != nil {
+		total, closed := 0, 0
+		for _, dep := range details.Dependents {
+			if dep.DependencyType == types.DepParentChild {
+				total++
+				if dep.Issue.Status == types.StatusClosed {
+					closed++
+				}
+			}
+		}
+		if total > 0 {
+			details.EpicTotalChildren = &total
+			details.EpicClosedChildren = &closed
+			closeable := total == closed
+			details.EpicCloseable = &closeable
+		}
+	}
+
+	for _, dep := range details.Dependencies {
+		if dep.DependencyType == types.DepParentChild {
+			details.Parent = &dep.ID
+			break
+		}
+	}
+	return details
 }
 
 func init() {

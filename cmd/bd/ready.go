@@ -174,55 +174,17 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			activeStore = routedStore
 		}
 
-		issues, err := activeStore.GetReadyWork(ctx, filter)
+		result, err := queryReadyWork(ctx, activeStore, readyQueryRequest{Filter: filter})
 		if err != nil {
 			FatalError("%v", err)
 		}
+		issues := result.Issues
 		if jsonOutput {
 			// Always output array, even if empty
 			if issues == nil {
 				issues = []*types.Issue{}
 			}
-			issueIDs := make([]string, len(issues))
-			for i, issue := range issues {
-				issueIDs[i] = issue.ID
-			}
-			// Best effort: display gracefully degrades with empty data
-			labelsMap, _ := activeStore.GetLabelsForIssues(ctx, issueIDs)
-			depCounts, _ := activeStore.GetDependencyCounts(ctx, issueIDs)
-			allDeps, _ := activeStore.GetDependencyRecordsForIssues(ctx, issueIDs)
-			commentCounts, _ := activeStore.GetCommentCounts(ctx, issueIDs)
-
-			// Populate labels and dependencies for JSON output
-			for _, issue := range issues {
-				issue.Labels = labelsMap[issue.ID]
-				issue.Dependencies = allDeps[issue.ID]
-			}
-
-			// Build response with counts + computed parent (consistent with bd list --json)
-			issuesWithCounts := make([]*types.IssueWithCounts, len(issues))
-			for i, issue := range issues {
-				counts := depCounts[issue.ID]
-				if counts == nil {
-					counts = &types.DependencyCounts{DependencyCount: 0, DependentCount: 0}
-				}
-				// Compute parent from dependency records
-				var parent *string
-				for _, dep := range allDeps[issue.ID] {
-					if dep.Type == types.DepParentChild {
-						parent = &dep.DependsOnID
-						break
-					}
-				}
-				issuesWithCounts[i] = &types.IssueWithCounts{
-					Issue:           issue,
-					DependencyCount: counts.DependencyCount,
-					DependentCount:  counts.DependentCount,
-					CommentCount:    commentCounts[issue.ID],
-					Parent:          parent,
-				}
-			}
-			outputJSON(issuesWithCounts)
+			outputJSON(buildIssueWithCounts(ctx, activeStore, issues))
 			return
 		}
 		// Show upgrade notification if needed
@@ -244,20 +206,6 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			maybeShowTip(store)
 			return
 		}
-		// Check if results were truncated by the limit
-		totalReady := len(issues)
-		truncated := false
-		if filter.Limit > 0 && len(issues) == filter.Limit {
-			// Re-query without limit to get total count
-			countFilter := filter
-			countFilter.Limit = 0
-			allIssues, countErr := activeStore.GetReadyWork(ctx, countFilter)
-			if countErr == nil && len(allIssues) > len(issues) {
-				totalReady = len(allIssues)
-				truncated = true
-			}
-		}
-
 		// Build parent epic map for pretty display
 		parentEpicMap := buildParentEpicMap(ctx, activeStore, issues)
 
@@ -283,14 +231,47 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		}
 
 		// Show truncation footer if results were limited
-		if truncated {
-			fmt.Printf("%s\n\n", ui.RenderMuted(fmt.Sprintf("Showing %d of %d ready issues. Use -n to show more.", len(issues), totalReady)))
+		if result.Truncated {
+			fmt.Printf("%s\n\n", ui.RenderMuted(fmt.Sprintf("Showing %d of %d ready issues. Use -n to show more.", len(issues), result.TotalReady)))
 		}
 
 		// Show tip after successful ready (direct mode only)
 		maybeShowTip(store)
 	},
 }
+
+type readyQueryRequest struct {
+	Filter types.WorkFilter
+}
+
+type readyQueryResult struct {
+	Issues     []*types.Issue
+	TotalReady int
+	Truncated  bool
+}
+
+func queryReadyWork(ctx context.Context, s storage.DoltStorage, req readyQueryRequest) (*readyQueryResult, error) {
+	issues, err := s.GetReadyWork(ctx, req.Filter)
+	if err != nil {
+		return nil, err
+	}
+
+	result := &readyQueryResult{
+		Issues:     issues,
+		TotalReady: len(issues),
+	}
+	if req.Filter.Limit > 0 && len(issues) == req.Filter.Limit {
+		countFilter := req.Filter
+		countFilter.Limit = 0
+		allIssues, countErr := s.GetReadyWork(ctx, countFilter)
+		if countErr == nil && len(allIssues) > len(issues) {
+			result.TotalReady = len(allIssues)
+			result.Truncated = true
+		}
+	}
+	return result, nil
+}
+
 var blockedCmd = &cobra.Command{
 	Use:   "blocked",
 	Short: "Show blocked issues",

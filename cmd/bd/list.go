@@ -850,20 +850,17 @@ var listCmd = &cobra.Command{
 		}
 
 		// Direct mode
-		issues, err := activeStore.SearchIssues(ctx, "", filter)
+		result, err := queryListIssues(ctx, activeStore, listQueryRequest{
+			Filter:         filter,
+			SortBy:         sortBy,
+			Reverse:        reverse,
+			EffectiveLimit: effectiveLimit,
+		})
 		if err != nil {
 			FatalError("%v", err)
 		}
-
-		// Apply sorting
-		sortIssues(issues, sortBy, reverse)
-
-		// Detect truncation (GH#3212). We fetched effectiveLimit+1 above, so any
-		// overflow means more matches exist than we're displaying.
-		truncated := effectiveLimit > 0 && len(issues) > effectiveLimit
-		if truncated {
-			issues = issues[:effectiveLimit]
-		}
+		issues := result.Issues
+		truncated := result.Truncated
 
 		// Handle watch mode (GH#654) - must be before other output modes
 		if watchMode {
@@ -912,47 +909,7 @@ var listCmd = &cobra.Command{
 		}
 
 		if jsonOutput {
-			// Get labels and dependency counts in bulk (single query instead of N queries)
-			issueIDs := make([]string, len(issues))
-			for i, issue := range issues {
-				issueIDs[i] = issue.ID
-			}
-			// Best effort: display gracefully degrades with empty data
-			labelsMap, _ := activeStore.GetLabelsForIssues(ctx, issueIDs)
-			depCounts, _ := activeStore.GetDependencyCounts(ctx, issueIDs)
-			allDeps, _ := activeStore.GetDependencyRecordsForIssues(ctx, issueIDs)
-			commentCounts, _ := activeStore.GetCommentCounts(ctx, issueIDs)
-
-			// Populate labels and dependencies for JSON output
-			for _, issue := range issues {
-				issue.Labels = labelsMap[issue.ID]
-				issue.Dependencies = allDeps[issue.ID]
-			}
-
-			// Build response with counts + computed parent (bd-ym8c)
-			issuesWithCounts := make([]*types.IssueWithCounts, len(issues))
-			for i, issue := range issues {
-				counts := depCounts[issue.ID]
-				if counts == nil {
-					counts = &types.DependencyCounts{DependencyCount: 0, DependentCount: 0}
-				}
-				// Compute parent from dependency records
-				var parent *string
-				for _, dep := range allDeps[issue.ID] {
-					if dep.Type == types.DepParentChild {
-						parent = &dep.DependsOnID
-						break
-					}
-				}
-				issuesWithCounts[i] = &types.IssueWithCounts{
-					Issue:           issue,
-					DependencyCount: counts.DependencyCount,
-					DependentCount:  counts.DependentCount,
-					CommentCount:    commentCounts[issue.ID],
-					Parent:          parent,
-				}
-			}
-			outputJSON(issuesWithCounts)
+			outputJSON(buildIssueWithCounts(ctx, activeStore, issues))
 			printTruncationHint(truncated, effectiveLimit)
 			return
 		}
@@ -1011,6 +968,72 @@ var listCmd = &cobra.Command{
 		// Show tip after successful list (direct mode only)
 		maybeShowTip(store)
 	},
+}
+
+type listQueryRequest struct {
+	Filter         types.IssueFilter
+	SortBy         string
+	Reverse        bool
+	EffectiveLimit int
+}
+
+type listQueryResult struct {
+	Issues    []*types.Issue
+	Truncated bool
+}
+
+func queryListIssues(ctx context.Context, s storage.DoltStorage, req listQueryRequest) (*listQueryResult, error) {
+	issues, err := s.SearchIssues(ctx, "", req.Filter)
+	if err != nil {
+		return nil, err
+	}
+	sortIssues(issues, req.SortBy, req.Reverse)
+
+	truncated := req.EffectiveLimit > 0 && len(issues) > req.EffectiveLimit
+	if truncated {
+		issues = issues[:req.EffectiveLimit]
+	}
+	return &listQueryResult{Issues: issues, Truncated: truncated}, nil
+}
+
+func buildIssueWithCounts(ctx context.Context, s storage.DoltStorage, issues []*types.Issue) []*types.IssueWithCounts {
+	issueIDs := make([]string, len(issues))
+	for i, issue := range issues {
+		issueIDs[i] = issue.ID
+	}
+	// Best effort: display gracefully degrades with empty data.
+	labelsMap, _ := s.GetLabelsForIssues(ctx, issueIDs)
+	depCounts, _ := s.GetDependencyCounts(ctx, issueIDs)
+	allDeps, _ := s.GetDependencyRecordsForIssues(ctx, issueIDs)
+	commentCounts, _ := s.GetCommentCounts(ctx, issueIDs)
+
+	for _, issue := range issues {
+		issue.Labels = labelsMap[issue.ID]
+		issue.Dependencies = allDeps[issue.ID]
+	}
+
+	issuesWithCounts := make([]*types.IssueWithCounts, len(issues))
+	for i, issue := range issues {
+		counts := depCounts[issue.ID]
+		if counts == nil {
+			counts = &types.DependencyCounts{DependencyCount: 0, DependentCount: 0}
+		}
+		var parent *string
+		for _, dep := range allDeps[issue.ID] {
+			if dep.Type == types.DepParentChild {
+				parent = &dep.DependsOnID
+				break
+			}
+		}
+		issuesWithCounts[i] = &types.IssueWithCounts{
+			Issue:           issue,
+			DependencyCount: counts.DependencyCount,
+			DependentCount:  counts.DependentCount,
+			CommentCount:    commentCounts[issue.ID],
+			Parent:          parent,
+		}
+	}
+	return issuesWithCounts
 }
 
 func init() {
