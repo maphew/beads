@@ -1289,3 +1289,54 @@ func TestRunExternalDoltStatus_Unreachable(t *testing.T) {
 		}
 	})
 }
+
+func TestDoltStatusExternalLocalhostUsesEndpoint(t *testing.T) {
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatalf("failed to create .beads dir: %v", err)
+	}
+
+	cfg := configfile.DefaultConfig()
+	cfg.Backend = configfile.BackendDolt
+	cfg.DoltMode = configfile.DoltModeServer
+	cfg.DoltServerHost = "127.0.0.1"
+	cfg.DoltDatabase = "beads_ext"
+	cfg.DoltServerUser = "root"
+	if err := cfg.Save(beadsDir); err != nil {
+		t.Fatalf("failed to save config: %v", err)
+	}
+
+	t.Setenv("BEADS_DIR", beadsDir)
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "1")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "1")
+
+	oldCwd, _ := os.Getwd()
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("failed to chdir: %v", err)
+	}
+	defer func() { _ = os.Chdir(oldCwd) }()
+
+	origJSON := jsonOutput
+	origServerMode := serverMode
+	defer func() {
+		jsonOutput = origJSON
+		serverMode = origServerMode
+	}()
+	jsonOutput = false
+
+	out := captureStdout(t, func() error {
+		doltStatusCmd.Run(doltStatusCmd, nil)
+		return nil
+	})
+
+	if !strings.Contains(out, "Dolt server: not reachable (external)") {
+		t.Fatalf("expected external status path, got:\n%s", out)
+	}
+	if strings.Contains(out, "Expected port:") {
+		t.Fatalf("expected endpoint status, not managed PID-file status, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Port:     1") {
+		t.Fatalf("expected configured external port in output, got:\n%s", out)
+	}
+}

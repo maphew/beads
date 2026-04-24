@@ -460,11 +460,9 @@ and database.`,
 			return
 		}
 
-		// For externally-hosted Dolt servers (non-local host with
-		// dolt_mode=server), the local PID file is meaningless — ping the
-		// configured endpoint via SQL instead (bd-q35w).
-		if cfg, cfgErr := configfile.Load(beadsDir); cfgErr == nil && cfg != nil &&
-			cfg.IsDoltServerMode() && !isLocalHost(cfg.GetDoltServerHost()) {
+		// For externally-managed Dolt servers, the local PID file is
+		// meaningless — ping the configured endpoint via SQL instead.
+		if cfg, cfgErr := configfile.Load(beadsDir); cfgErr == nil && shouldUseExternalDoltStatus(beadsDir, cfg) {
 			runExternalDoltStatus(beadsDir, cfg)
 			return
 		}
@@ -512,6 +510,16 @@ func isLocalHost(host string) bool {
 		return true
 	}
 	return false
+}
+
+func shouldUseExternalDoltStatus(beadsDir string, cfg *configfile.Config) bool {
+	if cfg == nil || !cfg.IsDoltServerMode() {
+		return false
+	}
+	if doltserver.DefaultConfig(beadsDir).Mode == doltserver.ServerModeExternal {
+		return true
+	}
+	return !isLocalHost(cfg.GetDoltServerHost())
 }
 
 // runExternalDoltStatus queries an externally-hosted Dolt server and prints

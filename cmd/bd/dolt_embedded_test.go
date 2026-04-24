@@ -255,7 +255,8 @@ func TestEmbeddedDoltConcurrent(t *testing.T) {
 			case 0:
 				args = []string{"dolt", "commit"}
 			case 1:
-				// Status is an embedded-mode inspection command.
+				// Status is an inspection command and should report embedded
+				// engine state rather than fail.
 				args = []string{"dolt", "status"}
 			case 2:
 				// Server-only command should fail fast.
