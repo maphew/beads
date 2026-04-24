@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/doltinspect"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
@@ -78,6 +79,8 @@ var doltShowCmd = &cobra.Command{
 		return showDoltConfig(cmd, true)
 	},
 }
+
+var doltInspectionService = doltinspect.NewService()
 
 var doltSetCmd = &cobra.Command{
 	Use:   "set <key> <value>",
@@ -456,43 +459,46 @@ and database.`,
 		if beadsDir == "" {
 			return commandErrorWithHint(cmd, activeWorkspaceNotFoundError(), diagHint())
 		}
-		if isEmbeddedMode() {
-			showEmbeddedDoltStatus(beadsDir)
-			return nil
+
+		cfg, cfgErr := configfile.Load(beadsDir)
+		if cfgErr != nil {
+			cfg = nil
 		}
-
-		// For externally-managed Dolt servers, the local PID file is
-		// meaningless — ping the configured endpoint via SQL instead.
-		if cfg, cfgErr := configfile.Load(beadsDir); cfgErr == nil && shouldUseExternalDoltEndpoint(beadsDir, cfg) {
-			runExternalDoltStatus(beadsDir, cfg)
-			return nil
-		}
-
-		serverDir := doltserver.ResolveServerDir(beadsDir)
-
-		state, err := doltserver.IsRunning(serverDir)
+		result, err := doltInspectionService.Status(context.Background(), doltinspect.StatusRequest{
+			BeadsDir: beadsDir,
+			Config:   cfg,
+			Embedded: isEmbeddedMode(),
+		})
 		if err != nil {
 			return commandErrorf(cmd, "%v", err)
 		}
 
-		if jsonOutput {
-			outputJSON(state)
+		switch result.Mode {
+		case doltinspect.StatusModeEmbedded:
+			renderEmbeddedDoltStatus(result.Embedded)
+			return nil
+		case doltinspect.StatusModeExternal:
+			renderExternalDoltStatus(result.External)
 			return nil
 		}
 
-		if state == nil || !state.Running {
-			cfg := doltserver.DefaultConfig(serverDir)
+		if jsonOutput {
+			outputJSON(result.Managed)
+			return nil
+		}
+
+		if result.Managed == nil || !result.Managed.Running {
 			fmt.Println("Dolt server: not running")
-			fmt.Printf("  Expected port: %d\n", cfg.Port)
+			fmt.Printf("  Expected port: %d\n", result.ExpectedPort)
 			return nil
 		}
 
 		fmt.Println("Dolt server: running")
-		fmt.Printf("  PID:  %d\n", state.PID)
-		fmt.Printf("  Port: %d\n", state.Port)
-		fmt.Printf("  Data: %s\n", state.DataDir)
-		fmt.Printf("  Logs: %s\n", doltserver.LogPath(serverDir))
-		if doltserver.IsSharedServerMode() {
+		fmt.Printf("  PID:  %d\n", result.Managed.PID)
+		fmt.Printf("  Port: %d\n", result.Managed.Port)
+		fmt.Printf("  Data: %s\n", result.Managed.DataDir)
+		fmt.Printf("  Logs: %s\n", result.LogPath)
+		if result.SharedServer {
 			fmt.Println("  Mode: shared server")
 		}
 		return nil
@@ -502,59 +508,18 @@ and database.`,
 // isLocalHost reports whether host refers to this machine. Used to
 // distinguish beads-managed local servers from externally-hosted ones.
 func isLocalHost(host string) bool {
-	h := strings.ToLower(strings.TrimSpace(host))
-	if h == "" {
-		return true // empty defaults to local
-	}
-	switch h {
-	case "localhost", "127.0.0.1", "::1", "0.0.0.0":
-		return true
-	}
-	return false
+	return doltinspect.IsLocalHost(host)
 }
 
 func shouldUseExternalDoltEndpoint(beadsDir string, cfg *configfile.Config) bool {
-	if cfg == nil || !cfg.IsDoltServerMode() {
-		return false
-	}
-	if doltserver.DefaultConfig(beadsDir).Mode == doltserver.ServerModeExternal {
-		return true
-	}
-	return !isLocalHost(cfg.GetDoltServerHost())
+	return doltinspect.ShouldUseExternalEndpoint(beadsDir, cfg)
 }
 
-type externalDoltStatusResult struct {
-	Mode     string `json:"mode"`
-	Host     string `json:"host"`
-	Port     int    `json:"port"`
-	User     string `json:"user"`
-	Database string `json:"database"`
-	TLS      bool   `json:"tls"`
-	Running  bool   `json:"running"`
-	Version  string `json:"version,omitempty"`
-	Error    string `json:"error,omitempty"`
-}
+type externalDoltStatusResult = doltinspect.ExternalStatusResult
 
-type embeddedDoltStatusResult struct {
-	Mode          string `json:"mode"`
-	ServerRunning bool   `json:"server_running"`
-	DataDir       string `json:"data_dir"`
-	DataDirExists bool   `json:"data_dir_exists"`
-}
+type embeddedDoltStatusResult = doltinspect.EmbeddedStatusResult
 
-type doltShowConfigResult struct {
-	Backend           string
-	Database          string
-	Embedded          bool
-	DataDir           string
-	Host              string
-	Port              int
-	User              string
-	SharedServer      bool
-	ExternalServer    bool
-	ConnectionChecked bool
-	ConnectionOK      bool
-}
+type doltShowConfigResult = doltinspect.ShowConfigResult
 
 // runExternalDoltStatus queries an externally-hosted Dolt server and prints
 // (or returns, for --json) status. Unlike the local path, there is no PID or
@@ -566,49 +531,7 @@ func runExternalDoltStatus(beadsDir string, cfg *configfile.Config) {
 }
 
 func inspectExternalDoltStatus(ctx context.Context, beadsDir string, cfg *configfile.Config) externalDoltStatusResult {
-	host := cfg.GetDoltServerHost()
-	port := doltserver.DefaultConfig(beadsDir).Port
-	user := cfg.GetDoltServerUser()
-	database := cfg.GetDoltDatabase()
-	tls := cfg.GetDoltServerTLS()
-	password := cfg.GetDoltServerPasswordForPort(port)
-
-	dsn := doltutil.ServerDSN{
-		Host:     host,
-		Port:     port,
-		User:     user,
-		Password: password,
-		TLS:      tls,
-		Timeout:  5 * time.Second,
-	}.String()
-
-	result := externalDoltStatusResult{
-		Mode:     "external",
-		Host:     host,
-		Port:     port,
-		User:     user,
-		Database: database,
-		TLS:      tls,
-	}
-
-	db, openErr := sql.Open("mysql", dsn)
-
-	if openErr == nil {
-		defer db.Close()
-		ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		defer cancel()
-		if pingErr := db.PingContext(ctx); pingErr != nil {
-			result.Error = pingErr.Error()
-		} else {
-			result.Running = true
-			// Best-effort version lookup; don't treat errors as fatal.
-			_ = db.QueryRowContext(ctx, "SELECT @@version").Scan(&result.Version)
-		}
-	} else {
-		result.Error = openErr.Error()
-	}
-
-	return result
+	return doltinspect.InspectExternalStatus(ctx, beadsDir, cfg)
 }
 
 func renderExternalDoltStatus(result externalDoltStatusResult) {
@@ -644,21 +567,7 @@ func showEmbeddedDoltStatus(beadsDir string) {
 }
 
 func inspectEmbeddedDoltStatus(beadsDir string) embeddedDoltStatusResult {
-	dataDir := filepath.Join(beadsDir, "embeddeddolt")
-	dataDirExists := false
-	if info, err := os.Stat(dataDir); err == nil && info.IsDir() {
-		dataDirExists = true
-	}
-
-	return embeddedDoltStatusResult{
-		Mode: "embedded",
-		// Embedded mode has an active in-process engine, but no
-		// separate server process. Use a server-specific field so
-		// clients do not read running=false as "Dolt is unavailable".
-		ServerRunning: false,
-		DataDir:       dataDir,
-		DataDirExists: dataDirExists,
-	}
+	return doltinspect.InspectEmbeddedStatus(beadsDir)
 }
 
 func renderEmbeddedDoltStatus(result embeddedDoltStatusResult) {
@@ -1367,30 +1276,13 @@ func showDoltConfig(cmd *cobra.Command, testConnection bool) error {
 }
 
 func inspectDoltShowConfig(beadsDir string, cfg *configfile.Config, testConnection bool) doltShowConfigResult {
-	result := doltShowConfigResult{
-		Backend: cfg.GetBackend(),
-	}
-	if result.Backend != configfile.BackendDolt {
-		return result
-	}
-
-	result.Database = cfg.GetDoltDatabase()
-	result.Embedded = isEmbeddedMode()
-	if result.Embedded {
-		result.DataDir = filepath.Join(beadsDir, "embeddeddolt")
-		return result
-	}
-
-	result.Host = cfg.GetDoltServerHost()
-	result.Port = doltserver.DefaultConfig(beadsDir).Port
-	result.User = cfg.GetDoltServerUser()
-	result.SharedServer = doltserver.IsSharedServerMode()
-	result.ExternalServer = shouldUseExternalDoltEndpoint(beadsDir, cfg)
-	if testConnection {
-		result.ConnectionChecked = true
-		result.ConnectionOK = testServerConnection(result.Host, result.Port)
-	}
-	return result
+	return doltInspectionService.ShowConfig(doltinspect.ShowConfigRequest{
+		BeadsDir:        beadsDir,
+		Config:          cfg,
+		Embedded:        isEmbeddedMode(),
+		TestConnection:  testConnection,
+		ConnectionCheck: testServerConnection,
+	})
 }
 
 func doltShowConfigJSON(result doltShowConfigResult) map[string]interface{} {
