@@ -86,7 +86,7 @@ go test -tags=integration ./...
 Git-heavy integration tests use `testutil.TempDirInMemory()` to reduce I/O overhead:
 
 ```go
-import "github.com/steveyegge/beads/internal/testutil"
+import "github.com/gastownhall/beads/internal/testutil"
 
 func TestWithGitOps(t *testing.T) {
     tmpDir := testutil.TempDirInMemory(t)

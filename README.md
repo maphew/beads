@@ -5,7 +5,7 @@
 **Platforms:** macOS, Linux, Windows, FreeBSD
 
 [![License](https://img.shields.io/github/license/gastownhall/beads)](LICENSE)
-[![Go Report Card](https://goreportcard.com/badge/github.com/steveyegge/beads)](https://goreportcard.com/report/github.com/steveyegge/beads)
+[![Go Report Card](https://goreportcard.com/badge/github.com/gastownhall/beads)](https://goreportcard.com/report/github.com/gastownhall/beads)
 [![Release](https://img.shields.io/github/v/release/gastownhall/beads)](https://github.com/gastownhall/beads/releases)
 [![npm version](https://img.shields.io/npm/v/@beads/bd)](https://www.npmjs.com/package/@beads/bd)
 [![PyPI](https://img.shields.io/pypi/v/beads-mcp)](https://pypi.org/project/beads-mcp/)
