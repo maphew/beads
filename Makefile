@@ -186,6 +186,10 @@ fmt-check:
 check-docs: build
 	@./scripts/check-doc-flags.sh ./bd
 
+# Validate release-facing docs, install snippets, and package metadata
+check-release:
+	@./scripts/check-release-consistency.sh
+
 # Clean build artifacts and benchmark profiles
 clean:
 	@echo "Cleaning..."
@@ -212,5 +216,6 @@ help:
 	@echo "  make fmt          - Format all Go files with gofmt"
 	@echo "  make fmt-check    - Check Go formatting (for CI)"
 	@echo "  make check-docs   - Validate docs against CLI flags"
+	@echo "  make check-release - Validate release docs and package metadata"
 	@echo "  make clean        - Remove build artifacts and profile files"
 	@echo "  make help         - Show this help message"

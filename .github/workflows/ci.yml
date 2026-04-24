@@ -50,6 +50,18 @@ jobs:
       - name: Check all versions match
         run: ./scripts/check-versions.sh
 
+  # Release-facing docs/package drift guard. Blocks stale public repository URLs,
+  # package metadata drift, and install snippets that accidentally use the repo
+  # owner instead of the published Go module path.
+  check-release-consistency:
+    name: Check release consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Check docs and package metadata
+        run: ./scripts/check-release-consistency.sh
+
   # Check documentation references match actual CLI flags
   check-doc-flags:
     name: Check doc flags freshness

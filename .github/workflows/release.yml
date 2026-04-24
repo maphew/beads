@@ -14,9 +14,19 @@ permissions:
   contents: write
 
 jobs:
+  release-consistency:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Check docs and package metadata
+        run: ./scripts/check-release-consistency.sh
+
   goreleaser:
     # Guard: only run goreleaser in the canonical repository (not in forks)
     if: ${{ github.repository == 'gastownhall/beads' }}
+    needs: release-consistency
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
