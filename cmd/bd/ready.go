@@ -250,7 +250,12 @@ type readyQueryResult struct {
 	Truncated  bool
 }
 
-func queryReadyWork(ctx context.Context, s storage.DoltStorage, req readyQueryRequest) (*readyQueryResult, error) {
+type parentEpicReader interface {
+	storage.DependencyReader
+	storage.IssueReader
+}
+
+func queryReadyWork(ctx context.Context, s storage.ReadyWorkReader, req readyQueryRequest) (*readyQueryResult, error) {
 	issues, err := s.GetReadyWork(ctx, req.Filter)
 	if err != nil {
 		return nil, err
@@ -318,7 +323,7 @@ var blockedCmd = &cobra.Command{
 
 // buildParentEpicMap builds a map from child issue ID to parent epic title.
 // Only includes parents that are epics.
-func buildParentEpicMap(ctx context.Context, s storage.DoltStorage, issues []*types.Issue) map[string]string {
+func buildParentEpicMap(ctx context.Context, s parentEpicReader, issues []*types.Issue) map[string]string {
 	if len(issues) == 0 {
 		return nil
 	}

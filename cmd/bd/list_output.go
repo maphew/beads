@@ -22,7 +22,7 @@ func printTruncationHint(truncated bool, effectiveLimit int) {
 }
 
 // outputDotFormat outputs issues in Graphviz DOT format
-func outputDotFormat(ctx context.Context, store storage.DoltStorage, issues []*types.Issue) error {
+func outputDotFormat(ctx context.Context, store storage.DependencyQueryStore, issues []*types.Issue) error {
 	fmt.Println("digraph dependencies {")
 	fmt.Println("  rankdir=TB;")
 	fmt.Println("  node [shape=box, style=rounded];")
@@ -99,7 +99,7 @@ func outputDotFormat(ctx context.Context, store storage.DoltStorage, issues []*t
 }
 
 // outputFormattedList outputs issues in a custom format (preset or Go template)
-func outputFormattedList(ctx context.Context, store storage.DoltStorage, issues []*types.Issue, formatStr string) error {
+func outputFormattedList(ctx context.Context, store storage.DependencyQueryStore, issues []*types.Issue, formatStr string) error {
 	// Handle special 'dot' format (Graphviz output)
 	if formatStr == "dot" {
 		return outputDotFormat(ctx, store, issues)

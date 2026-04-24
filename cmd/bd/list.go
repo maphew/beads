@@ -982,7 +982,13 @@ type listQueryResult struct {
 	Truncated bool
 }
 
-func queryListIssues(ctx context.Context, s storage.DoltStorage, req listQueryRequest) (*listQueryResult, error) {
+type issueListDetailReader interface {
+	storage.LabelReader
+	storage.DependencyReader
+	storage.CommentReader
+}
+
+func queryListIssues(ctx context.Context, s storage.IssueReader, req listQueryRequest) (*listQueryResult, error) {
 	issues, err := s.SearchIssues(ctx, "", req.Filter)
 	if err != nil {
 		return nil, err
@@ -996,7 +1002,7 @@ func queryListIssues(ctx context.Context, s storage.DoltStorage, req listQueryRe
 	return &listQueryResult{Issues: issues, Truncated: truncated}, nil
 }
 
-func buildIssueWithCounts(ctx context.Context, s storage.DoltStorage, issues []*types.Issue) []*types.IssueWithCounts {
+func buildIssueWithCounts(ctx context.Context, s issueListDetailReader, issues []*types.Issue) []*types.IssueWithCounts {
 	issueIDs := make([]string, len(issues))
 	for i, issue := range issues {
 		issueIDs[i] = issue.ID

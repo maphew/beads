@@ -356,7 +356,13 @@ var showCmd = &cobra.Command{
 	},
 }
 
-func buildShowIssueDetails(ctx context.Context, s storage.DoltStorage, issue *types.Issue) *types.IssueDetails {
+type showIssueDetailReader interface {
+	storage.LabelReader
+	storage.DependencyReader
+	storage.CommentReader
+}
+
+func buildShowIssueDetails(ctx context.Context, s showIssueDetailReader, issue *types.Issue) *types.IssueDetails {
 	details := &types.IssueDetails{Issue: *issue}
 	details.Labels, _ = s.GetLabels(ctx, issue.ID) // Best effort: show issue even if label fetch fails
 
