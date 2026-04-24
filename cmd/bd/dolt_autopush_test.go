@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -35,7 +36,7 @@ type autoPushFakeStore struct {
 	currentCommit string
 	pushErr       error
 	pushWait      bool
-	pushCalls     int
+	pushCalls     atomic.Int32
 }
 
 func (s *autoPushFakeStore) HasRemote(context.Context, string) (bool, error) {
@@ -50,7 +51,7 @@ func (s *autoPushFakeStore) GetCurrentCommit(context.Context) (string, error) {
 }
 
 func (s *autoPushFakeStore) Push(ctx context.Context) error {
-	s.pushCalls++
+	s.pushCalls.Add(1)
 	if s.pushWait {
 		<-ctx.Done()
 		return ctx.Err()
@@ -376,8 +377,8 @@ func TestMaybeAutoPush_UnreachableRemoteTimesOutAndThrottlesRetry(t *testing.T) 
 		maybeAutoPush(context.Background())
 	})
 
-	if fake.pushCalls != 1 {
-		t.Fatalf("pushCalls = %d, want 1", fake.pushCalls)
+	if got := fake.pushCalls.Load(); got != 1 {
+		t.Fatalf("pushCalls = %d, want 1", got)
 	}
 	if !strings.Contains(stderr, "dolt auto-push timed out") {
 		t.Fatalf("expected timeout warning, got:\n%s", stderr)
@@ -395,8 +396,8 @@ func TestMaybeAutoPush_UnreachableRemoteTimesOutAndThrottlesRetry(t *testing.T) 
 	}
 
 	maybeAutoPush(context.Background())
-	if fake.pushCalls != 1 {
-		t.Fatalf("pushCalls after throttled retry = %d, want 1", fake.pushCalls)
+	if got := fake.pushCalls.Load(); got != 1 {
+		t.Fatalf("pushCalls after throttled retry = %d, want 1", got)
 	}
 }
 
@@ -411,8 +412,8 @@ func TestMaybeAutoPush_DivergedRemotePrintsRecoveryGuidance(t *testing.T) {
 		maybeAutoPush(context.Background())
 	})
 
-	if fake.pushCalls != 1 {
-		t.Fatalf("pushCalls = %d, want 1", fake.pushCalls)
+	if got := fake.pushCalls.Load(); got != 1 {
+		t.Fatalf("pushCalls = %d, want 1", got)
 	}
 	for _, want := range []string{
 		"dolt auto-push failed",
