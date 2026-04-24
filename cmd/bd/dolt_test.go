@@ -724,7 +724,7 @@ func captureDoltShowOutput(t *testing.T) string {
 		}
 	}()
 
-	showDoltConfig(false)
+	_ = showDoltConfig(nil, false)
 
 	w.Close()
 	var buf bytes.Buffer
@@ -1417,8 +1417,7 @@ func TestDoltStatusExternalLocalhostUsesEndpoint(t *testing.T) {
 	jsonOutput = false
 
 	out := captureStdout(t, func() error {
-		doltStatusCmd.Run(doltStatusCmd, nil)
-		return nil
+		return doltStatusCmd.RunE(doltStatusCmd, nil)
 	})
 
 	if !strings.Contains(out, "Dolt server: not reachable (external)") {
@@ -1471,8 +1470,7 @@ func TestDoltShowExternalLocalhostReportsExternalEndpoint(t *testing.T) {
 	setStore(nil)
 
 	out := captureStdout(t, func() error {
-		showDoltConfig(false)
-		return nil
+		return showDoltConfig(nil, false)
 	})
 
 	for _, want := range []string{

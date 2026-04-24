@@ -2,8 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+
+	"github.com/spf13/cobra"
 )
 
 func activeWorkspaceNotFoundError() string {
@@ -142,6 +145,57 @@ func FatalErrorWithHint(message, hint string) {
 		fmt.Fprintf(os.Stderr, "Hint: %s\n", hint)
 	}
 	os.Exit(1)
+}
+
+type commandExitError struct {
+	code int
+}
+
+func (e commandExitError) Error() string {
+	return fmt.Sprintf("exit code %d", e.code)
+}
+
+func (e commandExitError) ExitCode() int {
+	return e.code
+}
+
+func silentCommandExit(cmd *cobra.Command, code int) error {
+	if cmd != nil {
+		cmd.SilenceErrors = true
+		cmd.SilenceUsage = true
+	}
+	return commandExitError{code: code}
+}
+
+func commandExitCode(err error) int {
+	if err == nil {
+		return 0
+	}
+	var exitErr interface{ ExitCode() int }
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitCode()
+	}
+	return 1
+}
+
+func commandErrorf(cmd *cobra.Command, format string, args ...interface{}) error {
+	msg := fmt.Sprintf(format, args...)
+	if jsonOutput {
+		jsonStderrError(msg, "")
+	} else {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", msg)
+	}
+	return silentCommandExit(cmd, 1)
+}
+
+func commandErrorWithHint(cmd *cobra.Command, message, hint string) error {
+	if jsonOutput {
+		jsonStderrError(message, hint)
+	} else {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", message)
+		fmt.Fprintf(os.Stderr, "Hint: %s\n", hint)
+	}
+	return silentCommandExit(cmd, 1)
 }
 
 // WarnError writes a warning message to stderr and returns.

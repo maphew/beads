@@ -74,8 +74,8 @@ Examples:
 var doltShowCmd = &cobra.Command{
 	Use:   "show",
 	Short: "Show current Dolt configuration with connection status",
-	Run: func(cmd *cobra.Command, args []string) {
-		showDoltConfig(true)
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return showDoltConfig(cmd, true)
 	},
 }
 
@@ -121,12 +121,11 @@ This verifies that:
   2. The connection can be established
 
 Use this before switching to server mode to ensure the server is running.`,
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		if isEmbeddedMode() {
-			fmt.Fprintln(os.Stderr, "Error: 'bd dolt test' is not supported in embedded mode (no Dolt server)")
-			os.Exit(1)
+			return commandErrorf(cmd, "'bd dolt test' is not supported in embedded mode (no Dolt server)")
 		}
-		testDoltConnection()
+		return testDoltConnection(cmd)
 	},
 }
 
@@ -215,12 +214,12 @@ uncommitted changes in its working set).
 
 Use --remote to push to a specific named remote instead of the default.
 The remote must already exist (see 'bd dolt remote add').`,
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := context.Background()
 		st := getStore()
 		if st == nil {
 			fmt.Fprintf(os.Stderr, "Error: no store available\n")
-			os.Exit(1)
+			return silentCommandExit(cmd, 1)
 		}
 		force, _ := cmd.Flags().GetBool("force")
 		remote, _ := cmd.Flags().GetString("remote")
@@ -235,10 +234,10 @@ The remote must already exist (see 'bd dolt remote add').`,
 				} else if isDivergedHistoryErr(err) {
 					printDivergedHistoryGuidance("push --force")
 				}
-				os.Exit(1)
+				return silentCommandExit(cmd, 1)
 			}
 			fmt.Println("Push complete.")
-			return
+			return nil
 		}
 		fmt.Println("Pushing to Dolt remote...")
 
@@ -251,7 +250,7 @@ The remote must already exist (see 'bd dolt remote add').`,
 		if pushErr != nil {
 			if isRemoteNotFoundErr(pushErr) {
 				printNoRemoteGuidance()
-				return
+				return nil
 			}
 			fmt.Fprintf(os.Stderr, "Error: %v\n", pushErr)
 			if isDivergedHistoryErr(pushErr) {
@@ -261,9 +260,10 @@ The remote must already exist (see 'bd dolt remote add').`,
 				}
 				printDivergedHistoryGuidance(op)
 			}
-			os.Exit(1)
+			return silentCommandExit(cmd, 1)
 		}
 		fmt.Println("Push complete.")
+		return nil
 	},
 }
 
@@ -278,12 +278,12 @@ variables for authentication.
 
 Use --remote to pull from a specific named remote instead of the default.
 The remote must already exist (see 'bd dolt remote add').`,
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := context.Background()
 		st := getStore()
 		if st == nil {
 			fmt.Fprintf(os.Stderr, "Error: no store available\n")
-			os.Exit(1)
+			return silentCommandExit(cmd, 1)
 		}
 		remote, _ := cmd.Flags().GetString("remote")
 		if remote != "" {
@@ -297,24 +297,25 @@ The remote must already exist (see 'bd dolt remote add').`,
 				} else if isDivergedHistoryErr(err) {
 					printDivergedHistoryGuidance("pull")
 				}
-				os.Exit(1)
+				return silentCommandExit(cmd, 1)
 			}
 			fmt.Println("Pull complete.")
-			return
+			return nil
 		}
 		fmt.Println("Pulling from Dolt remote...")
 		if err := st.Pull(ctx); err != nil {
 			if isRemoteNotFoundErr(err) {
 				printNoRemoteGuidance()
-				return
+				return nil
 			}
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			if isDivergedHistoryErr(err) {
 				printDivergedHistoryGuidance("pull")
 			}
-			os.Exit(1)
+			return silentCommandExit(cmd, 1)
 		}
 		fmt.Println("Pull complete.")
+		return nil
 	},
 }
 
@@ -331,12 +332,12 @@ Also useful before push operations that require a clean working set, or when
 auto-commit was off or changes were made externally.
 
 For more options (--stdin, custom messages), see: bd vc commit`,
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := context.Background()
 		st := getStore()
 		if st == nil {
 			fmt.Fprintf(os.Stderr, "Error: no store available\n")
-			os.Exit(1)
+			return silentCommandExit(cmd, 1)
 		}
 		msg, _ := cmd.Flags().GetString("message")
 		if msg == "" {
@@ -345,30 +346,31 @@ For more options (--stdin, custom messages), see: bd vc commit`,
 			pc, ok := storage.UnwrapStore(st).(storage.PendingCommitter)
 			if !ok {
 				fmt.Fprintf(os.Stderr, "Error: storage backend does not support pending commits\n")
-				os.Exit(1)
+				return silentCommandExit(cmd, 1)
 			}
 			committed, err := pc.CommitPending(ctx, getActor())
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				return silentCommandExit(cmd, 1)
 			}
 			if !committed {
 				fmt.Println("Nothing to commit.")
-				return
+				return nil
 			}
 		} else {
 			if err := st.Commit(ctx, msg); err != nil {
 				errLower := strings.ToLower(err.Error())
 				if strings.Contains(errLower, "nothing to commit") || strings.Contains(errLower, "no changes") {
 					fmt.Println("Nothing to commit.")
-					return
+					return nil
 				}
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				return silentCommandExit(cmd, 1)
 			}
 		}
 		commandDidExplicitDoltCommit = true
 		fmt.Println("Committed.")
+		return nil
 	},
 }
 
@@ -382,14 +384,13 @@ project path. PID and logs are stored in .beads/.
 
 The server auto-starts transparently when needed, so manual start is rarely
 required. Use this command for explicit control or diagnostics.`,
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		if isEmbeddedMode() {
-			fmt.Fprintln(os.Stderr, "Error: 'bd dolt start' is not supported in embedded mode (no Dolt server)")
-			os.Exit(1)
+			return commandErrorf(cmd, "'bd dolt start' is not supported in embedded mode (no Dolt server)")
 		}
 		beadsDir := selectedDoltBeadsDir()
 		if beadsDir == "" {
-			FatalErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
+			return commandErrorWithHint(cmd, activeWorkspaceNotFoundError(), diagHint())
 		}
 		serverDir := doltserver.ResolveServerDir(beadsDir)
 
@@ -397,10 +398,10 @@ required. Use this command for explicit control or diagnostics.`,
 		if err != nil {
 			if strings.Contains(err.Error(), "already running") {
 				fmt.Println(err)
-				return
+				return nil
 			}
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+			return silentCommandExit(cmd, 1)
 		}
 
 		fmt.Printf("Dolt server started (PID %d, port %d)\n", state.PID, state.Port)
@@ -409,6 +410,7 @@ required. Use this command for explicit control or diagnostics.`,
 		if doltserver.IsSharedServerMode() {
 			fmt.Println("  Mode: shared server")
 		}
+		return nil
 	},
 }
 
@@ -419,23 +421,23 @@ var doltStopCmd = &cobra.Command{
 
 This sends a graceful shutdown signal. The server will restart automatically
 on the next bd command unless auto-start is disabled.`,
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		if isEmbeddedMode() {
-			fmt.Fprintln(os.Stderr, "Error: 'bd dolt stop' is not supported in embedded mode (no Dolt server)")
-			os.Exit(1)
+			return commandErrorf(cmd, "'bd dolt stop' is not supported in embedded mode (no Dolt server)")
 		}
 		beadsDir := selectedDoltBeadsDir()
 		if beadsDir == "" {
-			FatalErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
+			return commandErrorWithHint(cmd, activeWorkspaceNotFoundError(), diagHint())
 		}
 		serverDir := doltserver.ResolveServerDir(beadsDir)
 		force, _ := cmd.Flags().GetBool("force")
 
 		if err := doltserver.StopWithForce(serverDir, force); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+			return silentCommandExit(cmd, 1)
 		}
 		fmt.Println("Dolt server stopped.")
+		return nil
 	},
 }
 
@@ -450,41 +452,40 @@ PID, port, and data directory from the local PID file. For externally-
 hosted servers (dolt_mode=server with a remote dolt_server_host), pings
 the configured endpoint via SQL and reports reachability, server version,
 and database.`,
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		beadsDir := selectedDoltBeadsDir()
 		if beadsDir == "" {
-			FatalErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
+			return commandErrorWithHint(cmd, activeWorkspaceNotFoundError(), diagHint())
 		}
 		if isEmbeddedMode() {
 			showEmbeddedDoltStatus(beadsDir)
-			return
+			return nil
 		}
 
 		// For externally-managed Dolt servers, the local PID file is
 		// meaningless — ping the configured endpoint via SQL instead.
 		if cfg, cfgErr := configfile.Load(beadsDir); cfgErr == nil && shouldUseExternalDoltEndpoint(beadsDir, cfg) {
 			runExternalDoltStatus(beadsDir, cfg)
-			return
+			return nil
 		}
 
 		serverDir := doltserver.ResolveServerDir(beadsDir)
 
 		state, err := doltserver.IsRunning(serverDir)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+			return commandErrorf(cmd, "%v", err)
 		}
 
 		if jsonOutput {
 			outputJSON(state)
-			return
+			return nil
 		}
 
 		if state == nil || !state.Running {
 			cfg := doltserver.DefaultConfig(serverDir)
 			fmt.Println("Dolt server: not running")
 			fmt.Printf("  Expected port: %d\n", cfg.Port)
-			return
+			return nil
 		}
 
 		fmt.Println("Dolt server: running")
@@ -495,6 +496,7 @@ and database.`,
 		if doltserver.IsSharedServerMode() {
 			fmt.Println("  Mode: shared server")
 		}
+		return nil
 	},
 }
 
@@ -686,10 +688,9 @@ orphans and will be killed.
 In standalone mode, only dolt sql-server processes using the current
 project's Dolt data directory are eligible for cleanup. Other projects'
 servers are preserved.`,
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		if isEmbeddedMode() {
-			fmt.Fprintln(os.Stderr, "Error: 'bd dolt killall' is not supported in embedded mode (no Dolt server)")
-			os.Exit(1)
+			return commandErrorf(cmd, "'bd dolt killall' is not supported in embedded mode (no Dolt server)")
 		}
 		beadsDir := selectedDoltBeadsDir()
 		if beadsDir == "" {
@@ -699,7 +700,7 @@ servers are preserved.`,
 		killed, err := doltserver.KillStaleServers(beadsDir)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+			return silentCommandExit(cmd, 1)
 		}
 
 		if len(killed) == 0 {
@@ -707,6 +708,7 @@ servers are preserved.`,
 		} else {
 			fmt.Printf("Killed %d orphan dolt server(s): %v\n", len(killed), killed)
 		}
+		return nil
 	},
 }
 
@@ -731,16 +733,18 @@ Stale database prefixes: testdb_*, doctest_*, doctortest_*, beads_pt*, beads_vr*
 
 These waste server memory and can degrade performance under concurrent load.
 Use --dry-run to see what would be dropped without actually dropping.`,
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		if isEmbeddedMode() {
-			fmt.Fprintln(os.Stderr, "Error: 'bd dolt clean-databases' is not supported in embedded mode (no Dolt server)")
-			os.Exit(1)
+			return commandErrorf(cmd, "'bd dolt clean-databases' is not supported in embedded mode (no Dolt server)")
 		}
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 
 		// Connect directly to the Dolt server via config instead of getStore(),
 		// which isn't initialized for dolt subcommands (beads-9vt).
-		db, cleanup := openDoltServerConnection()
+		db, cleanup, err := openDoltServerConnection()
+		if err != nil {
+			return commandErrorf(cmd, "%v", err)
+		}
 		defer cleanup()
 
 		listCtx, listCancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -749,7 +753,7 @@ Use --dry-run to see what would be dropped without actually dropping.`,
 		rows, err := db.QueryContext(listCtx, "SHOW DATABASES")
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error listing databases: %v\n", err)
-			os.Exit(1)
+			return silentCommandExit(cmd, 1)
 		}
 		defer rows.Close()
 
@@ -769,7 +773,7 @@ Use --dry-run to see what would be dropped without actually dropping.`,
 
 		if len(stale) == 0 {
 			fmt.Println("No stale databases found.")
-			return
+			return nil
 		}
 
 		fmt.Printf("Found %d stale databases:\n", len(stale))
@@ -779,7 +783,7 @@ Use --dry-run to see what would be dropped without actually dropping.`,
 
 		if dryRun {
 			fmt.Println("\n(dry run — no databases dropped)")
-			return
+			return nil
 		}
 
 		fmt.Println()
@@ -808,7 +812,7 @@ Use --dry-run to see what would be dropped without actually dropping.`,
 			if failures >= maxConsecFailures {
 				fmt.Fprintf(os.Stderr, "\n✗ Aborting: %d consecutive failures suggest server is unhealthy.\n", failures)
 				fmt.Fprintf(os.Stderr, "  Dropped %d/%d before stopping.\n", dropped, len(stale))
-				os.Exit(1)
+				return silentCommandExit(cmd, 1)
 			}
 
 			// Per-operation timeout: DROP DATABASE can be slow on Dolt
@@ -837,6 +841,7 @@ Use --dry-run to see what would be dropped without actually dropping.`,
 			}
 		}
 		fmt.Printf("\nDropped %d/%d stale databases.\n", dropped, len(stale))
+		return nil
 	},
 }
 
@@ -1269,16 +1274,15 @@ func selectedDoltBeadsDir() string {
 	return beadsDir
 }
 
-func showDoltConfig(testConnection bool) {
+func showDoltConfig(cmd *cobra.Command, testConnection bool) error {
 	beadsDir := selectedDoltBeadsDir()
 	if beadsDir == "" {
-		FatalErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
+		return commandErrorWithHint(cmd, activeWorkspaceNotFoundError(), diagHint())
 	}
 
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
-		os.Exit(1)
+		return commandErrorf(cmd, "loading config: %v", err)
 	}
 	if cfg == nil {
 		cfg = configfile.DefaultConfig()
@@ -1288,12 +1292,12 @@ func showDoltConfig(testConnection bool) {
 
 	if jsonOutput {
 		outputJSON(doltShowConfigJSON(result))
-		return
+		return nil
 	}
 
 	if result.Backend != configfile.BackendDolt {
 		fmt.Printf("Backend: %s\n", result.Backend)
-		return
+		return nil
 	}
 
 	renderDoltShowConfig(result)
@@ -1357,6 +1361,7 @@ func showDoltConfig(testConnection bool) {
 	fmt.Println("  1. Environment variables (BEADS_DOLT_*)")
 	fmt.Println("  2. metadata.json (local, gitignored)")
 	fmt.Println("  3. config.yaml (team defaults)")
+	return nil
 }
 
 func inspectDoltShowConfig(beadsDir string, cfg *configfile.Config, testConnection bool) doltShowConfigResult {
@@ -1613,24 +1618,22 @@ func setDoltConfig(key, value string, updateConfig bool) {
 	}
 }
 
-func testDoltConnection() {
+func testDoltConnection(cmd *cobra.Command) error {
 	beadsDir := selectedDoltBeadsDir()
 	if beadsDir == "" {
-		FatalErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
+		return commandErrorWithHint(cmd, activeWorkspaceNotFoundError(), diagHint())
 	}
 
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
-		os.Exit(1)
+		return commandErrorf(cmd, "loading config: %v", err)
 	}
 	if cfg == nil {
 		cfg = configfile.DefaultConfig()
 	}
 
 	if cfg.GetBackend() != configfile.BackendDolt {
-		fmt.Fprintf(os.Stderr, "Error: not using Dolt backend\n")
-		os.Exit(1)
+		return commandErrorf(cmd, "not using Dolt backend")
 	}
 
 	host := cfg.GetDoltServerHost()
@@ -1645,9 +1648,9 @@ func testDoltConnection() {
 			"connection_ok": ok,
 		})
 		if !ok {
-			os.Exit(1)
+			return silentCommandExit(cmd, 1)
 		}
-		return
+		return nil
 	}
 
 	fmt.Printf("Testing connection to %s...\n", addr)
@@ -1657,18 +1660,18 @@ func testDoltConnection() {
 	} else {
 		fmt.Printf("%s\n", ui.RenderWarn("✗ Connection failed"))
 		fmt.Println("\nStart the server with: bd dolt start")
-		os.Exit(1)
+		return silentCommandExit(cmd, 1)
 	}
 
 	// Test remote connectivity
 	st := getStore()
 	if st == nil {
-		return
+		return nil
 	}
 	ctx := context.Background()
 	remotes, err := st.ListRemotes(ctx)
 	if err != nil || len(remotes) == 0 {
-		return
+		return nil
 	}
 	fmt.Println("\nRemote connectivity:")
 	for _, r := range remotes {
@@ -1694,6 +1697,7 @@ func testDoltConnection() {
 			fmt.Printf("  %s (%s)... skipped (no connectivity test for this scheme)\n", r.Name, r.URL)
 		}
 	}
+	return nil
 }
 
 // serverDialTimeout controls the TCP dial timeout for server connection tests.
@@ -1781,16 +1785,15 @@ func testHTTPConnectivity(url string) bool {
 // using config from the beads directory. This bypasses getStore() which isn't
 // initialized for dolt subcommands (beads-9vt). Connects without selecting a
 // database so callers can operate on all databases (SHOW DATABASES, DROP DATABASE).
-func openDoltServerConnection() (*sql.DB, func()) {
+func openDoltServerConnection() (*sql.DB, func(), error) {
 	beadsDir := selectedDoltBeadsDir()
 	if beadsDir == "" {
-		FatalErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
+		return nil, nil, fmt.Errorf("%s; %s", activeWorkspaceNotFoundError(), diagHint())
 	}
 
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
-		os.Exit(1)
+		return nil, nil, fmt.Errorf("loading config: %w", err)
 	}
 	if cfg == nil {
 		cfg = configfile.DefaultConfig()
@@ -1811,8 +1814,7 @@ func openDoltServerConnection() (*sql.DB, func()) {
 
 	db, err := sql.Open("mysql", connStr)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error connecting to Dolt server: %v\n", err)
-		os.Exit(1)
+		return nil, nil, fmt.Errorf("connecting to Dolt server: %w", err)
 	}
 
 	db.SetMaxOpenConns(2)
@@ -1824,12 +1826,10 @@ func openDoltServerConnection() (*sql.DB, func()) {
 	defer cancel()
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
-		fmt.Fprintf(os.Stderr, "Error: cannot reach Dolt server at %s:%d: %v\n", host, port, err)
-		fmt.Fprintln(os.Stderr, "Start the server with: bd dolt start")
-		os.Exit(1)
+		return nil, nil, fmt.Errorf("cannot reach Dolt server at %s:%d: %w\nStart the server with: bd dolt start", host, port, err)
 	}
 
-	return db, func() { _ = db.Close() }
+	return db, func() { _ = db.Close() }, nil
 }
 
 // doltServerPidFile returns the path to the PID file for the managed dolt server.

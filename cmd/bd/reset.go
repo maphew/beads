@@ -29,7 +29,7 @@ Use --force to actually perform the reset.
 Examples:
   bd reset              # Show what would be deleted
   bd reset --force      # Actually delete everything`,
-	Run: runReset,
+	RunE: runReset,
 }
 
 func init() {
@@ -37,7 +37,7 @@ func init() {
 	// Note: resetCmd is added to adminCmd in admin.go
 }
 
-func runReset(cmd *cobra.Command, args []string) {
+func runReset(cmd *cobra.Command, args []string) error {
 	CheckReadonly("reset")
 
 	force, _ := cmd.Flags().GetBool("force")
@@ -52,7 +52,7 @@ func runReset(cmd *cobra.Command, args []string) {
 		} else {
 			fmt.Fprintf(os.Stderr, "Error: not a git repository\n")
 		}
-		os.Exit(1)
+		return silentCommandExit(cmd, 1)
 	}
 
 	// Resolve .beads directory (worktree-aware)
@@ -67,7 +67,7 @@ func runReset(cmd *cobra.Command, args []string) {
 			fmt.Println("Beads is not initialized in this repository.")
 			fmt.Println("Nothing to reset.")
 		}
-		return
+		return nil
 	}
 
 	// Collect what would be deleted
@@ -76,11 +76,12 @@ func runReset(cmd *cobra.Command, args []string) {
 	if !force {
 		// Dry-run mode: show what would be deleted
 		showResetPreview(items)
-		return
+		return nil
 	}
 
 	// Actually perform the reset
 	performReset(items, gitCommonDir, beadsDir)
+	return nil
 }
 
 type resetItem struct {

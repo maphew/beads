@@ -7,9 +7,28 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/git"
 )
+
+func TestRunResetNotGitRepositoryReturnsCommandError(t *testing.T) {
+	t.Chdir(t.TempDir())
+	git.ResetCaches()
+	beads.ResetCaches()
+
+	cmd := &cobra.Command{Use: "reset"}
+	err := runReset(cmd, nil)
+	if err == nil {
+		t.Fatal("runReset() returned nil, want command error")
+	}
+	if got := commandExitCode(err); got != 1 {
+		t.Fatalf("commandExitCode() = %d, want 1", got)
+	}
+	if !cmd.SilenceErrors {
+		t.Fatal("runReset should suppress duplicate Cobra error output after rendering the error")
+	}
+}
 
 func TestReset_WorktreeFindsBeadsDir(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "beads-reset-worktree-test-*")
