@@ -66,24 +66,13 @@ func (s *DoltStore) ImportIssueComment(ctx context.Context, issueID, author, tex
 
 // GetIssueComments retrieves all comments for an issue
 func (s *DoltStore) GetIssueComments(ctx context.Context, issueID string) ([]*types.Comment, error) {
-	table := "comments"
-	if s.isActiveWisp(ctx, issueID) {
-		table = "wisp_comments"
-	}
-
-	//nolint:gosec // G201: table is hardcoded
-	rows, err := s.queryContext(ctx, fmt.Sprintf(`
-		SELECT id, issue_id, author, text, created_at
-		FROM %s
-		WHERE issue_id = ?
-		ORDER BY created_at ASC, id ASC
-	`, table), issueID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get comments: %w", err)
-	}
-	defer rows.Close()
-
-	return scanComments(rows)
+	var result []*types.Comment
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.GetIssueCommentsInTx(ctx, tx, issueID)
+		return err
+	})
+	return result, err
 }
 
 // GetCommentsForIssues retrieves comments for multiple issues
@@ -107,17 +96,4 @@ func (s *DoltStore) GetCommentCounts(ctx context.Context, issueIDs []string) (ma
 		return err
 	})
 	return result, err
-}
-
-// scanComments scans comment rows into a slice.
-func scanComments(rows *sql.Rows) ([]*types.Comment, error) {
-	var comments []*types.Comment
-	for rows.Next() {
-		var c types.Comment
-		if err := rows.Scan(&c.ID, &c.IssueID, &c.Author, &c.Text, &c.CreatedAt); err != nil {
-			return nil, fmt.Errorf("failed to scan comment: %w", err)
-		}
-		comments = append(comments, &c)
-	}
-	return comments, rows.Err()
 }
