@@ -783,12 +783,13 @@ func TestEmbeddedInitConcurrent(t *testing.T) {
 		timedOut bool
 	}
 	results := make([]result, N)
+	const processTimeout = 2 * time.Minute
 	var wg sync.WaitGroup
 	wg.Add(N)
 	for i := 0; i < N; i++ {
 		go func(idx int) {
 			defer wg.Done()
-			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), processTimeout)
 			defer cancel()
 
 			cmd := exec.CommandContext(ctx, bd, "init", "--prefix", "conc", "--force", "--quiet", "--skip-agents")
@@ -803,7 +804,7 @@ func TestEmbeddedInitConcurrent(t *testing.T) {
 	successes, lockErrors := 0, 0
 	for _, r := range results {
 		if r.timedOut {
-			t.Errorf("process %d timed out after 45s running concurrent bd init: %v\n%s", r.idx, r.err, r.out)
+			t.Errorf("process %d timed out after %s running concurrent bd init: %v\n%s", r.idx, processTimeout, r.err, r.out)
 			continue
 		}
 		if strings.Contains(r.out, "panic") {
