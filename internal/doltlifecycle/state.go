@@ -163,3 +163,32 @@ func StateDescription(state State) string {
 		return "unknown Dolt lifecycle state"
 	}
 }
+
+func StateGuidance(state State) string {
+	switch state {
+	case StateUninitialized:
+		return "Run bd bootstrap for existing-project recovery, or bd init only for a brand-new project."
+	case StateInitializedEmbedded:
+		return "Embedded Dolt is initialized; no server process is expected."
+	case StateInitializedServer:
+		return "Dolt server is reachable; inspect dolt_status or doctor output for remaining issues."
+	case StateServerUnavailable:
+		return "Run bd dolt status to inspect the configured server, then bd dolt start if this project owns the server."
+	case StateMigrationRequired:
+		return "Run bd doctor --fix to apply required migrations."
+	case StateMigrationFailed:
+		return "Run bd doctor --fix after reviewing the migration error; restore from backup if repair fails."
+	case StateLockHeld:
+		return "Current process owns the embedded Dolt lock."
+	case StateLockContended:
+		return "Wait for the other bd process to finish, or stop it if it is stale."
+	case StateRemoteConfigured:
+		return "A Dolt remote is configured; use bd bootstrap --dry-run to confirm recovery or sync plans."
+	case StateRemoteDiverged:
+		return "Run bd dolt pull or bd doctor for divergence details before pushing."
+	case StateRecoveryRequired:
+		return "Run bd bootstrap first; use bd backup restore only if bootstrap cannot recover automatically."
+	default:
+		return "Run bd doctor for diagnostics."
+	}
+}

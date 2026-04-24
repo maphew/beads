@@ -18,6 +18,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltinspect"
+	"github.com/steveyegge/beads/internal/doltlifecycle"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
@@ -489,11 +490,16 @@ and database.`,
 
 		if result.Managed == nil || !result.Managed.Running {
 			fmt.Println("Dolt server: not running")
+			fmt.Printf("  Lifecycle: %s\n", result.Lifecycle.Primary)
 			fmt.Printf("  Expected port: %d\n", result.ExpectedPort)
+			if result.Lifecycle.Primary != "" {
+				fmt.Printf("  Next: %s\n", doltlifecycle.StateGuidance(result.Lifecycle.Primary))
+			}
 			return nil
 		}
 
 		fmt.Println("Dolt server: running")
+		fmt.Printf("  Lifecycle: %s\n", result.Lifecycle.Primary)
 		fmt.Printf("  PID:  %d\n", result.Managed.PID)
 		fmt.Printf("  Port: %d\n", result.Managed.Port)
 		fmt.Printf("  Data: %s\n", result.Managed.DataDir)
@@ -545,6 +551,7 @@ func renderExternalDoltStatus(result externalDoltStatusResult) {
 	} else {
 		fmt.Println("Dolt server: not reachable (external)")
 	}
+	fmt.Printf("  Lifecycle: %s\n", result.LifecycleState)
 	fmt.Printf("  Host:     %s\n", result.Host)
 	fmt.Printf("  Port:     %d\n", result.Port)
 	fmt.Printf("  Database: %s\n", result.Database)
@@ -555,6 +562,9 @@ func renderExternalDoltStatus(result externalDoltStatusResult) {
 	}
 	if result.Error != "" {
 		fmt.Printf("  Error:    %s\n", result.Error)
+	}
+	if result.LifecycleGuidance != "" {
+		fmt.Printf("  Next:     %s\n", result.LifecycleGuidance)
 	}
 }
 
@@ -577,6 +587,7 @@ func renderEmbeddedDoltStatus(result embeddedDoltStatusResult) {
 	}
 
 	fmt.Println("Dolt engine: embedded (in-process, no server)")
+	fmt.Printf("  Lifecycle: %s\n", result.LifecycleState)
 	fmt.Printf("  Data: %s\n", result.DataDir)
 	if !result.DataDirExists {
 		fmt.Printf("  %s\n", ui.RenderWarn("Data directory does not exist — run 'bd init' to create it"))
@@ -1308,6 +1319,12 @@ func doltShowConfigJSON(result doltShowConfigResult) map[string]interface{} {
 	if result.ConnectionChecked {
 		out["connection_ok"] = result.ConnectionOK
 	}
+	if result.Lifecycle.Primary != "" {
+		out["lifecycle_state"] = result.Lifecycle.Primary
+		out["lifecycle_states"] = result.Lifecycle.States
+		out["lifecycle_severity"] = result.Lifecycle.Severity
+		out["lifecycle_guidance"] = result.LifecycleGuidance
+	}
 	return out
 }
 
@@ -1315,9 +1332,15 @@ func renderDoltShowConfig(result doltShowConfigResult) {
 	fmt.Println("Dolt Configuration")
 	fmt.Println("==================")
 	fmt.Printf("  Database: %s\n", result.Database)
+	if result.Lifecycle.Primary != "" {
+		fmt.Printf("  Lifecycle: %s\n", result.Lifecycle.Primary)
+	}
 	if result.Embedded {
 		fmt.Println("  Mode:     embedded (in-process Dolt engine)")
 		fmt.Printf("  Data:     %s\n", result.DataDir)
+		if result.LifecycleGuidance != "" {
+			fmt.Printf("  Next:     %s\n", result.LifecycleGuidance)
+		}
 		return
 	}
 
@@ -1342,6 +1365,9 @@ func renderDoltShowConfig(result doltShowConfigResult) {
 		} else {
 			fmt.Printf("  %s\n", ui.RenderWarn("✗ Server not reachable"))
 		}
+	}
+	if result.LifecycleGuidance != "" {
+		fmt.Printf("  Next:     %s\n", result.LifecycleGuidance)
 	}
 }
 

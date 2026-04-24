@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/doltlifecycle"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
@@ -41,39 +42,60 @@ type StatusResult struct {
 	ExpectedPort int
 	LogPath      string
 	SharedServer bool
+	Lifecycle    doltlifecycle.Snapshot
 }
 
 type ExternalStatusResult struct {
-	Mode     string `json:"mode"`
-	Host     string `json:"host"`
-	Port     int    `json:"port"`
-	User     string `json:"user"`
-	Database string `json:"database"`
-	TLS      bool   `json:"tls"`
-	Running  bool   `json:"running"`
-	Version  string `json:"version,omitempty"`
-	Error    string `json:"error,omitempty"`
+	Mode              string                 `json:"mode"`
+	Host              string                 `json:"host"`
+	Port              int                    `json:"port"`
+	User              string                 `json:"user"`
+	Database          string                 `json:"database"`
+	TLS               bool                   `json:"tls"`
+	Running           bool                   `json:"running"`
+	Version           string                 `json:"version,omitempty"`
+	Error             string                 `json:"error,omitempty"`
+	LifecycleState    doltlifecycle.State    `json:"lifecycle_state"`
+	LifecycleStates   []doltlifecycle.State  `json:"lifecycle_states"`
+	LifecycleSeverity doltlifecycle.Severity `json:"lifecycle_severity"`
+	LifecycleGuidance string                 `json:"lifecycle_guidance"`
 }
 
 type EmbeddedStatusResult struct {
-	Mode          string `json:"mode"`
-	ServerRunning bool   `json:"server_running"`
-	DataDir       string `json:"data_dir"`
-	DataDirExists bool   `json:"data_dir_exists"`
+	Mode              string                 `json:"mode"`
+	ServerRunning     bool                   `json:"server_running"`
+	DataDir           string                 `json:"data_dir"`
+	DataDirExists     bool                   `json:"data_dir_exists"`
+	LifecycleState    doltlifecycle.State    `json:"lifecycle_state"`
+	LifecycleStates   []doltlifecycle.State  `json:"lifecycle_states"`
+	LifecycleSeverity doltlifecycle.Severity `json:"lifecycle_severity"`
+	LifecycleGuidance string                 `json:"lifecycle_guidance"`
 }
 
 func (Service) Status(ctx context.Context, req StatusRequest) (StatusResult, error) {
 	if req.Embedded {
+		embedded := InspectEmbeddedStatus(req.BeadsDir)
 		return StatusResult{
 			Mode:     StatusModeEmbedded,
-			Embedded: InspectEmbeddedStatus(req.BeadsDir),
+			Embedded: embedded,
+			Lifecycle: doltlifecycle.Snapshot{
+				Primary:  embedded.LifecycleState,
+				States:   embedded.LifecycleStates,
+				Severity: embedded.LifecycleSeverity,
+			},
 		}, nil
 	}
 
 	if req.Config != nil && ShouldUseExternalEndpoint(req.BeadsDir, req.Config) {
+		external := InspectExternalStatus(ctx, req.BeadsDir, req.Config)
 		return StatusResult{
 			Mode:     StatusModeExternal,
-			External: InspectExternalStatus(ctx, req.BeadsDir, req.Config),
+			External: external,
+			Lifecycle: doltlifecycle.Snapshot{
+				Primary:  external.LifecycleState,
+				States:   external.LifecycleStates,
+				Severity: external.LifecycleSeverity,
+			},
 		}, nil
 	}
 
@@ -82,12 +104,18 @@ func (Service) Status(ctx context.Context, req StatusRequest) (StatusResult, err
 	if err != nil {
 		return StatusResult{}, err
 	}
+	lifecycle := doltlifecycle.Evaluate(doltlifecycle.Observation{
+		Initialized:     true,
+		Mode:            doltlifecycle.ModeServer,
+		ServerReachable: state != nil && state.Running,
+	})
 	return StatusResult{
 		Mode:         StatusModeManaged,
 		Managed:      state,
 		ExpectedPort: doltserver.DefaultConfig(serverDir).Port,
 		LogPath:      doltserver.LogPath(serverDir),
 		SharedServer: doltserver.IsSharedServerMode(),
+		Lifecycle:    lifecycle,
 	}, nil
 }
 
@@ -120,6 +148,7 @@ func InspectExternalStatus(ctx context.Context, beadsDir string, cfg *configfile
 	db, openErr := sql.Open("mysql", dsn)
 	if openErr != nil {
 		result.Error = openErr.Error()
+		setExternalLifecycle(&result)
 		return result
 	}
 	defer db.Close()
@@ -128,13 +157,27 @@ func InspectExternalStatus(ctx context.Context, beadsDir string, cfg *configfile
 	defer cancel()
 	if pingErr := db.PingContext(ctx); pingErr != nil {
 		result.Error = pingErr.Error()
+		setExternalLifecycle(&result)
 		return result
 	}
 
 	result.Running = true
 	// Best-effort version lookup; don't treat errors as fatal.
 	_ = db.QueryRowContext(ctx, "SELECT @@version").Scan(&result.Version)
+	setExternalLifecycle(&result)
 	return result
+}
+
+func setExternalLifecycle(result *ExternalStatusResult) {
+	lifecycle := doltlifecycle.Evaluate(doltlifecycle.Observation{
+		Initialized:     true,
+		Mode:            doltlifecycle.ModeServer,
+		ServerReachable: result.Running,
+	})
+	result.LifecycleState = lifecycle.Primary
+	result.LifecycleStates = lifecycle.States
+	result.LifecycleSeverity = lifecycle.Severity
+	result.LifecycleGuidance = doltlifecycle.StateGuidance(lifecycle.Primary)
 }
 
 func InspectEmbeddedStatus(beadsDir string) EmbeddedStatusResult {
@@ -144,14 +187,22 @@ func InspectEmbeddedStatus(beadsDir string) EmbeddedStatusResult {
 		dataDirExists = true
 	}
 
+	lifecycle := doltlifecycle.Evaluate(doltlifecycle.Observation{
+		Initialized: true,
+		Mode:        doltlifecycle.ModeEmbedded,
+	})
 	return EmbeddedStatusResult{
 		Mode: "embedded",
 		// Embedded mode has an active in-process engine, but no separate
 		// server process. Use a server-specific field so clients do not read
 		// running=false as "Dolt is unavailable".
-		ServerRunning: false,
-		DataDir:       dataDir,
-		DataDirExists: dataDirExists,
+		ServerRunning:     false,
+		DataDir:           dataDir,
+		DataDirExists:     dataDirExists,
+		LifecycleState:    lifecycle.Primary,
+		LifecycleStates:   lifecycle.States,
+		LifecycleSeverity: lifecycle.Severity,
+		LifecycleGuidance: doltlifecycle.StateGuidance(lifecycle.Primary),
 	}
 }
 
@@ -175,6 +226,8 @@ type ShowConfigResult struct {
 	ExternalServer    bool
 	ConnectionChecked bool
 	ConnectionOK      bool
+	Lifecycle         doltlifecycle.Snapshot
+	LifecycleGuidance string
 }
 
 func (Service) ShowConfig(req ShowConfigRequest) ShowConfigResult {
@@ -194,6 +247,11 @@ func (Service) ShowConfig(req ShowConfigRequest) ShowConfigResult {
 	result.Embedded = req.Embedded
 	if result.Embedded {
 		result.DataDir = filepath.Join(req.BeadsDir, "embeddeddolt")
+		result.Lifecycle = doltlifecycle.Evaluate(doltlifecycle.Observation{
+			Initialized: true,
+			Mode:        doltlifecycle.ModeEmbedded,
+		})
+		result.LifecycleGuidance = doltlifecycle.StateGuidance(result.Lifecycle.Primary)
 		return result
 	}
 
@@ -208,6 +266,13 @@ func (Service) ShowConfig(req ShowConfigRequest) ShowConfigResult {
 			result.ConnectionOK = req.ConnectionCheck(result.Host, result.Port)
 		}
 	}
+	result.Lifecycle = doltlifecycle.Evaluate(doltlifecycle.Observation{
+		Initialized:      true,
+		Mode:             doltlifecycle.ModeServer,
+		ServerReachable:  !result.ConnectionChecked || result.ConnectionOK,
+		RemoteConfigured: result.ExternalServer,
+	})
+	result.LifecycleGuidance = doltlifecycle.StateGuidance(result.Lifecycle.Primary)
 	return result
 }
 

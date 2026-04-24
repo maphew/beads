@@ -10,6 +10,7 @@ import (
 
 	mysql "github.com/go-sql-driver/mysql"
 
+	"github.com/steveyegge/beads/internal/doltlifecycle"
 	"github.com/steveyegge/beads/internal/storage"
 )
 
@@ -146,6 +147,7 @@ func databaseNotFoundError(cfg *Config) error {
 		b.WriteString("Use bd bootstrap --dry-run if you need to confirm the plan before it initializes anything.\n")
 		b.WriteString("Use bd init only when creating a brand-new project with no existing .beads data.")
 	}
+	fmt.Fprintf(&b, "\n\nLifecycle: %s\nNext: %s", doltlifecycle.StateRecoveryRequired, doltlifecycle.StateGuidance(doltlifecycle.StateRecoveryRequired))
 
 	return errors.New(b.String())
 }

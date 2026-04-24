@@ -102,6 +102,9 @@ func TestStateMetadataCoversAllStates(t *testing.T) {
 		if StateDescription(state) == "" {
 			t.Fatalf("StateDescription(%q) is empty", state)
 		}
+		if StateGuidance(state) == "" {
+			t.Fatalf("StateGuidance(%q) is empty", state)
+		}
 		if StateSeverity(state) == "" {
 			t.Fatalf("StateSeverity(%q) is empty", state)
 		}

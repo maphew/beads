@@ -11,6 +11,7 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/doltlifecycle"
 	"github.com/steveyegge/beads/internal/doltserver"
 
 	"github.com/steveyegge/beads/internal/storage/dolt"
@@ -507,11 +508,17 @@ func CheckDoltStatus(path string) DoctorCheck {
 
 	conn, err := openDoltConn(beadsDir)
 	if err != nil {
+		lifecycle := doltlifecycle.Evaluate(doltlifecycle.Observation{
+			Initialized:     true,
+			Mode:            doltlifecycle.ModeServer,
+			ServerReachable: false,
+		})
 		return DoctorCheck{
 			Name:     "Dolt Status",
 			Status:   StatusWarning,
-			Message:  "Could not check Dolt status",
-			Detail:   err.Error(),
+			Message:  fmt.Sprintf("Could not check Dolt status (%s)", lifecycle.Primary),
+			Detail:   fmt.Sprintf("%s\nLifecycle: %s\n%s", err.Error(), lifecycle.Primary, doltlifecycle.StateDescription(lifecycle.Primary)),
+			Fix:      doltlifecycle.StateGuidance(lifecycle.Primary),
 			Category: CategoryData,
 		}
 	}
@@ -678,12 +685,17 @@ func checkSharedServerHealth(beadsDir string) DoctorCheck {
 	}
 
 	if state == nil || !state.Running {
+		lifecycle := doltlifecycle.Evaluate(doltlifecycle.Observation{
+			Initialized:     true,
+			Mode:            doltlifecycle.ModeServer,
+			ServerReachable: false,
+		})
 		return DoctorCheck{
 			Name:     "Shared Server",
 			Status:   StatusWarning,
-			Message:  "Shared server not running (will auto-start on next bd command)",
-			Detail:   fmt.Sprintf("Server directory: %s", sharedDir),
-			Fix:      "Run 'bd dolt start' to start the shared server",
+			Message:  fmt.Sprintf("Shared server not running (%s)", lifecycle.Primary),
+			Detail:   fmt.Sprintf("Server directory: %s\nLifecycle: %s", sharedDir, lifecycle.Primary),
+			Fix:      doltlifecycle.StateGuidance(lifecycle.Primary),
 			Category: CategoryRuntime,
 		}
 	}
