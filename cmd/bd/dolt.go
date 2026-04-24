@@ -99,15 +99,14 @@ Examples:
   bd dolt set port 3307 --update-config
   bd dolt set data-dir /home/user/.beads-dolt/myproject`,
 	Args: cobra.ExactArgs(2),
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		if isEmbeddedMode() {
-			fmt.Fprintln(os.Stderr, "Error: 'bd dolt set' is not supported in embedded mode (no Dolt server)")
-			os.Exit(1)
+			return commandErrorf(cmd, "'bd dolt set' is not supported in embedded mode (no Dolt server)")
 		}
 		key := args[0]
 		value := args[1]
 		updateConfig, _ := cmd.Flags().GetBool("update-config")
-		setDoltConfig(key, value, updateConfig)
+		return setDoltConfig(cmd, key, value, updateConfig)
 	},
 }
 
@@ -909,18 +908,18 @@ var doltRemoteAddCmd = &cobra.Command{
 	Use:   "add <name> <url>",
 	Short: "Add a Dolt remote (both SQL server and CLI)",
 	Args:  cobra.ExactArgs(2),
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := context.Background()
 		st := getStore()
 		if st == nil {
 			fmt.Fprintf(os.Stderr, "Error: no store available\n")
-			os.Exit(1)
+			return silentCommandExit(cmd, 1)
 		}
 		name, url := args[0], args[1]
 		locator, ok := storage.UnwrapStore(st).(storage.StoreLocator)
 		if !ok {
 			fmt.Fprintf(os.Stderr, "Error: storage backend does not support store location\n")
-			os.Exit(1)
+			return silentCommandExit(cmd, 1)
 		}
 		dbPath := locator.CLIDir()
 		embedded := isEmbeddedMode()
@@ -936,22 +935,22 @@ var doltRemoteAddCmd = &cobra.Command{
 		if sqlURL != "" && sqlURL != url {
 			if !confirmOverwrite("SQL server", name, sqlURL, url) {
 				fmt.Println("Canceled.")
-				return
+				return nil
 			}
 			// Remove existing SQL remote before re-adding
 			if err := st.RemoveRemote(ctx, name); err != nil {
 				fmt.Fprintf(os.Stderr, "Error removing existing SQL remote: %v\n", err)
-				os.Exit(1)
+				return silentCommandExit(cmd, 1)
 			}
 		}
 		if !embedded && cliURL != "" && cliURL != url {
 			if !confirmOverwrite("CLI (filesystem)", name, cliURL, url) {
 				fmt.Println("Canceled.")
-				return
+				return nil
 			}
 			if err := doltutil.RemoveCLIRemote(dbPath, name); err != nil {
 				fmt.Fprintf(os.Stderr, "Error removing existing CLI remote: %v\n", err)
-				os.Exit(1)
+				return silentCommandExit(cmd, 1)
 			}
 		}
 
@@ -963,7 +962,7 @@ var doltRemoteAddCmd = &cobra.Command{
 				} else {
 					fmt.Fprintf(os.Stderr, "Error adding SQL remote: %v\n", err)
 				}
-				os.Exit(1)
+				return silentCommandExit(cmd, 1)
 			}
 		}
 
@@ -986,7 +985,7 @@ var doltRemoteAddCmd = &cobra.Command{
 		// gitignored and won't survive clone).
 		if name == "origin" {
 			if err := config.SetYamlConfig("sync.remote", url); err != nil {
-				FatalError("failed to persist sync.remote to config.yaml: %v", err)
+				return commandErrorf(cmd, "failed to persist sync.remote to config.yaml: %v", err)
 			}
 			// Auto-commit the config change so it's not left dirty.
 			if isGitRepo() {
@@ -1006,23 +1005,24 @@ var doltRemoteAddCmd = &cobra.Command{
 		} else {
 			fmt.Printf("Added remote %q → %s %s\n", name, url, suffix)
 		}
+		return nil
 	},
 }
 
 var doltRemoteListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List configured Dolt remotes (SQL server + CLI)",
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := context.Background()
 		st := getStore()
 		if st == nil {
 			fmt.Fprintf(os.Stderr, "Error: no store available\n")
-			os.Exit(1)
+			return silentCommandExit(cmd, 1)
 		}
 		locator, ok := storage.UnwrapStore(st).(storage.StoreLocator)
 		if !ok {
 			fmt.Fprintf(os.Stderr, "Error: storage backend does not support store location\n")
-			os.Exit(1)
+			return silentCommandExit(cmd, 1)
 		}
 		dbPath := locator.CLIDir()
 		embedded := isEmbeddedMode()
@@ -1034,7 +1034,7 @@ var doltRemoteListCmd = &cobra.Command{
 			} else {
 				fmt.Fprintf(os.Stderr, "Error listing SQL remotes: %v\n", sqlErr)
 			}
-			os.Exit(1)
+			return silentCommandExit(cmd, 1)
 		}
 
 		// Build unified view
@@ -1086,12 +1086,12 @@ var doltRemoteListCmd = &cobra.Command{
 
 		if jsonOutput {
 			outputJSON(unified)
-			return
+			return nil
 		}
 
 		if len(unified) == 0 {
 			fmt.Println("No remotes configured.")
-			return
+			return nil
 		}
 
 		for _, u := range unified {
@@ -1123,6 +1123,7 @@ var doltRemoteListCmd = &cobra.Command{
 				fmt.Printf("\n%s Remote discrepancies detected. Run 'bd doctor --fix' to resolve.\n", ui.RenderWarn("⚠"))
 			}
 		}
+		return nil
 	},
 }
 
@@ -1130,18 +1131,18 @@ var doltRemoteRemoveCmd = &cobra.Command{
 	Use:   "remove <name>",
 	Short: "Remove a Dolt remote (both SQL server and CLI)",
 	Args:  cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := context.Background()
 		st := getStore()
 		if st == nil {
 			fmt.Fprintf(os.Stderr, "Error: no store available\n")
-			os.Exit(1)
+			return silentCommandExit(cmd, 1)
 		}
 		name := args[0]
 		locator, ok := storage.UnwrapStore(st).(storage.StoreLocator)
 		if !ok {
 			fmt.Fprintf(os.Stderr, "Error: storage backend does not support store location\n")
-			os.Exit(1)
+			return silentCommandExit(cmd, 1)
 		}
 		dbPath := locator.CLIDir()
 		embedded := isEmbeddedMode()
@@ -1158,7 +1159,7 @@ var doltRemoteRemoveCmd = &cobra.Command{
 			fmt.Fprintf(os.Stderr, "  SQL: %s\n  CLI: %s\n", sqlURL, cliURL)
 			fmt.Fprintf(os.Stderr, "\nResolve the conflict first. To force remove from both:\n")
 			fmt.Fprintf(os.Stderr, "  bd dolt remote remove %s --force\n", name)
-			os.Exit(1)
+			return silentCommandExit(cmd, 1)
 		}
 
 		// Remove from SQL server
@@ -1169,7 +1170,7 @@ var doltRemoteRemoveCmd = &cobra.Command{
 				} else {
 					fmt.Fprintf(os.Stderr, "Error removing SQL remote: %v\n", err)
 				}
-				os.Exit(1)
+				return silentCommandExit(cmd, 1)
 			}
 		}
 
@@ -1188,7 +1189,7 @@ var doltRemoteRemoveCmd = &cobra.Command{
 
 		if sqlURL == "" && cliURL == "" {
 			fmt.Fprintf(os.Stderr, "Error: remote %q not found on either surface\n", name)
-			os.Exit(1)
+			return silentCommandExit(cmd, 1)
 		}
 
 		// Clear sync.remote from config.yaml if the origin remote was removed,
@@ -1218,6 +1219,7 @@ var doltRemoteRemoveCmd = &cobra.Command{
 		} else {
 			fmt.Printf("Removed remote %q %s\n", name, suffix)
 		}
+		return nil
 	},
 }
 
@@ -1451,24 +1453,22 @@ func renderDoltShowConfig(result doltShowConfigResult) {
 	}
 }
 
-func setDoltConfig(key, value string, updateConfig bool) {
+func setDoltConfig(cmd *cobra.Command, key, value string, updateConfig bool) error {
 	beadsDir := selectedDoltBeadsDir()
 	if beadsDir == "" {
-		FatalErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
+		return commandErrorWithHint(cmd, activeWorkspaceNotFoundError(), diagHint())
 	}
 
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
-		os.Exit(1)
+		return commandErrorf(cmd, "loading config: %v", err)
 	}
 	if cfg == nil {
 		cfg = configfile.DefaultConfig()
 	}
 
 	if cfg.GetBackend() != configfile.BackendDolt {
-		fmt.Fprintf(os.Stderr, "Error: not using Dolt backend\n")
-		os.Exit(1)
+		return commandErrorf(cmd, "not using Dolt backend")
 	}
 
 	var yamlKey string
@@ -1477,21 +1477,18 @@ func setDoltConfig(key, value string, updateConfig bool) {
 	case "mode":
 		// Mode will be configurable again when embedded Dolt support returns.
 		// For now, server mode is required (embedded driver not yet re-integrated).
-		fmt.Fprintf(os.Stderr, "Error: mode is not yet configurable; embedded mode is coming soon\n")
-		os.Exit(1)
+		return commandErrorf(cmd, "mode is not yet configurable; embedded mode is coming soon")
 
 	case "database":
 		if value == "" {
-			fmt.Fprintf(os.Stderr, "Error: database name cannot be empty\n")
-			os.Exit(1)
+			return commandErrorf(cmd, "database name cannot be empty")
 		}
 		cfg.DoltDatabase = value
 		yamlKey = "dolt.database"
 
 	case "host":
 		if value == "" {
-			fmt.Fprintf(os.Stderr, "Error: host cannot be empty\n")
-			os.Exit(1)
+			return commandErrorf(cmd, "host cannot be empty")
 		}
 		cfg.DoltServerHost = value
 		yamlKey = "dolt.host"
@@ -1499,8 +1496,7 @@ func setDoltConfig(key, value string, updateConfig bool) {
 	case "port":
 		port, err := strconv.Atoi(value)
 		if err != nil || port <= 0 || port > 65535 {
-			fmt.Fprintf(os.Stderr, "Error: port must be a valid port number (1-65535)\n")
-			os.Exit(1)
+			return commandErrorf(cmd, "port must be a valid port number (1-65535)")
 		}
 		cfg.DoltServerPort = port
 		yamlKey = "dolt.port"
@@ -1512,8 +1508,7 @@ func setDoltConfig(key, value string, updateConfig bool) {
 
 	case "user":
 		if value == "" {
-			fmt.Fprintf(os.Stderr, "Error: user cannot be empty\n")
-			os.Exit(1)
+			return commandErrorf(cmd, "user cannot be empty")
 		}
 		cfg.DoltServerUser = value
 		yamlKey = "dolt.user"
@@ -1530,15 +1525,14 @@ func setDoltConfig(key, value string, updateConfig bool) {
 			fmt.Fprintf(os.Stderr, "from the configured database '%s'.\n", cfg.GetDoltDatabase())
 			fmt.Fprintf(os.Stderr, "\nTo change which database to use:\n")
 			fmt.Fprintf(os.Stderr, "  bd dolt set database <name>\n")
-			os.Exit(1)
+			return silentCommandExit(cmd, 1)
 		}
 		if value == "" {
 			// Allow clearing the custom data dir (revert to default .beads/dolt)
 			cfg.DoltDataDir = ""
 		} else {
 			if !filepath.IsAbs(value) {
-				fmt.Fprintf(os.Stderr, "Error: data-dir must be an absolute path\n")
-				os.Exit(1)
+				return commandErrorf(cmd, "data-dir must be an absolute path")
 			}
 			cfg.DoltDataDir = value
 			// Absolute paths are machine-specific and won't be persisted to
@@ -1553,13 +1547,11 @@ func setDoltConfig(key, value string, updateConfig bool) {
 	case "shared-server":
 		lower := strings.ToLower(value)
 		if lower != "true" && lower != "false" {
-			fmt.Fprintf(os.Stderr, "Error: shared-server must be 'true' or 'false'\n")
-			os.Exit(1)
+			return commandErrorf(cmd, "shared-server must be 'true' or 'false'")
 		}
 		// shared-server is yaml-only (not stored in metadata.json)
 		if err := config.SetYamlConfig("dolt.shared-server", lower); err != nil {
-			fmt.Fprintf(os.Stderr, "Error setting shared-server: %v\n", err)
-			os.Exit(1)
+			return commandErrorf(cmd, "setting shared-server: %v", err)
 		}
 		if jsonOutput {
 			outputJSON(map[string]interface{}{
@@ -1567,7 +1559,7 @@ func setDoltConfig(key, value string, updateConfig bool) {
 				"value":    lower,
 				"location": "config.yaml",
 			})
-			return
+			return nil
 		}
 		if lower == "true" {
 			fmt.Println("Shared server mode enabled.")
@@ -1576,12 +1568,12 @@ func setDoltConfig(key, value string, updateConfig bool) {
 		} else {
 			fmt.Println("Shared server mode disabled. Each project will use its own Dolt server.")
 		}
-		return
+		return nil
 
 	default:
 		fmt.Fprintf(os.Stderr, "Error: unknown key '%s'\n", key)
 		fmt.Fprintf(os.Stderr, "Valid keys: database, host, port, socket, user, data-dir, shared-server\n")
-		os.Exit(1)
+		return silentCommandExit(cmd, 1)
 	}
 
 	// Audit log: record who changed what
@@ -1589,8 +1581,7 @@ func setDoltConfig(key, value string, updateConfig bool) {
 
 	// Save to metadata.json
 	if err := cfg.Save(beadsDir); err != nil {
-		fmt.Fprintf(os.Stderr, "Error saving config: %v\n", err)
-		os.Exit(1)
+		return commandErrorf(cmd, "saving config: %v", err)
 	}
 
 	if jsonOutput {
@@ -1603,7 +1594,7 @@ func setDoltConfig(key, value string, updateConfig bool) {
 			result["config_yaml_updated"] = true
 		}
 		outputJSON(result)
-		return
+		return nil
 	}
 
 	fmt.Printf("Set %s = %s (in metadata.json)\n", key, value)
@@ -1616,6 +1607,7 @@ func setDoltConfig(key, value string, updateConfig bool) {
 			fmt.Printf("Set %s = %s (in config.yaml)\n", yamlKey, value)
 		}
 	}
+	return nil
 }
 
 func testDoltConnection(cmd *cobra.Command) error {

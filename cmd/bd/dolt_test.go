@@ -364,7 +364,9 @@ func TestDoltSetConfigValidation(t *testing.T) {
 	defer func() { _ = os.Chdir(oldCwd) }()
 
 	t.Run("set database", func(t *testing.T) {
-		setDoltConfig("database", "mydb", false)
+		if err := setDoltConfig(nil, "database", "mydb", false); err != nil {
+			t.Fatalf("setDoltConfig: %v", err)
+		}
 
 		loadedCfg, err := configfile.Load(beadsDir)
 		if err != nil {
@@ -376,7 +378,9 @@ func TestDoltSetConfigValidation(t *testing.T) {
 	})
 
 	t.Run("set host", func(t *testing.T) {
-		setDoltConfig("host", "10.0.0.1", false)
+		if err := setDoltConfig(nil, "host", "10.0.0.1", false); err != nil {
+			t.Fatalf("setDoltConfig: %v", err)
+		}
 
 		loadedCfg, err := configfile.Load(beadsDir)
 		if err != nil {
@@ -388,7 +392,9 @@ func TestDoltSetConfigValidation(t *testing.T) {
 	})
 
 	t.Run("set port", func(t *testing.T) {
-		setDoltConfig("port", "3309", false)
+		if err := setDoltConfig(nil, "port", "3309", false); err != nil {
+			t.Fatalf("setDoltConfig: %v", err)
+		}
 
 		loadedCfg, err := configfile.Load(beadsDir)
 		if err != nil {
@@ -400,7 +406,9 @@ func TestDoltSetConfigValidation(t *testing.T) {
 	})
 
 	t.Run("set user", func(t *testing.T) {
-		setDoltConfig("user", "admin", false)
+		if err := setDoltConfig(nil, "user", "admin", false); err != nil {
+			t.Fatalf("setDoltConfig: %v", err)
+		}
 
 		loadedCfg, err := configfile.Load(beadsDir)
 		if err != nil {
@@ -749,7 +757,7 @@ func captureDoltSetOutput(t *testing.T, key, value string, updateConfig bool) st
 		}
 	}()
 
-	setDoltConfig(key, value, updateConfig)
+	_ = setDoltConfig(nil, key, value, updateConfig)
 
 	w.Close()
 	var buf bytes.Buffer
@@ -792,9 +800,15 @@ func TestSetDoltConfigWorktreeIsolation(t *testing.T) {
 	defer func() { _ = os.Chdir(oldCwd) }()
 
 	// Write test values via setDoltConfig
-	setDoltConfig("host", "192.168.99.99", false)
-	setDoltConfig("port", "9999", false)
-	setDoltConfig("database", "testdb", false)
+	if err := setDoltConfig(nil, "host", "192.168.99.99", false); err != nil {
+		t.Fatalf("setDoltConfig host: %v", err)
+	}
+	if err := setDoltConfig(nil, "port", "9999", false); err != nil {
+		t.Fatalf("setDoltConfig port: %v", err)
+	}
+	if err := setDoltConfig(nil, "database", "testdb", false); err != nil {
+		t.Fatalf("setDoltConfig database: %v", err)
+	}
 
 	// Verify values were written to the TEMP directory's metadata.json
 	loadedCfg, err := configfile.Load(beadsDir)
@@ -885,7 +899,9 @@ func TestSetDataDirAllowedClear(t *testing.T) {
 	defer func() { _ = os.Chdir(oldCwd) }()
 
 	// Clearing data-dir should succeed even in server mode
-	setDoltConfig("data-dir", "", false)
+	if err := setDoltConfig(nil, "data-dir", "", false); err != nil {
+		t.Fatalf("setDoltConfig data-dir: %v", err)
+	}
 
 	loadedCfg, err := configfile.Load(beadsDir)
 	if err != nil {
