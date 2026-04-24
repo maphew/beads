@@ -1340,3 +1340,61 @@ func TestDoltStatusExternalLocalhostUsesEndpoint(t *testing.T) {
 		t.Fatalf("expected configured external port in output, got:\n%s", out)
 	}
 }
+
+func TestDoltShowExternalLocalhostReportsExternalEndpoint(t *testing.T) {
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatalf("failed to create .beads dir: %v", err)
+	}
+
+	cfg := configfile.DefaultConfig()
+	cfg.Backend = configfile.BackendDolt
+	cfg.DoltMode = configfile.DoltModeServer
+	cfg.DoltServerHost = "127.0.0.1"
+	cfg.DoltDatabase = "beads_ext"
+	cfg.DoltServerUser = "root"
+	if err := cfg.Save(beadsDir); err != nil {
+		t.Fatalf("failed to save config: %v", err)
+	}
+
+	t.Setenv("BEADS_DIR", beadsDir)
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "1")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "1")
+
+	oldCwd, _ := os.Getwd()
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("failed to chdir: %v", err)
+	}
+	defer func() { _ = os.Chdir(oldCwd) }()
+
+	origJSON := jsonOutput
+	origServerMode := serverMode
+	defer func() {
+		jsonOutput = origJSON
+		serverMode = origServerMode
+		setStore(nil)
+	}()
+	jsonOutput = false
+	serverMode = true
+	setStore(nil)
+
+	out := captureStdout(t, func() error {
+		showDoltConfig(false)
+		return nil
+	})
+
+	for _, want := range []string{
+		"Host:     127.0.0.1",
+		"Port:     1",
+		"Mode:     external server",
+		"external server remotes require a live SQL connection",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected output to contain %q, got:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "Mode:     per-project") {
+		t.Fatalf("expected external endpoint mode, got per-project:\n%s", out)
+	}
+}

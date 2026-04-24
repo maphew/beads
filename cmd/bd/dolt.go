@@ -462,7 +462,7 @@ and database.`,
 
 		// For externally-managed Dolt servers, the local PID file is
 		// meaningless — ping the configured endpoint via SQL instead.
-		if cfg, cfgErr := configfile.Load(beadsDir); cfgErr == nil && shouldUseExternalDoltStatus(beadsDir, cfg) {
+		if cfg, cfgErr := configfile.Load(beadsDir); cfgErr == nil && shouldUseExternalDoltEndpoint(beadsDir, cfg) {
 			runExternalDoltStatus(beadsDir, cfg)
 			return
 		}
@@ -512,7 +512,7 @@ func isLocalHost(host string) bool {
 	return false
 }
 
-func shouldUseExternalDoltStatus(beadsDir string, cfg *configfile.Config) bool {
+func shouldUseExternalDoltEndpoint(beadsDir string, cfg *configfile.Config) bool {
 	if cfg == nil || !cfg.IsDoltServerMode() {
 		return false
 	}
@@ -1252,6 +1252,7 @@ func showDoltConfig(testConnection bool) {
 	dsCfg := doltserver.DefaultConfig(beadsDir)
 	showPort := dsCfg.Port
 	embeddedDataDir := filepath.Join(beadsDir, "embeddeddolt")
+	externalEndpoint := shouldUseExternalDoltEndpoint(beadsDir, cfg)
 
 	if jsonOutput {
 		result := map[string]interface{}{
@@ -1267,6 +1268,7 @@ func showDoltConfig(testConnection bool) {
 				result["port"] = showPort
 				result["user"] = cfg.GetDoltServerUser()
 				result["shared_server"] = doltserver.IsSharedServerMode()
+				result["external_server"] = externalEndpoint
 				if testConnection {
 					result["connection_ok"] = testServerConnection(showHost, showPort)
 				}
@@ -1291,7 +1293,9 @@ func showDoltConfig(testConnection bool) {
 		fmt.Printf("  Host:     %s\n", showHost)
 		fmt.Printf("  Port:     %d\n", showPort)
 		fmt.Printf("  User:     %s\n", cfg.GetDoltServerUser())
-		if doltserver.IsSharedServerMode() {
+		if externalEndpoint {
+			fmt.Println("  Mode:     external server")
+		} else if doltserver.IsSharedServerMode() {
 			fmt.Println("  Mode:     shared server")
 			if sharedDir, err := doltserver.SharedServerDir(); err == nil {
 				fmt.Printf("  Server:   %s\n", sharedDir)
@@ -1329,9 +1333,17 @@ func showDoltConfig(testConnection bool) {
 			}
 		}
 	}
-	cliRemotes, cliErr := doltutil.ListCLIRemotes(dbDir)
+	var cliRemotes []storage.RemoteInfo
+	var cliErr error
+	if !externalEndpoint {
+		cliRemotes, cliErr = doltutil.ListCLIRemotes(dbDir)
+	}
 	if len(sqlRemotes) == 0 && (cliErr != nil || len(cliRemotes) == 0) {
-		fmt.Println("  (none)")
+		if externalEndpoint {
+			fmt.Println("  (unavailable: external server remotes require a live SQL connection)")
+		} else {
+			fmt.Println("  (none)")
+		}
 	} else {
 		// Show SQL remotes
 		if len(sqlRemotes) > 0 {
