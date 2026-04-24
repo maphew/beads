@@ -102,6 +102,7 @@ var readOnlyCommands = map[string]bool{
 	"list":       true,
 	"ready":      true,
 	"show":       true,
+	"status":     true,
 	"stats":      true,
 	"blocked":    true,
 	"count":      true,
