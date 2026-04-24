@@ -52,7 +52,7 @@ func runReset(cmd *cobra.Command, args []string) error {
 		} else {
 			fmt.Fprintf(os.Stderr, "Error: not a git repository\n")
 		}
-		return silentCommandExit(cmd, 1)
+		return silentCommandExit(cmd)
 	}
 
 	// Resolve .beads directory (worktree-aware)

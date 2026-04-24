@@ -159,12 +159,12 @@ func (e commandExitError) ExitCode() int {
 	return e.code
 }
 
-func silentCommandExit(cmd *cobra.Command, code int) error {
+func silentCommandExit(cmd *cobra.Command) error {
 	if cmd != nil {
 		cmd.SilenceErrors = true
 		cmd.SilenceUsage = true
 	}
-	return commandExitError{code: code}
+	return commandExitError{code: 1}
 }
 
 func commandExitCode(err error) int {
@@ -185,7 +185,7 @@ func commandErrorf(cmd *cobra.Command, format string, args ...interface{}) error
 	} else {
 		fmt.Fprintf(os.Stderr, "Error: %s\n", msg)
 	}
-	return silentCommandExit(cmd, 1)
+	return silentCommandExit(cmd)
 }
 
 func commandErrorWithHint(cmd *cobra.Command, message, hint string) error {
@@ -195,7 +195,7 @@ func commandErrorWithHint(cmd *cobra.Command, message, hint string) error {
 		fmt.Fprintf(os.Stderr, "Error: %s\n", message)
 		fmt.Fprintf(os.Stderr, "Hint: %s\n", hint)
 	}
-	return silentCommandExit(cmd, 1)
+	return silentCommandExit(cmd)
 }
 
 // WarnError writes a warning message to stderr and returns.

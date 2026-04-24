@@ -222,7 +222,7 @@ The remote must already exist (see 'bd dolt remote add').`,
 		st := getStore()
 		if st == nil {
 			fmt.Fprintf(os.Stderr, "Error: no store available\n")
-			return silentCommandExit(cmd, 1)
+			return silentCommandExit(cmd)
 		}
 		force, _ := cmd.Flags().GetBool("force")
 		remote, _ := cmd.Flags().GetString("remote")
@@ -237,7 +237,7 @@ The remote must already exist (see 'bd dolt remote add').`,
 				} else if isDivergedHistoryErr(err) {
 					printDivergedHistoryGuidance("push --force")
 				}
-				return silentCommandExit(cmd, 1)
+				return silentCommandExit(cmd)
 			}
 			fmt.Println("Push complete.")
 			return nil
@@ -263,7 +263,7 @@ The remote must already exist (see 'bd dolt remote add').`,
 				}
 				printDivergedHistoryGuidance(op)
 			}
-			return silentCommandExit(cmd, 1)
+			return silentCommandExit(cmd)
 		}
 		fmt.Println("Push complete.")
 		return nil
@@ -286,7 +286,7 @@ The remote must already exist (see 'bd dolt remote add').`,
 		st := getStore()
 		if st == nil {
 			fmt.Fprintf(os.Stderr, "Error: no store available\n")
-			return silentCommandExit(cmd, 1)
+			return silentCommandExit(cmd)
 		}
 		remote, _ := cmd.Flags().GetString("remote")
 		if remote != "" {
@@ -300,7 +300,7 @@ The remote must already exist (see 'bd dolt remote add').`,
 				} else if isDivergedHistoryErr(err) {
 					printDivergedHistoryGuidance("pull")
 				}
-				return silentCommandExit(cmd, 1)
+				return silentCommandExit(cmd)
 			}
 			fmt.Println("Pull complete.")
 			return nil
@@ -315,7 +315,7 @@ The remote must already exist (see 'bd dolt remote add').`,
 			if isDivergedHistoryErr(err) {
 				printDivergedHistoryGuidance("pull")
 			}
-			return silentCommandExit(cmd, 1)
+			return silentCommandExit(cmd)
 		}
 		fmt.Println("Pull complete.")
 		return nil
@@ -340,7 +340,7 @@ For more options (--stdin, custom messages), see: bd vc commit`,
 		st := getStore()
 		if st == nil {
 			fmt.Fprintf(os.Stderr, "Error: no store available\n")
-			return silentCommandExit(cmd, 1)
+			return silentCommandExit(cmd)
 		}
 		msg, _ := cmd.Flags().GetString("message")
 		if msg == "" {
@@ -349,12 +349,12 @@ For more options (--stdin, custom messages), see: bd vc commit`,
 			pc, ok := storage.UnwrapStore(st).(storage.PendingCommitter)
 			if !ok {
 				fmt.Fprintf(os.Stderr, "Error: storage backend does not support pending commits\n")
-				return silentCommandExit(cmd, 1)
+				return silentCommandExit(cmd)
 			}
 			committed, err := pc.CommitPending(ctx, getActor())
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				return silentCommandExit(cmd, 1)
+				return silentCommandExit(cmd)
 			}
 			if !committed {
 				fmt.Println("Nothing to commit.")
@@ -368,7 +368,7 @@ For more options (--stdin, custom messages), see: bd vc commit`,
 					return nil
 				}
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				return silentCommandExit(cmd, 1)
+				return silentCommandExit(cmd)
 			}
 		}
 		commandDidExplicitDoltCommit = true
@@ -404,7 +404,7 @@ required. Use this command for explicit control or diagnostics.`,
 				return nil
 			}
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			return silentCommandExit(cmd, 1)
+			return silentCommandExit(cmd)
 		}
 
 		fmt.Printf("Dolt server started (PID %d, port %d)\n", state.PID, state.Port)
@@ -437,7 +437,7 @@ on the next bd command unless auto-start is disabled.`,
 
 		if err := doltserver.StopWithForce(serverDir, force); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			return silentCommandExit(cmd, 1)
+			return silentCommandExit(cmd)
 		}
 		fmt.Println("Dolt server stopped.")
 		return nil
@@ -627,7 +627,7 @@ servers are preserved.`,
 		killed, err := doltserver.KillStaleServers(beadsDir)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			return silentCommandExit(cmd, 1)
+			return silentCommandExit(cmd)
 		}
 
 		if len(killed) == 0 {
@@ -680,7 +680,7 @@ Use --dry-run to see what would be dropped without actually dropping.`,
 		rows, err := db.QueryContext(listCtx, "SHOW DATABASES")
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error listing databases: %v\n", err)
-			return silentCommandExit(cmd, 1)
+			return silentCommandExit(cmd)
 		}
 		defer rows.Close()
 
@@ -739,7 +739,7 @@ Use --dry-run to see what would be dropped without actually dropping.`,
 			if failures >= maxConsecFailures {
 				fmt.Fprintf(os.Stderr, "\n✗ Aborting: %d consecutive failures suggest server is unhealthy.\n", failures)
 				fmt.Fprintf(os.Stderr, "  Dropped %d/%d before stopping.\n", dropped, len(stale))
-				return silentCommandExit(cmd, 1)
+				return silentCommandExit(cmd)
 			}
 
 			// Per-operation timeout: DROP DATABASE can be slow on Dolt
@@ -841,13 +841,13 @@ var doltRemoteAddCmd = &cobra.Command{
 		st := getStore()
 		if st == nil {
 			fmt.Fprintf(os.Stderr, "Error: no store available\n")
-			return silentCommandExit(cmd, 1)
+			return silentCommandExit(cmd)
 		}
 		name, url := args[0], args[1]
 		locator, ok := storage.UnwrapStore(st).(storage.StoreLocator)
 		if !ok {
 			fmt.Fprintf(os.Stderr, "Error: storage backend does not support store location\n")
-			return silentCommandExit(cmd, 1)
+			return silentCommandExit(cmd)
 		}
 		dbPath := locator.CLIDir()
 		embedded := isEmbeddedMode()
@@ -868,7 +868,7 @@ var doltRemoteAddCmd = &cobra.Command{
 			// Remove existing SQL remote before re-adding
 			if err := st.RemoveRemote(ctx, name); err != nil {
 				fmt.Fprintf(os.Stderr, "Error removing existing SQL remote: %v\n", err)
-				return silentCommandExit(cmd, 1)
+				return silentCommandExit(cmd)
 			}
 		}
 		if !embedded && cliURL != "" && cliURL != url {
@@ -878,7 +878,7 @@ var doltRemoteAddCmd = &cobra.Command{
 			}
 			if err := doltutil.RemoveCLIRemote(dbPath, name); err != nil {
 				fmt.Fprintf(os.Stderr, "Error removing existing CLI remote: %v\n", err)
-				return silentCommandExit(cmd, 1)
+				return silentCommandExit(cmd)
 			}
 		}
 
@@ -890,7 +890,7 @@ var doltRemoteAddCmd = &cobra.Command{
 				} else {
 					fmt.Fprintf(os.Stderr, "Error adding SQL remote: %v\n", err)
 				}
-				return silentCommandExit(cmd, 1)
+				return silentCommandExit(cmd)
 			}
 		}
 
@@ -945,12 +945,12 @@ var doltRemoteListCmd = &cobra.Command{
 		st := getStore()
 		if st == nil {
 			fmt.Fprintf(os.Stderr, "Error: no store available\n")
-			return silentCommandExit(cmd, 1)
+			return silentCommandExit(cmd)
 		}
 		locator, ok := storage.UnwrapStore(st).(storage.StoreLocator)
 		if !ok {
 			fmt.Fprintf(os.Stderr, "Error: storage backend does not support store location\n")
-			return silentCommandExit(cmd, 1)
+			return silentCommandExit(cmd)
 		}
 		dbPath := locator.CLIDir()
 		embedded := isEmbeddedMode()
@@ -962,7 +962,7 @@ var doltRemoteListCmd = &cobra.Command{
 			} else {
 				fmt.Fprintf(os.Stderr, "Error listing SQL remotes: %v\n", sqlErr)
 			}
-			return silentCommandExit(cmd, 1)
+			return silentCommandExit(cmd)
 		}
 
 		// Build unified view
@@ -1064,13 +1064,13 @@ var doltRemoteRemoveCmd = &cobra.Command{
 		st := getStore()
 		if st == nil {
 			fmt.Fprintf(os.Stderr, "Error: no store available\n")
-			return silentCommandExit(cmd, 1)
+			return silentCommandExit(cmd)
 		}
 		name := args[0]
 		locator, ok := storage.UnwrapStore(st).(storage.StoreLocator)
 		if !ok {
 			fmt.Fprintf(os.Stderr, "Error: storage backend does not support store location\n")
-			return silentCommandExit(cmd, 1)
+			return silentCommandExit(cmd)
 		}
 		dbPath := locator.CLIDir()
 		embedded := isEmbeddedMode()
@@ -1087,7 +1087,7 @@ var doltRemoteRemoveCmd = &cobra.Command{
 			fmt.Fprintf(os.Stderr, "  SQL: %s\n  CLI: %s\n", sqlURL, cliURL)
 			fmt.Fprintf(os.Stderr, "\nResolve the conflict first. To force remove from both:\n")
 			fmt.Fprintf(os.Stderr, "  bd dolt remote remove %s --force\n", name)
-			return silentCommandExit(cmd, 1)
+			return silentCommandExit(cmd)
 		}
 
 		// Remove from SQL server
@@ -1098,7 +1098,7 @@ var doltRemoteRemoveCmd = &cobra.Command{
 				} else {
 					fmt.Fprintf(os.Stderr, "Error removing SQL remote: %v\n", err)
 				}
-				return silentCommandExit(cmd, 1)
+				return silentCommandExit(cmd)
 			}
 		}
 
@@ -1117,7 +1117,7 @@ var doltRemoteRemoveCmd = &cobra.Command{
 
 		if sqlURL == "" && cliURL == "" {
 			fmt.Fprintf(os.Stderr, "Error: remote %q not found on either surface\n", name)
-			return silentCommandExit(cmd, 1)
+			return silentCommandExit(cmd)
 		}
 
 		// Clear sync.remote from config.yaml if the origin remote was removed,
@@ -1457,7 +1457,7 @@ func setDoltConfig(cmd *cobra.Command, key, value string, updateConfig bool) err
 			fmt.Fprintf(os.Stderr, "from the configured database '%s'.\n", cfg.GetDoltDatabase())
 			fmt.Fprintf(os.Stderr, "\nTo change which database to use:\n")
 			fmt.Fprintf(os.Stderr, "  bd dolt set database <name>\n")
-			return silentCommandExit(cmd, 1)
+			return silentCommandExit(cmd)
 		}
 		if value == "" {
 			// Allow clearing the custom data dir (revert to default .beads/dolt)
@@ -1505,7 +1505,7 @@ func setDoltConfig(cmd *cobra.Command, key, value string, updateConfig bool) err
 	default:
 		fmt.Fprintf(os.Stderr, "Error: unknown key '%s'\n", key)
 		fmt.Fprintf(os.Stderr, "Valid keys: database, host, port, socket, user, data-dir, shared-server\n")
-		return silentCommandExit(cmd, 1)
+		return silentCommandExit(cmd)
 	}
 
 	// Audit log: record who changed what
@@ -1572,7 +1572,7 @@ func testDoltConnection(cmd *cobra.Command) error {
 			"connection_ok": ok,
 		})
 		if !ok {
-			return silentCommandExit(cmd, 1)
+			return silentCommandExit(cmd)
 		}
 		return nil
 	}
@@ -1584,7 +1584,7 @@ func testDoltConnection(cmd *cobra.Command) error {
 	} else {
 		fmt.Printf("%s\n", ui.RenderWarn("✗ Connection failed"))
 		fmt.Println("\nStart the server with: bd dolt start")
-		return silentCommandExit(cmd, 1)
+		return silentCommandExit(cmd)
 	}
 
 	// Test remote connectivity

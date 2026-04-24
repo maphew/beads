@@ -197,7 +197,7 @@ func runMigrations(ctx context.Context, db DBConn, minVersion int) (int, error) 
 		// subsequent DDL while still recording the version as applied (GH#3363).
 		for _, stmt := range splitStatements(string(data)) {
 			if _, err := db.ExecContext(ctx, stmt); err != nil {
-				if !isConcurrentInitError(err) {
+				if !isToleratedMigrationError(stmt, err) {
 					return 0, fmt.Errorf("migration %s: statement failed: %w", mf.name, err)
 				}
 			}
@@ -206,13 +206,29 @@ func runMigrations(ctx context.Context, db DBConn, minVersion int) (int, error) 
 		// Always use INSERT IGNORE — concurrent processes may race to record
 		// the same migration version. Duplicate PK is expected and harmless.
 		if _, err := db.ExecContext(ctx, "INSERT IGNORE INTO schema_migrations (version) VALUES (?)", mf.version); err != nil {
-			if !isConcurrentInitError(err) {
+			if !isToleratedMigrationError("", err) {
 				return 0, fmt.Errorf("recording migration %s: %w", mf.name, err)
 			}
 		}
 	}
 
 	return len(pending), nil
+}
+
+func isToleratedMigrationError(stmt string, err error) bool {
+	return isConcurrentInitError(err) || isNoopDoltCommit(stmt, err)
+}
+
+func isNoopDoltCommit(stmt string, err error) bool {
+	if !isDoltCommitStatement(stmt) {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "nothing to commit")
+}
+
+func isDoltCommitStatement(stmt string) bool {
+	normalized := strings.TrimSpace(strings.ToLower(stmt))
+	return strings.HasPrefix(normalized, "call dolt_commit")
 }
 
 // isConcurrentInitError returns true for errors that are expected and harmless

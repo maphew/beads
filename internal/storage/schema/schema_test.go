@@ -122,3 +122,35 @@ func TestRunMigrationsExecutesMultiStatementMigrationIndividually(t *testing.T) 
 		t.Fatal("migration 0027 did not attempt wisps.started_at ALTER")
 	}
 }
+
+func TestRunMigrationsToleratesNoopDoltCommit(t *testing.T) {
+	var sawCommit bool
+	db := &fakeMigrationDB{
+		fail: func(query string) error {
+			if strings.HasPrefix(strings.ToLower(strings.TrimSpace(query)), "call dolt_commit") {
+				sawCommit = true
+				return errors.New("Error 1105: nothing to commit")
+			}
+			return nil
+		},
+	}
+
+	applied, err := runMigrations(context.Background(), db, 27)
+	if err != nil {
+		t.Fatalf("runMigrations should tolerate a no-op DOLT_COMMIT: %v", err)
+	}
+	if applied != LatestVersion()-27 {
+		t.Fatalf("applied = %d, want %d", applied, LatestVersion()-27)
+	}
+	if !sawCommit {
+		t.Fatal("migration 0028 did not attempt DOLT_COMMIT")
+	}
+}
+
+func TestNoopDoltCommitToleranceIsStatementScoped(t *testing.T) {
+	err := errors.New("Error 1105: nothing to commit")
+
+	if isNoopDoltCommit("CREATE TABLE example (id INT)", err) {
+		t.Fatal("nothing-to-commit should only be tolerated for DOLT_COMMIT statements")
+	}
+}

@@ -648,14 +648,14 @@ func runCompactApply(cmd *cobra.Command, ctx context.Context, store storage.Dolt
 		if !eligible {
 			fmt.Fprintf(os.Stderr, "Error: %s is not eligible for Tier %d compaction: %s\n", compactID, compactTier, reason)
 			fmt.Fprintf(os.Stderr, "Hint: use --force to bypass eligibility checks\n")
-			return silentCommandExit(cmd, 1)
+			return silentCommandExit(cmd)
 		}
 
 		// Enforce size reduction unless --force
 		if compactedSize >= originalSize {
 			fmt.Fprintf(os.Stderr, "Error: summary (%d bytes) is not shorter than original (%d bytes)\n", compactedSize, originalSize)
 			fmt.Fprintf(os.Stderr, "Hint: use --force to bypass size validation\n")
-			return silentCommandExit(cmd, 1)
+			return silentCommandExit(cmd)
 		}
 	}
 
@@ -726,14 +726,14 @@ func runCompactDolt(cobraCmd *cobra.Command) error {
 	if _, err := os.Stat(doltPath); os.IsNotExist(err) {
 		fmt.Fprintf(os.Stderr, "Error: Dolt directory not found at %s\n", doltPath)
 		fmt.Fprintf(os.Stderr, "Hint: --dolt flag is only for repositories using the Dolt backend\n")
-		return silentCommandExit(cobraCmd, 1)
+		return silentCommandExit(cobraCmd)
 	}
 
 	// Check if dolt command is available
 	if _, err := exec.LookPath("dolt"); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: dolt command not found in PATH\n")
 		fmt.Fprintf(os.Stderr, "Hint: install Dolt from https://github.com/dolthub/dolt\n")
-		return silentCommandExit(cobraCmd, 1)
+		return silentCommandExit(cobraCmd)
 	}
 
 	// Get size before GC
@@ -774,7 +774,7 @@ func runCompactDolt(cobraCmd *cobra.Command) error {
 		if len(output) > 0 {
 			fmt.Fprintf(os.Stderr, "Output: %s\n", string(output))
 		}
-		return silentCommandExit(cobraCmd, 1)
+		return silentCommandExit(cobraCmd)
 	}
 
 	// Get size after GC
