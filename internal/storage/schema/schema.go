@@ -216,7 +216,7 @@ func runMigrations(ctx context.Context, db DBConn, minVersion int) (int, error) 
 }
 
 func isToleratedMigrationError(stmt string, err error) bool {
-	return isConcurrentInitError(err) || isNoopDoltCommit(stmt, err)
+	return isConcurrentInitError(err) || isNoopDoltCommit(stmt, err) || isNoopDropColumn(stmt, err)
 }
 
 func isNoopDoltCommit(stmt string, err error) bool {
@@ -229,6 +229,16 @@ func isNoopDoltCommit(stmt string, err error) bool {
 func isDoltCommitStatement(stmt string) bool {
 	normalized := strings.TrimSpace(strings.ToLower(stmt))
 	return strings.HasPrefix(normalized, "call dolt_commit")
+}
+
+func isNoopDropColumn(stmt string, err error) bool {
+	normalized := strings.TrimSpace(strings.ToLower(stmt))
+	if !strings.HasPrefix(normalized, "alter table") || !strings.Contains(normalized, " drop column ") {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "does not have column") ||
+		strings.Contains(msg, "check that column/key exists")
 }
 
 // isConcurrentInitError returns true for errors that are expected and harmless

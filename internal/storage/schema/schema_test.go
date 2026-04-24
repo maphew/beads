@@ -154,3 +154,36 @@ func TestNoopDoltCommitToleranceIsStatementScoped(t *testing.T) {
 		t.Fatal("nothing-to-commit should only be tolerated for DOLT_COMMIT statements")
 	}
 }
+
+func TestRunMigrationsToleratesNoopDropColumn(t *testing.T) {
+	var sawDropColumn bool
+	db := &fakeMigrationDB{
+		fail: func(query string) error {
+			normalized := strings.ToLower(strings.TrimSpace(query))
+			if strings.HasPrefix(normalized, "alter table schema_migrations drop column") {
+				sawDropColumn = true
+				return errors.New(`Error 1105: table "schema_migrations" does not have column "applied_at"`)
+			}
+			return nil
+		},
+	}
+
+	applied, err := runMigrations(context.Background(), db, 31)
+	if err != nil {
+		t.Fatalf("runMigrations should tolerate idempotent DROP COLUMN: %v", err)
+	}
+	if applied != LatestVersion()-31 {
+		t.Fatalf("applied = %d, want %d", applied, LatestVersion()-31)
+	}
+	if !sawDropColumn {
+		t.Fatal("migration 0032 did not attempt DROP COLUMN")
+	}
+}
+
+func TestDropColumnToleranceIsStatementScoped(t *testing.T) {
+	err := errors.New(`Error 1105: table "schema_migrations" does not have column "applied_at"`)
+
+	if isNoopDropColumn("CREATE TABLE example (id INT)", err) {
+		t.Fatal("missing-column should only be tolerated for DROP COLUMN statements")
+	}
+}
