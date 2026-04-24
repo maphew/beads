@@ -1,9 +1,13 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/configfile"
 )
 
 // TestRunCheckHealth_UnreachableServer exercises the DSN-building branch in
@@ -33,4 +37,52 @@ func TestRunCheckHealth_UnreachableServer(t *testing.T) {
 
 	// Should not panic. Silent exit on ping failure is the expected path.
 	runCheckHealth(tmpDir)
+}
+
+func TestDoctorServerRunsForEmbeddedTarget(t *testing.T) {
+	repoDir := t.TempDir()
+	beadsDir := filepath.Join(repoDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeMetadataConfig(t, beadsDir, configfile.DoltModeEmbedded, "doctor_embedded")
+
+	origJSONOutput := jsonOutput
+	origDoctorServer := doctorServer
+	origServerMode := serverMode
+	t.Cleanup(func() {
+		jsonOutput = origJSONOutput
+		doctorServer = origDoctorServer
+		serverMode = origServerMode
+	})
+	jsonOutput = true
+	doctorServer = true
+	serverMode = false
+
+	out := captureStdout(t, func() error {
+		doctorCmd.Run(doctorCmd, []string{repoDir})
+		return nil
+	})
+
+	var result struct {
+		OverallOK bool `json:"overall_ok"`
+		Checks    []struct {
+			Name    string `json:"name"`
+			Status  string `json:"status"`
+			Message string `json:"message"`
+		} `json:"checks"`
+	}
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("parse doctor --server JSON: %v\n%s", err, out)
+	}
+	if !result.OverallOK {
+		t.Fatalf("embedded server health should be informational, got %#v", result)
+	}
+	if len(result.Checks) != 1 {
+		t.Fatalf("expected one server config check, got %#v", result.Checks)
+	}
+	check := result.Checks[0]
+	if check.Name != "Server Config" || check.Status != statusOK || !strings.Contains(check.Message, "embedded") {
+		t.Fatalf("unexpected embedded server check: %#v", check)
+	}
 }

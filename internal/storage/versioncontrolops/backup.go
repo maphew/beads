@@ -3,6 +3,7 @@ package versioncontrolops
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -54,6 +55,36 @@ func DirToFileURL(dir string) (string, error) {
 		return "", fmt.Errorf("resolve absolute path: %w", err)
 	}
 	return "file://" + abs, nil
+}
+
+// IsBackupURL reports whether source is already a Dolt backup URL. URL
+// sources may be remote, or server-local paths when bd talks to an external
+// Dolt server, so callers must not require them to exist on the client host.
+func IsBackupURL(source string) bool {
+	return strings.HasPrefix(source, "https://") ||
+		strings.HasPrefix(source, "http://") ||
+		strings.HasPrefix(source, "file://") ||
+		strings.HasPrefix(source, "aws://") ||
+		strings.HasPrefix(source, "gs://")
+}
+
+// BackupRestoreURL normalizes a user-provided restore source into the URL
+// accepted by CALL DOLT_BACKUP('restore', ...). Plain filesystem paths must
+// exist locally; URL sources are passed through unchanged.
+func BackupRestoreURL(source string) (string, error) {
+	if IsBackupURL(source) {
+		return source, nil
+	}
+
+	info, err := os.Stat(source)
+	if err != nil {
+		return "", fmt.Errorf("backup source does not exist: %w", err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("backup source is not a directory: %s", source)
+	}
+
+	return DirToFileURL(source)
 }
 
 // ExtractAddressConflictName parses the conflicting remote name from a Dolt

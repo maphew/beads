@@ -81,6 +81,24 @@ func TestResolveDoltBackupURL_HomeTilde(t *testing.T) {
 	}
 }
 
+func TestValidateBackupRestoreDirAllowsURLs(t *testing.T) {
+	t.Parallel()
+
+	for _, source := range []string{
+		"https://doltremoteapi.dolthub.com/user/repo",
+		"file:///server/visible/backup",
+		"aws://bucket/path",
+		"gs://bucket/path",
+	} {
+		t.Run(source, func(t *testing.T) {
+			t.Parallel()
+			if err := validateBackupRestoreDir(source); err != nil {
+				t.Fatalf("validateBackupRestoreDir(%q) error = %v", source, err)
+			}
+		})
+	}
+}
+
 func TestDoltBackupConfigRoundTrip(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

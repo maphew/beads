@@ -746,15 +746,7 @@ func (s *DoltStore) BackupDatabase(ctx context.Context, dir string) error {
 // RestoreDatabase restores the database from a Dolt backup at dir.
 // When force is true, an existing database is overwritten.
 func (s *DoltStore) RestoreDatabase(ctx context.Context, dir string, force bool) error {
-	info, err := os.Stat(dir)
-	if err != nil {
-		return fmt.Errorf("backup source does not exist: %w", err)
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("backup source is not a directory: %s", dir)
-	}
-
-	backupURL, err := versioncontrolops.DirToFileURL(dir)
+	backupURL, err := versioncontrolops.BackupRestoreURL(dir)
 	if err != nil {
 		return err
 	}

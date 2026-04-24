@@ -10,6 +10,7 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
@@ -144,6 +145,9 @@ func syncProjectIDFromDB(ctx context.Context, s storage.DoltStorage) error {
 }
 
 func validateBackupRestoreDir(dir string) error {
+	if versioncontrolops.IsBackupURL(dir) {
+		return nil
+	}
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		return fmt.Errorf("backup directory not found: %s\nRun 'bd backup' first to create a backup", dir)
 	}
