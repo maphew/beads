@@ -139,7 +139,7 @@ func MigrateUp(ctx context.Context, db DBConn) (int, error) {
 		}
 	}
 
-	return runMigrations(ctx, db, current, false)
+	return runMigrations(ctx, db, current)
 }
 
 // backfillMigrations runs all migrations in order, ignoring "already exists"
@@ -147,7 +147,7 @@ func MigrateUp(ctx context.Context, db DBConn) (int, error) {
 // backup that predates the schema_migrations tracking table — most of the
 // schema is already correct, but dolt_ignore'd tables (wisps) may be missing.
 func backfillMigrations(ctx context.Context, db DBConn) (int, error) {
-	return runMigrations(ctx, db, 0, true)
+	return runMigrations(ctx, db, 0)
 }
 
 type migrationFile struct {
@@ -158,9 +158,9 @@ type migrationFile struct {
 // runMigrations collects all embedded .up.sql files with version > minVersion,
 // sorts them, and executes each one. DDL "already exists" errors and duplicate
 // version inserts are always tolerated to support concurrent initialization
-// (multiple processes racing to apply the same migration). When tolerateExisting
-// is true, ALL "already exists" errors are silently ignored (backfill path).
-func runMigrations(ctx context.Context, db DBConn, minVersion int, tolerateExisting bool) (int, error) {
+// (multiple processes racing to apply the same migration). All other statement
+// errors abort the migration and prevent the version from being recorded.
+func runMigrations(ctx context.Context, db DBConn, minVersion int) (int, error) {
 	entries, err := fs.ReadDir(upMigrations, "migrations")
 	if err != nil {
 		return 0, fmt.Errorf("reading embedded migrations: %w", err)
@@ -197,7 +197,7 @@ func runMigrations(ctx context.Context, db DBConn, minVersion int, tolerateExist
 		// subsequent DDL while still recording the version as applied (GH#3363).
 		for _, stmt := range splitStatements(string(data)) {
 			if _, err := db.ExecContext(ctx, stmt); err != nil {
-				if !tolerateExisting && !isConcurrentInitError(err) {
+				if !isConcurrentInitError(err) {
 					return 0, fmt.Errorf("migration %s: statement failed: %w", mf.name, err)
 				}
 			}
