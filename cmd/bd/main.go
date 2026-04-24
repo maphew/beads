@@ -123,6 +123,83 @@ func isReadOnlyCommand(cmdName string) bool {
 	return readOnlyCommands[cmdName]
 }
 
+func commandSkipsStoreInit(cmd *cobra.Command) bool {
+	// GH#1093: Check noDbCommands BEFORE expensive operations
+	// to avoid spawning git subprocesses for simple commands
+	// like "bd version" that don't need database access.
+	noDbCommands := []string{
+		"__complete",       // Cobra's internal completion command (shell completions work without db)
+		"__completeNoDesc", // Cobra's completion without descriptions (used by fish)
+		"bash",
+		"bootstrap",
+		"completion",
+		"context", // reads config files directly, does not need DB open
+		"doctor",
+		"dolt", // bare "bd dolt" shows help only; subcommands handled below
+		"fish",
+		"help",
+		"hook", // manages its own store lifecycle (#1719)
+		"hooks",
+		"human",
+		"init",
+		"merge",
+		"onboard",
+		"powershell",
+		"prime",
+		"quickstart",
+		"setup",
+		"version",
+		"where",
+		"zsh",
+	}
+
+	// GH#2042: Dolt subcommands that need the store for version-control operations.
+	// All other dolt subcommands (show, set, test, start, stop, status) are
+	// config/diagnostic commands that skip DB init via the "dolt" parent entry above.
+	needsStoreDoltSubcommands := []string{"push", "pull", "commit"}
+
+	// GH#2224: Dolt grandchild subcommands (e.g. "bd dolt remote add") whose
+	// Cobra parent is "remote", not "dolt". These need the store but would be
+	// silently skipped if "remote" were ever added to noDbCommands.
+	needsStoreDoltGrandchildren := []string{"remote"}
+
+	cmdName := cmd.Name()
+	isSubcommand := cmd.Parent() != nil && cmd.Parent().Name() != "bd"
+	if cmd.Parent() != nil {
+		parentName := cmd.Parent().Name()
+		if parentName == "admin" && cmdName == "reset" {
+			// Recovery command: reset must be able to remove broken local state
+			// without first opening the database it is trying to remove.
+			return true
+		}
+		if parentName == "dolt" && slices.Contains(needsStoreDoltSubcommands, cmdName) {
+			// GH#2042: dolt push/pull/commit need the store — fall through to init.
+		} else if slices.Contains(needsStoreDoltGrandchildren, parentName) {
+			// GH#2224: dolt remote add/list/remove need the store — fall through to init.
+		} else if slices.Contains(noDbCommands, parentName) {
+			return true
+		}
+	}
+
+	// Only skip for top-level commands in noDbCommands, not subcommands
+	// that happen to share names (e.g., "bd backup init" vs "bd init").
+	if slices.Contains(noDbCommands, cmdName) && !isSubcommand {
+		return true
+	}
+
+	// Skip for root command with no subcommand (just shows help).
+	if cmd.Parent() == nil && cmdName == cmd.Use {
+		return true
+	}
+
+	// Also skip for --version flag on root command (cmdName would be "bd").
+	if v, _ := cmd.Flags().GetBool("version"); v {
+		return true
+	}
+
+	return false
+}
+
 // loadBeadsEnvFile loads .beads/.env into process environment for per-project
 // Dolt credentials (GH#2520). Uses gotenv.Load which is non-overriding —
 // existing shell env vars always take precedence.
@@ -620,74 +697,7 @@ var rootCmd = &cobra.Command{
 			}
 		}
 
-		// GH#1093: Check noDbCommands BEFORE expensive operations
-		// to avoid spawning git subprocesses for simple commands
-		// like "bd version" that don't need database access.
-		noDbCommands := []string{
-			"__complete",       // Cobra's internal completion command (shell completions work without db)
-			"__completeNoDesc", // Cobra's completion without descriptions (used by fish)
-			"bash",
-			"bootstrap",
-			"completion",
-			"context", // reads config files directly, does not need DB open
-			"doctor",
-			"dolt", // bare "bd dolt" shows help only; subcommands handled below
-			"fish",
-			"help",
-			"hook", // manages its own store lifecycle (#1719)
-			"hooks",
-			"human",
-			"init",
-			"merge",
-			"onboard",
-			"powershell",
-			"prime",
-			"quickstart",
-			"setup",
-			"version",
-			"where",
-			"zsh",
-		}
-
-		// GH#2042: Dolt subcommands that need the store for version-control operations.
-		// All other dolt subcommands (show, set, test, start, stop, status) are
-		// config/diagnostic commands that skip DB init via the "dolt" parent entry above.
-		needsStoreDoltSubcommands := []string{"push", "pull", "commit"}
-
-		// GH#2224: Dolt grandchild subcommands (e.g. "bd dolt remote add") whose
-		// Cobra parent is "remote", not "dolt". These need the store but would be
-		// silently skipped if "remote" were ever added to noDbCommands.
-		needsStoreDoltGrandchildren := []string{"remote"}
-
-		// Check both the command name and parent command name for subcommands
-		cmdName := cmd.Name()
-		isSubcommand := cmd.Parent() != nil && cmd.Parent().Name() != "bd"
-		skipsStoreInit := false
-		if cmd.Parent() != nil {
-			parentName := cmd.Parent().Name()
-			if parentName == "dolt" && slices.Contains(needsStoreDoltSubcommands, cmdName) {
-				// GH#2042: dolt push/pull/commit need the store — fall through to init
-			} else if slices.Contains(needsStoreDoltGrandchildren, parentName) {
-				// GH#2224: dolt remote add/list/remove need the store — fall through to init
-			} else if slices.Contains(noDbCommands, parentName) {
-				skipsStoreInit = true
-			}
-		}
-		// Only skip for top-level commands in noDbCommands, not subcommands
-		// that happen to share names (e.g., "bd backup init" vs "bd init").
-		if slices.Contains(noDbCommands, cmdName) && !isSubcommand {
-			skipsStoreInit = true
-		}
-
-		// Skip for root command with no subcommand (just shows help)
-		if cmd.Parent() == nil && cmdName == cmd.Use {
-			skipsStoreInit = true
-		}
-
-		// Also skip for --version flag on root command (cmdName would be "bd")
-		if v, _ := cmd.Flags().GetBool("version"); v {
-			skipsStoreInit = true
-		}
+		skipsStoreInit := commandSkipsStoreInit(cmd)
 
 		// Commands that skip store initialization still need early config/env
 		// setup before they inspect server mode or per-project Dolt settings.
