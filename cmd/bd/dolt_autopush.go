@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
+	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
@@ -69,6 +71,38 @@ func savePushState(ps *pushState) error {
 // autoPushTimeout bounds the st.Push() call that shells out to git fetch,
 // which blocks indefinitely when the remote is unreachable (GH#3370).
 const autoPushTimeout = 30 * time.Second
+
+var autoPushReadOnlyCommandPaths = map[string]bool{
+	"bd backup":        true,
+	"bd backup status": true,
+	"bd dolt show":     true,
+	"bd dolt status":   true,
+	"bd dolt test":     true,
+}
+
+func normalizedCommandPath(cmd *cobra.Command) string {
+	if cmd == nil {
+		return ""
+	}
+	fields := strings.Fields(cmd.CommandPath())
+	if len(fields) == 0 {
+		return ""
+	}
+	return strings.Join(fields, " ")
+}
+
+func shouldAutoPushAfterCommand(cmd *cobra.Command) bool {
+	if readonlyMode {
+		return false
+	}
+	if cmd == nil {
+		return true
+	}
+	if autoPushReadOnlyCommandPaths[normalizedCommandPath(cmd)] {
+		return false
+	}
+	return !isReadOnlyCommand(cmd.Name())
+}
 
 // isDoltAutoPushEnabled returns whether auto-push to Dolt remote should run.
 // Returns true only when explicitly opted in via dolt.auto-push=true in

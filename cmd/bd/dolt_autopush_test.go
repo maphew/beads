@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/config"
 )
 
@@ -110,6 +111,57 @@ func TestAutoPush_SkippedForReadOnlyCommands(t *testing.T) {
 		if isReadOnlyCommand(cmd) {
 			t.Errorf("isReadOnlyCommand(%q) = true, want false", cmd)
 		}
+	}
+}
+
+func TestShouldAutoPushAfterCommand(t *testing.T) {
+	originalReadonlyMode := readonlyMode
+	t.Cleanup(func() { readonlyMode = originalReadonlyMode })
+	readonlyMode = false
+
+	root := &cobra.Command{Use: "bd"}
+	list := &cobra.Command{Use: "list"}
+	create := &cobra.Command{Use: "create"}
+	dolt := &cobra.Command{Use: "dolt"}
+	doltShow := &cobra.Command{Use: "show"}
+	doltSet := &cobra.Command{Use: "set"}
+	backup := &cobra.Command{Use: "backup"}
+	backupStatus := &cobra.Command{Use: "status"}
+	backupRestore := &cobra.Command{Use: "restore"}
+	root.AddCommand(list, create, dolt, backup)
+	dolt.AddCommand(doltShow, doltSet)
+	backup.AddCommand(backupStatus, backupRestore)
+
+	tests := []struct {
+		name string
+		cmd  *cobra.Command
+		want bool
+	}{
+		{name: "top-level read-only command", cmd: list, want: false},
+		{name: "top-level write command", cmd: create, want: true},
+		{name: "dolt diagnostic subcommand", cmd: doltShow, want: false},
+		{name: "dolt write subcommand", cmd: doltSet, want: true},
+		{name: "backup status subcommand", cmd: backupStatus, want: false},
+		{name: "backup restore subcommand", cmd: backupRestore, want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldAutoPushAfterCommand(tt.cmd); got != tt.want {
+				t.Fatalf("shouldAutoPushAfterCommand(%q) = %v, want %v", tt.cmd.CommandPath(), got, tt.want)
+			}
+		})
+	}
+}
+
+func TestShouldAutoPushAfterCommand_ReadonlyMode(t *testing.T) {
+	originalReadonlyMode := readonlyMode
+	t.Cleanup(func() { readonlyMode = originalReadonlyMode })
+	readonlyMode = true
+
+	cmd := &cobra.Command{Use: "create"}
+	if shouldAutoPushAfterCommand(cmd) {
+		t.Fatal("shouldAutoPushAfterCommand should be false in readonly mode")
 	}
 }
 

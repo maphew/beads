@@ -1021,9 +1021,10 @@ var rootCmd = &cobra.Command{
 		maybeAutoExport(rootCtx)
 
 		// Auto-push: push to Dolt remote if enabled and due.
-		// Skip for read-only commands to avoid unnecessary network operations
-		// and metadata writes on commands like bd list/show/ready (GH#2191).
-		if !isReadOnlyCommand(cmd.Name()) {
+		// Skip read-only command paths to avoid unnecessary network operations
+		// and metadata writes on commands like bd list, bd dolt show/status,
+		// and bd backup status (GH#2191).
+		if shouldAutoPushAfterCommand(cmd) {
 			maybeAutoPush(rootCtx)
 		}
 
