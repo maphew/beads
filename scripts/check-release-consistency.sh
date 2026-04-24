@@ -64,6 +64,11 @@ require_json_value() {
     fi
 }
 
+join_regex_patterns() {
+    local IFS='|'
+    echo "$*"
+}
+
 section "Version consistency"
 "$SCRIPT_DIR/check-versions.sh"
 
@@ -85,12 +90,34 @@ mapfile -t public_files < <(
     | grep -v '^scripts/check-release-consistency\.sh$'
 )
 
+old_repo_allowlist_patterns=(
+    # Published Go module commands must keep the declared module path until go.mod changes.
+    'go install'
+    'go list'
+    'go get github\.com/steveyegge/beads'
+    'go:github\.com/steveyegge/beads'
+    # Import examples and module metadata must match github.com/steveyegge/beads.
+    'github\.com/steveyegge/beads/(cmd|pkg|internal|examples)'
+    '\.(go|md):[0-9]+:.*"github\.com/steveyegge/beads"'
+    'go\.mod:[0-9]+:.*(require|replace) github\.com/steveyegge/beads'
+    # Marketplace/module terminology and historical notes are allowed to mention the old owner.
+    '/plugin marketplace'
+    'module path'
+    'module import'
+    'module ID'
+    'bd-example-extension-go'
+    'scripts/repro-dolt-hang'
+    'CHANGELOG'
+    'changelog'
+    'historical'
+)
+old_repo_allowlist_regex="$(join_regex_patterns "${old_repo_allowlist_patterns[@]}")"
+
 old_repo_refs="$(
     git grep -n -E \
         'github\.com/steveyegge/beads|raw\.githubusercontent\.com/steveyegge/beads|github:steveyegge/beads|steveyegge/beads' \
         -- "${public_files[@]}" 2>/dev/null \
-    | grep -Ev \
-        'go install|go list|go get github\.com/steveyegge/beads|go:github\.com/steveyegge/beads|github\.com/steveyegge/beads/(cmd|pkg|internal|examples)|\.(go|md):[0-9]+:.*"github\.com/steveyegge/beads"|go\.mod:[0-9]+:.*(require|replace) github\.com/steveyegge/beads|/plugin marketplace|module path|module import|module ID|bd-example-extension-go|scripts/repro-dolt-hang|CHANGELOG|changelog|historical' \
+    | grep -Ev "$old_repo_allowlist_regex" \
     || true
 )"
 if [[ -n "$old_repo_refs" ]]; then

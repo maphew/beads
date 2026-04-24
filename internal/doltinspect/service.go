@@ -66,6 +66,8 @@ type EmbeddedStatusResult struct {
 	ServerRunning     bool                   `json:"server_running"`
 	DataDir           string                 `json:"data_dir"`
 	DataDirExists     bool                   `json:"data_dir_exists"`
+	DataDirAccessible bool                   `json:"data_dir_accessible"`
+	DataDirError      string                 `json:"data_dir_error,omitempty"`
 	LifecycleState    doltlifecycle.State    `json:"lifecycle_state"`
 	LifecycleStates   []doltlifecycle.State  `json:"lifecycle_states"`
 	LifecycleSeverity doltlifecycle.Severity `json:"lifecycle_severity"`
@@ -181,15 +183,12 @@ func setExternalLifecycle(result *ExternalStatusResult) {
 }
 
 func InspectEmbeddedStatus(beadsDir string) EmbeddedStatusResult {
-	dataDir := filepath.Join(beadsDir, "embeddeddolt")
-	dataDirExists := false
-	if info, err := os.Stat(dataDir); err == nil && info.IsDir() {
-		dataDirExists = true
-	}
+	dataDir, dataDirExists, dataDirAccessible, dataDirErr := inspectEmbeddedDataDir(beadsDir)
 
 	lifecycle := doltlifecycle.Evaluate(doltlifecycle.Observation{
-		Initialized: true,
-		Mode:        doltlifecycle.ModeEmbedded,
+		Initialized:        true,
+		Mode:               doltlifecycle.ModeEmbedded,
+		EmbeddedAccessible: dataDirAccessible,
 	})
 	return EmbeddedStatusResult{
 		Mode: "embedded",
@@ -199,11 +198,31 @@ func InspectEmbeddedStatus(beadsDir string) EmbeddedStatusResult {
 		ServerRunning:     false,
 		DataDir:           dataDir,
 		DataDirExists:     dataDirExists,
+		DataDirAccessible: dataDirAccessible,
+		DataDirError:      dataDirErr,
 		LifecycleState:    lifecycle.Primary,
 		LifecycleStates:   lifecycle.States,
 		LifecycleSeverity: lifecycle.Severity,
 		LifecycleGuidance: doltlifecycle.StateGuidance(lifecycle.Primary),
 	}
+}
+
+func inspectEmbeddedDataDir(beadsDir string) (path string, exists bool, accessible bool, errText string) {
+	path = filepath.Join(beadsDir, "embeddeddolt")
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return path, false, false, ""
+		}
+		return path, false, false, err.Error()
+	}
+	if !info.IsDir() {
+		return path, false, false, "embedded Dolt path is not a directory"
+	}
+	if _, err := os.ReadDir(path); err != nil {
+		return path, true, false, err.Error()
+	}
+	return path, true, true, ""
 }
 
 type ShowConfigRequest struct {
@@ -247,9 +266,11 @@ func (Service) ShowConfig(req ShowConfigRequest) ShowConfigResult {
 	result.Embedded = req.Embedded
 	if result.Embedded {
 		result.DataDir = filepath.Join(req.BeadsDir, "embeddeddolt")
+		_, _, embeddedAccessible, _ := inspectEmbeddedDataDir(req.BeadsDir)
 		result.Lifecycle = doltlifecycle.Evaluate(doltlifecycle.Observation{
-			Initialized: true,
-			Mode:        doltlifecycle.ModeEmbedded,
+			Initialized:        true,
+			Mode:               doltlifecycle.ModeEmbedded,
+			EmbeddedAccessible: embeddedAccessible,
 		})
 		result.LifecycleGuidance = doltlifecycle.StateGuidance(result.Lifecycle.Primary)
 		return result

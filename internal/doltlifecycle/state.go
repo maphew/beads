@@ -21,6 +21,7 @@ type State string
 const (
 	StateUninitialized       State = "uninitialized"
 	StateInitializedEmbedded State = "initialized_embedded"
+	StateEmbeddedUnavailable State = "embedded_unavailable"
 	StateInitializedServer   State = "initialized_server"
 	StateServerUnavailable   State = "server_unavailable"
 	StateMigrationRequired   State = "migration_required"
@@ -33,16 +34,17 @@ const (
 )
 
 type Observation struct {
-	Initialized       bool
-	Mode              Mode
-	ServerReachable   bool
-	MigrationRequired bool
-	MigrationFailed   bool
-	LockHeld          bool
-	LockContended     bool
-	RemoteConfigured  bool
-	RemoteDiverged    bool
-	RecoveryRequired  bool
+	Initialized        bool
+	Mode               Mode
+	EmbeddedAccessible bool
+	ServerReachable    bool
+	MigrationRequired  bool
+	MigrationFailed    bool
+	LockHeld           bool
+	LockContended      bool
+	RemoteConfigured   bool
+	RemoteDiverged     bool
+	RecoveryRequired   bool
 }
 
 type Snapshot struct {
@@ -59,7 +61,11 @@ func Evaluate(obs Observation) Snapshot {
 	} else {
 		switch obs.Mode {
 		case ModeEmbedded:
-			states = append(states, StateInitializedEmbedded)
+			if obs.EmbeddedAccessible {
+				states = append(states, StateInitializedEmbedded)
+			} else {
+				states = append(states, StateEmbeddedUnavailable)
+			}
 		case ModeServer:
 			if obs.ServerReachable {
 				states = append(states, StateInitializedServer)
@@ -107,6 +113,7 @@ func primaryState(states []State) State {
 		StateMigrationFailed,
 		StateMigrationRequired,
 		StateLockContended,
+		StateEmbeddedUnavailable,
 		StateServerUnavailable,
 		StateRemoteDiverged,
 		StateLockHeld,
@@ -126,7 +133,7 @@ func primaryState(states []State) State {
 
 func StateSeverity(state State) Severity {
 	switch state {
-	case StateRecoveryRequired, StateMigrationFailed, StateLockContended, StateServerUnavailable:
+	case StateRecoveryRequired, StateMigrationFailed, StateLockContended, StateEmbeddedUnavailable, StateServerUnavailable:
 		return SeverityError
 	case StateMigrationRequired, StateRemoteDiverged, StateLockHeld, StateUninitialized:
 		return SeverityWarning
@@ -141,6 +148,8 @@ func StateDescription(state State) string {
 		return "workspace has no initialized Beads/Dolt data"
 	case StateInitializedEmbedded:
 		return "workspace is initialized for embedded Dolt"
+	case StateEmbeddedUnavailable:
+		return "workspace is configured for embedded Dolt but the embedded data directory is unavailable"
 	case StateInitializedServer:
 		return "workspace is initialized for server-backed Dolt and the server is reachable"
 	case StateServerUnavailable:
@@ -170,6 +179,8 @@ func StateGuidance(state State) string {
 		return "Run bd bootstrap for existing-project recovery, or bd init only for a brand-new project."
 	case StateInitializedEmbedded:
 		return "Embedded Dolt is initialized; no server process is expected."
+	case StateEmbeddedUnavailable:
+		return "Check .beads/embeddeddolt permissions and contents, then restore from backup or run bd bootstrap if recovery is needed."
 	case StateInitializedServer:
 		return "Dolt server is reachable; inspect dolt_status or doctor output for remaining issues."
 	case StateServerUnavailable:

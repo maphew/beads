@@ -18,8 +18,13 @@ func TestEvaluateBaseStates(t *testing.T) {
 		},
 		{
 			name: "initialized embedded",
-			obs:  Observation{Initialized: true, Mode: ModeEmbedded},
+			obs:  Observation{Initialized: true, Mode: ModeEmbedded, EmbeddedAccessible: true},
 			want: StateInitializedEmbedded,
+		},
+		{
+			name: "embedded unavailable",
+			obs:  Observation{Initialized: true, Mode: ModeEmbedded},
+			want: StateEmbeddedUnavailable,
 		},
 		{
 			name: "initialized server reachable",
@@ -89,6 +94,7 @@ func TestStateMetadataCoversAllStates(t *testing.T) {
 	for _, state := range []State{
 		StateUninitialized,
 		StateInitializedEmbedded,
+		StateEmbeddedUnavailable,
 		StateInitializedServer,
 		StateServerUnavailable,
 		StateMigrationRequired,

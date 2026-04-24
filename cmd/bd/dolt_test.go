@@ -1381,6 +1381,9 @@ func TestInspectEmbeddedDoltStatusContract(t *testing.T) {
 	if !result.DataDirExists {
 		t.Fatal("DataDirExists should be true")
 	}
+	if !result.DataDirAccessible {
+		t.Fatal("DataDirAccessible should be true")
+	}
 
 	data, err := json.Marshal(result)
 	if err != nil {
@@ -1396,16 +1399,36 @@ func TestInspectEmbeddedDoltStatusContract(t *testing.T) {
 	if raw["server_running"] != false {
 		t.Fatalf("server_running = %v, want false", raw["server_running"])
 	}
+	if raw["data_dir_accessible"] != true {
+		t.Fatalf("data_dir_accessible = %v, want true", raw["data_dir_accessible"])
+	}
 }
 
 func TestDoltLifecycleStatusContracts(t *testing.T) {
 	t.Run("embedded status maps to initialized embedded", func(t *testing.T) {
-		result := inspectEmbeddedDoltStatus(t.TempDir())
+		beadsDir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(beadsDir, "embeddeddolt"), 0755); err != nil {
+			t.Fatalf("mkdir data dir: %v", err)
+		}
+		result := inspectEmbeddedDoltStatus(beadsDir)
 		if result.LifecycleState != doltlifecycle.StateInitializedEmbedded {
 			t.Fatalf("LifecycleState = %q, want %q", result.LifecycleState, doltlifecycle.StateInitializedEmbedded)
 		}
 		if result.LifecycleSeverity != doltlifecycle.SeverityInfo {
 			t.Fatalf("LifecycleSeverity = %q, want %q", result.LifecycleSeverity, doltlifecycle.SeverityInfo)
+		}
+		if result.LifecycleGuidance == "" {
+			t.Fatal("LifecycleGuidance should be populated")
+		}
+	})
+
+	t.Run("embedded missing data dir maps to unavailable", func(t *testing.T) {
+		result := inspectEmbeddedDoltStatus(t.TempDir())
+		if result.LifecycleState != doltlifecycle.StateEmbeddedUnavailable {
+			t.Fatalf("LifecycleState = %q, want %q", result.LifecycleState, doltlifecycle.StateEmbeddedUnavailable)
+		}
+		if result.LifecycleSeverity != doltlifecycle.SeverityError {
+			t.Fatalf("LifecycleSeverity = %q, want %q", result.LifecycleSeverity, doltlifecycle.SeverityError)
 		}
 		if result.LifecycleGuidance == "" {
 			t.Fatal("LifecycleGuidance should be populated")

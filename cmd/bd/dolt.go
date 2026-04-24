@@ -591,6 +591,14 @@ func renderEmbeddedDoltStatus(result embeddedDoltStatusResult) {
 	fmt.Printf("  Data: %s\n", result.DataDir)
 	if !result.DataDirExists {
 		fmt.Printf("  %s\n", ui.RenderWarn("Data directory does not exist — run 'bd init' to create it"))
+	} else if !result.DataDirAccessible {
+		fmt.Printf("  %s\n", ui.RenderWarn("Data directory is not readable"))
+	}
+	if result.DataDirError != "" {
+		fmt.Printf("  Error: %s\n", result.DataDirError)
+	}
+	if result.LifecycleGuidance != "" && result.LifecycleSeverity != doltlifecycle.SeverityInfo {
+		fmt.Printf("  Next: %s\n", result.LifecycleGuidance)
 	}
 }
 
@@ -1308,6 +1316,12 @@ func doltShowConfigJSON(result doltShowConfigResult) map[string]interface{} {
 	out["embedded"] = result.Embedded
 	if result.Embedded {
 		out["data_dir"] = result.DataDir
+		if result.Lifecycle.Primary != "" {
+			out["lifecycle_state"] = result.Lifecycle.Primary
+			out["lifecycle_states"] = result.Lifecycle.States
+			out["lifecycle_severity"] = result.Lifecycle.Severity
+			out["lifecycle_guidance"] = result.LifecycleGuidance
+		}
 		return out
 	}
 

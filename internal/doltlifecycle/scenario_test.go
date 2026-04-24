@@ -28,9 +28,10 @@ func TestLifecycleScenarios(t *testing.T) {
 		{
 			name: "embedded lock contention",
 			obs: Observation{
-				Initialized:   true,
-				Mode:          ModeEmbedded,
-				LockContended: true,
+				Initialized:        true,
+				Mode:               ModeEmbedded,
+				EmbeddedAccessible: true,
+				LockContended:      true,
 			},
 			wantPrimary:  StateLockContended,
 			wantSeverity: SeverityError,
@@ -50,9 +51,10 @@ func TestLifecycleScenarios(t *testing.T) {
 		{
 			name: "migration retry required",
 			obs: Observation{
-				Initialized:       true,
-				Mode:              ModeEmbedded,
-				MigrationRequired: true,
+				Initialized:        true,
+				Mode:               ModeEmbedded,
+				EmbeddedAccessible: true,
+				MigrationRequired:  true,
 			},
 			wantPrimary:  StateMigrationRequired,
 			wantSeverity: SeverityWarning,
@@ -60,9 +62,10 @@ func TestLifecycleScenarios(t *testing.T) {
 		{
 			name: "migration failure recovery",
 			obs: Observation{
-				Initialized:     true,
-				Mode:            ModeEmbedded,
-				MigrationFailed: true,
+				Initialized:        true,
+				Mode:               ModeEmbedded,
+				EmbeddedAccessible: true,
+				MigrationFailed:    true,
 			},
 			wantPrimary:  StateMigrationFailed,
 			wantSeverity: SeverityError,

@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`bd init --force` semantics narrowed to local-only** — `--force` (or `--reinit-local`) bypasses only the LOCAL data-safety guard. It does NOT authorize silent divergence of remote history. When origin has `refs/dolt/data`, `bd init --force` now refuses with exit code 10 unless `--discard-remote` is also passed. Fixes the long-standing footgun where `bd init --force` in a repo with remote Dolt history silently set up an orphan branch that failed to push.
 - **Init refusal messages follow What/Why/Next structure** — runtime error text no longer echoes copy-pasteable destructive invocations. Token values and exact override commands live in `bd help init-safety` and `docs/RECOVERY.md` only. Closes the failure class where an AI agent destroyed 247 issues by pattern-matching on the tool's own error output (`58f5989bf`).
+- **Schema migration backfill failures now surface** — migrations that backfill version records for existing Dolt schemas no longer tolerate DDL errors as already-applied migrations. Upgrades with custom or partially applied migrations may now fail fast instead of silently recording incomplete schema state.
 
 ### Deprecated
 
