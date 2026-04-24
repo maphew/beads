@@ -1,15 +1,19 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/storage"
 )
 
 type fakeAutoPushTarget struct {
@@ -23,6 +27,110 @@ func (f *fakeAutoPushTarget) GetCurrentCommit(context.Context) (string, error) {
 
 func (f *fakeAutoPushTarget) Push(ctx context.Context) error {
 	return f.push(ctx)
+}
+
+type autoPushFakeStore struct {
+	storage.DoltStorage
+
+	currentCommit string
+	pushErr       error
+	pushWait      bool
+	pushCalls     int
+}
+
+func (s *autoPushFakeStore) HasRemote(context.Context, string) (bool, error) {
+	return true, nil
+}
+
+func (s *autoPushFakeStore) GetCurrentCommit(context.Context) (string, error) {
+	if s.currentCommit == "" {
+		return "fake-commit", nil
+	}
+	return s.currentCommit, nil
+}
+
+func (s *autoPushFakeStore) Push(ctx context.Context) error {
+	s.pushCalls++
+	if s.pushWait {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return s.pushErr
+}
+
+func (s *autoPushFakeStore) IsClosed() bool {
+	return false
+}
+
+func (s *autoPushFakeStore) Close() error {
+	return nil
+}
+
+func setupAutoPushTest(t *testing.T, st storage.DoltStorage) string {
+	t.Helper()
+
+	originalStore := store
+	originalTestModeUseGlobals := testModeUseGlobals
+	originalQuiet := quietFlag
+	originalJSON := jsonOutput
+	originalSandbox := sandboxMode
+	t.Cleanup(func() {
+		setStore(originalStore)
+		testModeUseGlobals = originalTestModeUseGlobals
+		quietFlag = originalQuiet
+		jsonOutput = originalJSON
+		sandboxMode = originalSandbox
+		config.ResetForTesting()
+	})
+
+	enableTestModeGlobals()
+	setStore(st)
+	quietFlag = false
+	jsonOutput = false
+	sandboxMode = false
+
+	tmp := t.TempDir()
+	beadsDir := filepath.Join(tmp, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DIR", beadsDir)
+	t.Setenv("BD_DOLT_AUTO_PUSH", "true")
+	t.Setenv("BD_DOLT_AUTO_PUSH_INTERVAL", "0")
+
+	config.ResetForTesting()
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+
+	return beadsDir
+}
+
+func captureStderrForAutoPush(t *testing.T, fn func()) string {
+	t.Helper()
+
+	oldStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+	defer func() {
+		os.Stderr = oldStderr
+		_ = r.Close()
+	}()
+
+	fn()
+
+	_ = w.Close()
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, r); err != nil {
+		t.Fatal(err)
+	}
+	return buf.String()
 }
 
 func TestIsDoltAutoPushEnabled_ExplicitConfig(t *testing.T) {
@@ -257,6 +365,76 @@ func TestMaybeAutoPush_DisabledByConfig(t *testing.T) {
 
 	// Should not panic or attempt push
 	maybeAutoPush(context.Background())
+}
+
+func TestMaybeAutoPush_UnreachableRemoteTimesOutAndThrottlesRetry(t *testing.T) {
+	t.Setenv("BD_DOLT_AUTO_PUSH_TIMEOUT", "1ms")
+	fake := &autoPushFakeStore{currentCommit: "commit-a", pushWait: true}
+	setupAutoPushTest(t, fake)
+
+	stderr := captureStderrForAutoPush(t, func() {
+		maybeAutoPush(context.Background())
+	})
+
+	if fake.pushCalls != 1 {
+		t.Fatalf("pushCalls = %d, want 1", fake.pushCalls)
+	}
+	if !strings.Contains(stderr, "dolt auto-push timed out") {
+		t.Fatalf("expected timeout warning, got:\n%s", stderr)
+	}
+
+	ps, err := loadPushState()
+	if err != nil {
+		t.Fatalf("loadPushState: %v", err)
+	}
+	if ps == nil || ps.LastPush == "" {
+		t.Fatalf("push state should record failed attempt timestamp, got %+v", ps)
+	}
+	if ps.LastCommit != "" {
+		t.Fatalf("failed push must not record LastCommit, got %+v", ps)
+	}
+
+	maybeAutoPush(context.Background())
+	if fake.pushCalls != 1 {
+		t.Fatalf("pushCalls after throttled retry = %d, want 1", fake.pushCalls)
+	}
+}
+
+func TestMaybeAutoPush_DivergedRemotePrintsRecoveryGuidance(t *testing.T) {
+	fake := &autoPushFakeStore{
+		currentCommit: "commit-b",
+		pushErr:       errors.New("push failed: can't find common ancestor"),
+	}
+	setupAutoPushTest(t, fake)
+
+	stderr := captureStderrForAutoPush(t, func() {
+		maybeAutoPush(context.Background())
+	})
+
+	if fake.pushCalls != 1 {
+		t.Fatalf("pushCalls = %d, want 1", fake.pushCalls)
+	}
+	for _, want := range []string{
+		"dolt auto-push failed",
+		"Local and remote Dolt histories have diverged",
+		"bd bootstrap",
+		"bd dolt push --force",
+	} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("expected stderr to contain %q, got:\n%s", want, stderr)
+		}
+	}
+
+	ps, err := loadPushState()
+	if err != nil {
+		t.Fatalf("loadPushState: %v", err)
+	}
+	if ps == nil || ps.LastPush == "" {
+		t.Fatalf("push state should record diverged attempt timestamp, got %+v", ps)
+	}
+	if ps.LastCommit != "" {
+		t.Fatalf("diverged push must not record LastCommit, got %+v", ps)
+	}
 }
 
 func TestLoadSavePushState(t *testing.T) {
