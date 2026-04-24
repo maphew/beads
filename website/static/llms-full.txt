@@ -5563,7 +5563,7 @@ bd list --label "sprint-1" --status open --json | \
 Use beads as a Go library:
 
 ```go
-import "github.com/gastownhall/beads/internal/storage/embeddeddolt"
+import "github.com/steveyegge/beads/internal/storage/embeddeddolt"
 
 store, _ := embeddeddolt.New(ctx, ".beads", "beads", "main")
 defer store.Close()

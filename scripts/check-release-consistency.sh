@@ -90,7 +90,7 @@ old_repo_refs="$(
         'github\.com/steveyegge/beads|raw\.githubusercontent\.com/steveyegge/beads|github:steveyegge/beads|steveyegge/beads' \
         -- "${public_files[@]}" 2>/dev/null \
     | grep -Ev \
-        'go install|go list|go:github\.com/steveyegge/beads|github\.com/steveyegge/beads/(cmd|pkg|internal|examples)|\.go:[0-9]+:.*"github\.com/steveyegge/beads"|go\.mod:[0-9]+:.*(require|replace) github\.com/steveyegge/beads|/plugin marketplace|module path|module import|module ID|bd-example-extension-go|scripts/repro-dolt-hang|CHANGELOG|changelog|historical' \
+        'go install|go list|go get github\.com/steveyegge/beads|go:github\.com/steveyegge/beads|github\.com/steveyegge/beads/(cmd|pkg|internal|examples)|\.(go|md):[0-9]+:.*"github\.com/steveyegge/beads"|go\.mod:[0-9]+:.*(require|replace) github\.com/steveyegge/beads|/plugin marketplace|module path|module import|module ID|bd-example-extension-go|scripts/repro-dolt-hang|CHANGELOG|changelog|historical' \
     || true
 )"
 if [[ -n "$old_repo_refs" ]]; then
@@ -102,7 +102,7 @@ fi
 
 bad_module_snippets="$(
     git grep -n -E \
-        'go install github\.com/gastownhall/beads|go list .*github\.com/gastownhall/beads|go:github\.com/gastownhall/beads' \
+        'go install github\.com/gastownhall/beads|go list .*github\.com/gastownhall/beads|go get github\.com/gastownhall/beads|go:github\.com/gastownhall/beads|github\.com/gastownhall/beads/(cmd|pkg|internal|examples)|"github\.com/gastownhall/beads"' \
         -- "${public_files[@]}" 2>/dev/null || true
 )"
 if [[ -n "$bad_module_snippets" ]]; then

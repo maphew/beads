@@ -17,7 +17,7 @@ Instead of spawning `bd` CLI processes:
 In your Go project:
 
 ```bash
-go get github.com/gastownhall/beads@latest
+go get github.com/steveyegge/beads@latest
 ```
 
 ## Basic Usage
@@ -29,7 +29,7 @@ import (
     "context"
     "log"
     
-    "github.com/gastownhall/beads"
+    "github.com/steveyegge/beads"
 )
 
 func main() {
