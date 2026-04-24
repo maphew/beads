@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/doltlifecycle"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage"
 )
@@ -1394,6 +1395,69 @@ func TestInspectEmbeddedDoltStatusContract(t *testing.T) {
 	}
 	if raw["server_running"] != false {
 		t.Fatalf("server_running = %v, want false", raw["server_running"])
+	}
+}
+
+func TestDoltLifecycleStatusContracts(t *testing.T) {
+	t.Run("embedded status maps to initialized embedded", func(t *testing.T) {
+		result := inspectEmbeddedDoltStatus(t.TempDir())
+		if result.LifecycleState != doltlifecycle.StateInitializedEmbedded {
+			t.Fatalf("LifecycleState = %q, want %q", result.LifecycleState, doltlifecycle.StateInitializedEmbedded)
+		}
+		if result.LifecycleSeverity != doltlifecycle.SeverityInfo {
+			t.Fatalf("LifecycleSeverity = %q, want %q", result.LifecycleSeverity, doltlifecycle.SeverityInfo)
+		}
+		if result.LifecycleGuidance == "" {
+			t.Fatal("LifecycleGuidance should be populated")
+		}
+	})
+
+	t.Run("external unreachable maps to server unavailable", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_PORT", "1")
+		cfg := &configfile.Config{
+			DoltMode:       "server",
+			DoltServerHost: "127.0.0.1",
+			DoltServerUser: "root",
+			DoltDatabase:   "beads_ext",
+		}
+
+		result := inspectExternalDoltStatus(t.Context(), t.TempDir(), cfg)
+		if result.LifecycleState != doltlifecycle.StateServerUnavailable {
+			t.Fatalf("LifecycleState = %q, want %q", result.LifecycleState, doltlifecycle.StateServerUnavailable)
+		}
+		if result.LifecycleSeverity != doltlifecycle.SeverityError {
+			t.Fatalf("LifecycleSeverity = %q, want %q", result.LifecycleSeverity, doltlifecycle.SeverityError)
+		}
+		if result.LifecycleGuidance == "" {
+			t.Fatal("LifecycleGuidance should be populated")
+		}
+	})
+}
+
+func TestDoltShowLifecycleContract(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "1")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "1")
+
+	origServerMode := serverMode
+	defer func() { serverMode = origServerMode }()
+	serverMode = true
+
+	cfg := configfile.DefaultConfig()
+	cfg.Backend = configfile.BackendDolt
+	cfg.DoltMode = configfile.DoltModeServer
+	cfg.DoltServerHost = "127.0.0.1"
+	cfg.DoltDatabase = "beads_ext"
+	cfg.DoltServerUser = "root"
+
+	result := inspectDoltShowConfig(t.TempDir(), cfg, true)
+	if result.Lifecycle.Primary != doltlifecycle.StateServerUnavailable {
+		t.Fatalf("Lifecycle.Primary = %q, want %q", result.Lifecycle.Primary, doltlifecycle.StateServerUnavailable)
+	}
+	if result.Lifecycle.Severity != doltlifecycle.SeverityError {
+		t.Fatalf("Lifecycle.Severity = %q, want %q", result.Lifecycle.Severity, doltlifecycle.SeverityError)
+	}
+	if result.LifecycleGuidance == "" {
+		t.Fatal("LifecycleGuidance should be populated")
 	}
 }
 
