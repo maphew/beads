@@ -201,6 +201,60 @@ func TestDoltShowConfigDefaultMode(t *testing.T) {
 	})
 }
 
+func TestInspectDoltShowConfigJSONContract(t *testing.T) {
+	beadsDir := t.TempDir()
+	cfg := configfile.DefaultConfig()
+	cfg.Backend = configfile.BackendDolt
+	cfg.DoltDatabase = "show_contract"
+
+	origServerMode := serverMode
+	defer func() { serverMode = origServerMode }()
+	serverMode = false
+
+	embedded := inspectDoltShowConfig(beadsDir, cfg, false)
+	embeddedJSON := doltShowConfigJSON(embedded)
+	if embeddedJSON["backend"] != "dolt" {
+		t.Fatalf("backend = %v, want dolt", embeddedJSON["backend"])
+	}
+	if embeddedJSON["database"] != "show_contract" {
+		t.Fatalf("database = %v, want show_contract", embeddedJSON["database"])
+	}
+	if embeddedJSON["embedded"] != true {
+		t.Fatalf("embedded = %v, want true", embeddedJSON["embedded"])
+	}
+	if _, ok := embeddedJSON["mode"]; ok {
+		t.Fatal("show JSON should not include legacy mode field")
+	}
+
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "1")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "1")
+	cfg.DoltMode = configfile.DoltModeServer
+	cfg.DoltServerHost = "127.0.0.1"
+	cfg.DoltServerUser = "root"
+	serverMode = true
+
+	external := inspectDoltShowConfig(beadsDir, cfg, false)
+	externalJSON := doltShowConfigJSON(external)
+	if externalJSON["embedded"] != false {
+		t.Fatalf("embedded = %v, want false", externalJSON["embedded"])
+	}
+	if externalJSON["host"] != "127.0.0.1" {
+		t.Fatalf("host = %v, want 127.0.0.1", externalJSON["host"])
+	}
+	if externalJSON["port"] != 1 {
+		t.Fatalf("port = %v, want 1", externalJSON["port"])
+	}
+	if externalJSON["user"] != "root" {
+		t.Fatalf("user = %v, want root", externalJSON["user"])
+	}
+	if externalJSON["external_server"] != true {
+		t.Fatalf("external_server = %v, want true", externalJSON["external_server"])
+	}
+	if _, ok := externalJSON["connection_ok"]; ok {
+		t.Fatal("connection_ok should be omitted when connection was not checked")
+	}
+}
+
 func TestDoltShowConfigServerMode(t *testing.T) {
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
@@ -1288,6 +1342,43 @@ func TestRunExternalDoltStatus_Unreachable(t *testing.T) {
 			t.Error("expected 'error' field in JSON output for unreachable server")
 		}
 	})
+}
+
+func TestInspectEmbeddedDoltStatusContract(t *testing.T) {
+	beadsDir := t.TempDir()
+	dataDir := filepath.Join(beadsDir, "embeddeddolt")
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
+		t.Fatalf("mkdir data dir: %v", err)
+	}
+
+	result := inspectEmbeddedDoltStatus(beadsDir)
+	if result.Mode != "embedded" {
+		t.Fatalf("Mode = %q, want embedded", result.Mode)
+	}
+	if result.ServerRunning {
+		t.Fatal("ServerRunning should be false for embedded mode")
+	}
+	if result.DataDir != dataDir {
+		t.Fatalf("DataDir = %q, want %q", result.DataDir, dataDir)
+	}
+	if !result.DataDirExists {
+		t.Fatal("DataDirExists should be true")
+	}
+
+	data, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, ok := raw["running"]; ok {
+		t.Fatalf("embedded status JSON should omit generic running field: %s", data)
+	}
+	if raw["server_running"] != false {
+		t.Fatalf("server_running = %v, want false", raw["server_running"])
+	}
 }
 
 func TestDoltStatusExternalLocalhostUsesEndpoint(t *testing.T) {
