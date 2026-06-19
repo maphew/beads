@@ -7,6 +7,11 @@
 > Scope note: this is a structural/architectural read of the codebase as it
 > stands, not a feature wishlist. Line counts and file references are
 > approximate snapshots and will drift.
+>
+> Companion: [EXTENSIBILITY_ANALYSIS.md](EXTENSIBILITY_ANALYSIS.md) drills into
+> the plugin/extension question — why orchestration features landed in core,
+> what the real demand for extensibility is (with upstream-tracker numbers), and
+> which commands could actually leave core.
 
 ---
 
