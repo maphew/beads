@@ -183,7 +183,11 @@ lower standard of investment and a higher bar for further growth.
 ## 6. What runs counter — friction, imbalance, the things to fix
 
 This is the section maintainers should act on. Ordered by how much it
-destabilizes the project.
+destabilizes the project — but note that **§6.3 (the `wisp_*` duplicate table
+universe) is the single most significant concrete finding**, precisely because
+it is the visible cash-out of §6.1 and §6.4 colliding. §6.1 and §6.4 are the
+root *causes*; §6.3 is where they have already produced shipped data-correctness
+bugs and a permanent hot-path tax.
 
 ### 6.1 The charter/code split on orchestration (the central tension)
 The charter forbids orchestration concepts in core. The code is saturated with
@@ -216,18 +220,106 @@ single, well-tested invalidation choke point that *every* merge/pull path must
 pass through, or drop the column and recompute on read (the benchmarks exist to
 tell you whether that is actually too slow — measure before assuming).
 
-### 6.3 The `wisp_*` parallel schema (structural accidental complexity)
-Ephemeral issues ("wisps") get a *complete duplicate table universe*: `wisps`,
-`wisp_dependencies`, `wisp_labels`, `wisp_comments`, `wisp_events` — mirroring
-the five core tables. The consequence is that core read paths must
-`SearchAcrossIssuesAndWisps` (UNION two schemas), and `IssueFilter` carries a
-`SkipWisps` escape hatch to opt out for speed. Every future query, migration,
-and index now has to be written twice or unioned. **This is a tax on the hot
-read path forever.** Worth a hard look: could ephemerality be a flag +
-TTL/GC on the single `issues` table (with a partial index) rather than a
-shadow schema? The cost of the duplication is paid on every query; the benefit
-(keeping ephemeral churn out of Dolt history via `dolt-ignore`) may be
-achievable more cheaply.
+### 6.3 The `wisp_*` duplicate table universe (the sharpest, most concrete imbalance)
+This is the clearest single example in the codebase of the storage substrate
+leaking into the data model, and it sits at the **intersection of §6.1 and §6.4**
+— it is downstream of both. If you read only one subsection, read this one.
+
+**What it is.** `wisps` is a **51-column table that is a near-exact clone of the
+51-column `issues` table** (same column names, same types), plus a full shadow
+aux family: `wisp_dependencies`, `wisp_labels`, `wisp_comments`, `wisp_events`.
+Five core tables, five shadow tables. And there is a **second, parallel migration
+stream** — `internal/storage/schema/migrations/ignored/` (9 migrations) shadowing
+the tracked stream (50).
+
+**Why it exists (legitimate).** Migration 0019 is the whole story:
+
+```sql
+REPLACE INTO dolt_ignore VALUES ('wisps', true);
+REPLACE INTO dolt_ignore VALUES ('wisp_%', true);
+```
+
+Wisps are excluded from Dolt version control entirely. The motivation is sound
+and charter-aligned: ephemeral, high-churn agent infrastructure — heartbeats,
+pings, agent/role/rig state, messages (0035 migrated exactly the `agent`, `rig`,
+`role`, `message` types into wisps) — must not pollute the synced issue history
+or inflate every `dolt push`/`pull`. Keeping that churn out of the versioned
+graph is the right instinct.
+
+**Why it became a *duplicate universe* (the forced move).** `dolt_ignore` is
+**table-scoped, not row-scoped.** Dolt cannot ignore rows, only tables. The design
+wanted a row-level property ("these issues are throwaway") from a mechanism that
+only offers table-level ignore — so the only way to make some issues
+non-versioned was to put them in a *different table*, and splitting the table
+forces cloning the entire relational family that hangs off it. **The duplication
+is not gratuitous; it is the mechanical consequence of expressing a row-level
+concept through a table-level tool.** That is the leak: a Dolt limitation
+propagated into a doubling of the data model.
+
+**What it costs (concrete, not abstract):**
+
+1. **Double-entry schema maintenance.** Every issue field must be added to both
+   tables; the streams pair up — `0041↔ignored/0003` (split deps target),
+   `0046↔ignored/0006` (`is_blocked`), `0047↔ignored/0007` (recompute),
+   `0049↔ignored/0008` (widen LONGTEXT). Two migration streams in lockstep.
+2. **It has already caused a silent correctness bug.** Upstream #4138: the
+   `is_blocked` backfill ran on `issues` but the wisp companion added the column
+   *without* backfilling — so `bd ready` returned blocked wisp work as ready (766
+   mis-flagged wisps in a real store). The duplication tax cashing out as data
+   corruption, compounding the §6.2 fragility by cloning it.
+3. **It complicated the *core* dependencies table.** Dolt forbids FKs from a
+   tracked table (`dependencies`) to an ignored table (`wisps`). To let
+   dependencies span both worlds, the target was split into three typed columns
+   (`depends_on_issue_id`/`depends_on_wisp_id`/`depends_on_external`) under a
+   CHECK constraint, plus hand-written helpers (`DeleteWispFromDependenciesInTx`,
+   `UpdateWispIDInDependenciesInTx`) that manually maintain integrity FKs would
+   give for free. The shadow schema reached back and complicated the primary.
+4. **Every cross-cutting read pays a UNION.** ~10 files implement
+   `SearchAcrossIssuesAndWisps`/union logic (`ready_work_union.go`,
+   `issue_search.go`, `blocked.go`, `events.go`, `issue_descendants.go`, …);
+   **126 non-test files reference wisps.** The `SkipWisps` escape hatch (9 sites)
+   exists because the UNION is costly enough that hot paths opt out — a permanent
+   tax on the hot read path, the path that *is* the product.
+5. **The clone is already drifting.** `wisps` still carries orchestration columns
+   (`hook_bead`, `role_bead`, `agent_state`, `rig`, `role_type`) that were
+   *dropped from `issues`* (0038 `drop_hop_columns`). It is no longer a faithful
+   mirror — it is a diverging shadow accumulating its own legacy cruft.
+
+**Aligned vs. off-balance.** The *goal* (keep ephemeral agent churn out of the
+versioned, synced graph) is correct. The *mechanism* (a full shadow schema +
+shadow migration stream) is accidental complexity forced by serving a row-level
+need with a table-level tool. And note *why* there is ephemeral agent churn to
+isolate at all: heartbeats, agents, roles, rigs, messages — the orchestration
+concepts §6.1 says do not belong in core. **The duplicate universe is downstream
+of both big imbalances:** orchestration-in-core created the need, the Dolt
+table-ignore limitation dictated the shape. Fix either upstream cause and this
+largely dissolves.
+
+**Ways out (ranked):**
+
+1. **Best leverage — collapse the aux shadow tables, keep only `wisps`.**
+   Ephemeral data rarely needs relational queryability or merge. Store wisp
+   labels/deps/comments/events as JSON columns *on the wisp row* instead of four
+   shadow tables. Kills 4 of 5 shadow tables and most of the `ignored/` stream,
+   removes the wisp-side typed-target FK gymnastics, and preserves the legitimate
+   `dolt_ignore` benefit. High payoff, contained blast radius.
+2. **Structural but expensive — single table + `ephemeral` flag + partial index +
+   TTL/GC.** Conceptually cleanest (one data model) but fights Dolt head-on:
+   row-level ignore does not exist, so ephemeral rows re-enter Dolt history and
+   sync between GC runs. Trades duplication for history-churn — probably not worth
+   it given the original motivation.
+3. **Cleanest separation — a distinct ephemeral store** (local SQLite, or a
+   separate never-pushed Dolt DB). Removes the leak entirely but adds a second
+   storage path to own.
+4. **Cheapest interim — generate both migration streams from one source.** If the
+   duplication stays, at least make the tracked/ignored pairing mechanical (one
+   schema definition, emit both) so you cannot ship another #4138. Caps the
+   recurring correctness risk without reducing the model.
+
+**The root lesson to record:** do not model a row-level lifecycle property as a
+separate table just because the storage engine's ignore is table-scoped. Push
+ephemerality up into the orchestration layer or down into a purpose-built store —
+not sideways into a schema clone.
 
 ### 6.4 The Dolt substrate is heavy, and the storage boundary is leaking
 Embedded mode requires CGO and links the entire go-mysql-server + Dolt engine
@@ -301,7 +393,13 @@ to its conceptual difficulty. Decompose it.
 **Decide deliberately (these are forks in the road, not bugs):**
 - Orchestration: amend the charter to embrace it, or extract it. Pick one. (§6.1)
 - `is_blocked`: single invalidation choke point, or recompute-on-read. (§6.2)
-- `wisps`: keep the shadow schema, or collapse to a flag + GC. (§6.3)
+- **`wisps` (highest-impact concrete refactor): collapse the four aux shadow
+  tables to JSON-on-wisp, keeping only the `wisps` table — preserves the
+  legitimate `dolt_ignore` benefit while removing most of the duplicate universe,
+  the shadow migration stream, and the wisp-side FK gymnastics. If you ship one
+  structural fix from this document, ship this. (§6.3)** At minimum, generate the
+  tracked/ignored migration pair from one source so no future schema change can
+  repeat the #4138 backfill bug.
 
 **Push outward / push back:**
 - Drive Dolt merge/FK/PK fixes upstream rather than accreting beads-side repair
@@ -310,12 +408,17 @@ to its conceptual difficulty. Decompose it.
   product" / "metadata before schema" bars (§5, §6.5).
 
 **Refactor for reliability:**
+- **Collapse the `wisp_*` aux shadow tables to JSON-on-wisp (§6.3) — the
+  highest-impact concrete refactor in this document.** It is where §6.1 and §6.4
+  have already produced a shipped correctness bug and a permanent hot-path tax.
 - Decompose `init.go` (§6.6). Let a quieter storage layer shrink `doctor`
   rather than grow it (§5).
 
 **The one-sentence version:** beads has an excellent core idea, a correct
 distributed-ID design, and a disciplined charter — and it is being pulled off
-balance by orchestration features it swore to keep out, a denormalized cache it
-keeps having to repair, a duplicated ephemeral schema that taxes every query,
-and a storage substrate whose merge semantics it is still fighting. Defend the
-core; resolve the three forks; enforce the fence you already wrote.
+balance by orchestration features it swore to keep out and a storage substrate
+whose merge semantics it is still fighting, a collision whose sharpest
+cash-out is the `wisp_*` duplicate table universe (a full schema clone, a shadow
+migration stream, and a shipped `bd ready` correctness bug) that taxes every
+query. Defend the core; collapse the wisp shadow tables; resolve the three
+forks; enforce the fence you already wrote.
