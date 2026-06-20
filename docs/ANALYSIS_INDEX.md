@@ -34,6 +34,22 @@ standalone mode is single-writer (embedded flock); concurrency requires a server
 mode and a whole resilience layer (circuit breaker, manifest recovery,
 port/PID/shadow-DB management) — database-operations code the charter forbids.
 
+**Update 3 (course-correction — read this before the next pull):** the maintainer
+observed that sessions 2-3 produced *correct, exhaustive* findings but fewer "now
+I understand" moments than session 1 — coverage crowded out insight. Diagnosis:
+this index, created at the same commit that began the "verify the strengths" work
+(`51b1a27`), silently redefined the goal from *understand beads* to *turn ⬜ into
+✅*. Coverage-thinking rewards breadth and closure and punishes the slow circling
+that produces a reframe. Correction adopted: pick a **question that would change
+how you'd act**, organize around **one generative tension**, **hunt the
+inversion** (where the obvious reading is wrong), and deliver a **transferable
+principle** — not an inventory. First product of the new mode:
+[IS_BEADS_BECOMING_GASTOWN.md](IS_BEADS_BECOMING_GASTOWN.md) (the authorship
+tension: the charter is a self-imposed boundary its own author structurally
+cannot enforce; the wisp universe is that denial made physical). **Do not let
+this index pick the next pull by "what's still ⬜." Let the next question pick
+it.**
+
 ---
 
 ## A. Skeleton / strengths — the actual product
@@ -82,6 +98,7 @@ port/PID/shadow-DB management) — database-operations code the charter forbids.
 | Core engine (identity + graph/readiness) | ✅ | CORE_ENGINE_ANALYSIS.md |
 | Agent-memory layer (prime/memory + compaction) | ✅ | AGENT_MEMORY_ANALYSIS.md |
 | Storage runtime (concurrency/durability + is_blocked + merge-repair) | ✅ | STORAGE_RUNTIME_ANALYSIS.md |
+| Authorship tension — "is beads becoming Gastown?" (essay, not survey) | ✅ | IS_BEADS_BECOMING_GASTOWN.md |
 | This index | ✅ (living) | ANALYSIS_INDEX.md |
 
 ---
