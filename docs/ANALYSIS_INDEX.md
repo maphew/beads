@@ -5,8 +5,9 @@
 > still only named or asserted. Companion to
 > [ARCHITECTURE_ANALYSIS.md](ARCHITECTURE_ANALYSIS.md),
 > [CORE_ENGINE_ANALYSIS.md](CORE_ENGINE_ANALYSIS.md),
-> [AGENT_MEMORY_ANALYSIS.md](AGENT_MEMORY_ANALYSIS.md), and
-> [EXTENSIBILITY_ANALYSIS.md](EXTENSIBILITY_ANALYSIS.md).
+> [AGENT_MEMORY_ANALYSIS.md](AGENT_MEMORY_ANALYSIS.md),
+> [EXTENSIBILITY_ANALYSIS.md](EXTENSIBILITY_ANALYSIS.md), and
+> [STORAGE_RUNTIME_ANALYSIS.md](STORAGE_RUNTIME_ANALYSIS.md).
 
 **Legend:** ✅ unfolded · 🟡 partial (mechanism seen, ramifications open) ·
 ⬜ named/asserted only, not opened
@@ -19,6 +20,19 @@ strengths are *genuine*, but each carries the same ship-then-half-abandon tell
 (inert `conditional-blocks`, dead hex ID generator, unwired compaction archive
 tables, stubbed-yet-advertised Tier 2). The headline "memory for agents" promise
 is real but narrower than sold (flat KV, no ranking/semantic retrieval, no undo).
+
+**Update 2 (storage runtime):** the two partial imbalances are now closed
+(STORAGE_RUNTIME_ANALYSIS) and the dark storage-runtime subsystem (#11) opened
+alongside them — they are one story: *why storage is the bug epicenter.* §6.2
+verified — `is_blocked` has **no invalidation choke point** (24 hand-placed
+recompute sites) plus a separate, repeatedly-patched merge path; recompute-on-read
+is a recursive CTE, measurable with the existing benchmarks. §6.4 verified — three
+hand-written conflict resolvers + a hand-maintained FK-cascade whitelist (two of
+whose seven entries are the *dead* snapshot tables from AGENT_MEMORY §2c), trend
+**accreting** (no upstream offload, no provisional annotations). #11: the default
+standalone mode is single-writer (embedded flock); concurrency requires a server
+mode and a whole resilience layer (circuit breaker, manifest recovery,
+port/PID/shadow-DB management) — database-operations code the charter forbids.
 
 ---
 
@@ -37,8 +51,8 @@ is real but narrower than sold (flat KV, no ranking/semantic retrieval, no undo)
 |---|--------|--------|---------------|-------|
 | 6.1 | Orchestration-in-core (charter/code split) | ✅ | ARCH §6.1, EXT | Plus full plugin/extensibility thread |
 | 6.3 | Wisp duplicate-table universe | ✅ | ARCH §6.3 | Fleshed as the central concrete finding |
-| 6.2 | `is_blocked` denormalized cache | 🟡 | ARCH §6.2 | Saw churn; haven't traced invalidation choke points or tested recompute-on-read viability |
-| 6.4 | Dolt boundary leak (merge resolvers, FK whitelist) | 🟡 | ARCH §6.4 | Mechanisms known; upstream-vs-beads fix-trend not verified |
+| 6.2 | `is_blocked` denormalized cache | ✅ | ARCH §6.2, STORAGE §3 | **No choke point: 19 recompute call sites across 13 files + a separate diff-driven merge path** (`blocked_merge.go`), patched at 0046→0047→bd-6dnrw.3→.39. Recompute-on-read = recursive CTE, priceable via `BenchmarkGetReadyWork_*`. Code's own comment names the defect |
+| 6.4 | Dolt boundary leak (merge resolvers, FK whitelist) | ✅ | ARCH §6.4, STORAGE §4 | Verified: 3 hand-written "benign conflict" resolvers + a 7-table FK-cascade whitelist (**2 entries are dead snapshot tables**). Trend **accreting** — no `remove once dolt#N` anchors, version bump not paired with workaround removal |
 | 6.5 | Feature-accretion velocity vs "stay small" | 🟡 | ARCH §6.5 | Asserted from commit/changelog metrics |
 | 6.6 | `init.go` first-run blast radius (2303 lines) | ⬜ | ARCH §6.6 | Asserted from size/churn; internals not read |
 
@@ -53,8 +67,8 @@ is real but narrower than sold (flat KV, no ranking/semantic retrieval, no undo)
 
 | # | Thread | Status | Notes |
 |---|--------|--------|-------|
+| 11 | Daemon / server mode / dbproxy / circuit breaker | ✅ | STORAGE §1-2: four-mode matrix (embedded single-writer flock / owned / external / proxied-server), client-side resilience layer (circuit breaker, manifest recovery, port/PID/shadow-DB mgmt). Cooperative non-ACID exclusive lock. Daemon *internals* (logrotate, servermode lifecycle edge cases) still light |
 | 8 | Federation / multi-repo (HOP model, `source_repo` routing, `federation_peers`, `routes`) | ⬜ | Real distributed subsystem; `federation.go` churned 6× recently |
-| 11 | Daemon / server mode / dbproxy / circuit breaker | ⬜ | Multi-writer story; seat of severe upstream durability/concurrency bugs |
 | 12 | Orchestration internals (`internal/formula` ~9.7k lines, molecules, swarm, cook, gate) | ⬜ | Discussed abstractly; mechanics never examined |
 | 13 | Testing architecture (test 230k > prod 173k; CGO matrix; 132 `t.Skip`) | ⬜ | Understood only as a number |
 | 14 | Config three-way (`metadata.json` / `config.yaml` / DB `config`) | ⬜ | Known user-confusion source |
@@ -67,6 +81,7 @@ is real but narrower than sold (flat KV, no ranking/semantic retrieval, no undo)
 | Extensibility / plugin demand analysis | ✅ | EXTENSIBILITY_ANALYSIS.md |
 | Core engine (identity + graph/readiness) | ✅ | CORE_ENGINE_ANALYSIS.md |
 | Agent-memory layer (prime/memory + compaction) | ✅ | AGENT_MEMORY_ANALYSIS.md |
+| Storage runtime (concurrency/durability + is_blocked + merge-repair) | ✅ | STORAGE_RUNTIME_ANALYSIS.md |
 | This index | ✅ (living) | ANALYSIS_INDEX.md |
 
 ---
@@ -75,7 +90,13 @@ is real but narrower than sold (flat KV, no ranking/semantic retrieval, no undo)
 1. ~~#3 content-hash/ID + #5/#4 graph & readiness~~ — ✅ done (CORE_ENGINE_ANALYSIS.md).
 2. ~~#9 compaction + #10 agent-context layer~~ — ✅ done (AGENT_MEMORY_ANALYSIS.md): the
    headline "memory for agents" thesis verified — genuine but narrower than sold.
-3. Close out **#6.2 / #6.4** — the two partial imbalances (is_blocked invalidation
-   choke points; Dolt-boundary upstream-vs-beads fix trend).
+3. ~~Close out **#6.2 / #6.4** + open **#11**~~ — ✅ done (STORAGE_RUNTIME_ANALYSIS.md):
+   one story — *why storage is the bug epicenter.* is_blocked has no choke point; the
+   merge-repair burden is accreting; default concurrency is single-writer.
 4. **#8 federation / multi-repo** — the other genuine distributed subsystem still dark.
-5. **#11 daemon / server / dbproxy** — the multi-writer durability story.
+   Now the natural next pull: it sits on the same Dolt sync/merge substrate STORAGE just
+   anatomized (`federation.go` already shows up in the is_blocked-after-pull recompute).
+5. **#12 orchestration internals** (`internal/formula` ~9.7k lines) — the load-bearing
+   mass behind the §6.1 charter/code split; never examined up close.
+6. **#13 testing architecture** (test 230k > prod 173k) — the "battle-tested" claim the
+   other docs lean on, still understood only as a number (132 `t.Skip`, CGO matrix).
