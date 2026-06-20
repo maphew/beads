@@ -48,7 +48,15 @@ principle** — not an inventory. First product of the new mode:
 tension: the charter is a self-imposed boundary its own author structurally
 cannot enforce; the wisp universe is that denial made physical). **Do not let
 this index pick the next pull by "what's still ⬜." Let the next question pick
-it.**
+it.** Second product of the new mode:
+[IS_THE_GRAPH_THE_PRODUCT.md](IS_THE_GRAPH_THE_PRODUCT.md) — verdict: the product
+is a *verb* (readiness dispatch over the dependency graph), not a noun; "memory"
+is both the metaphor for the graph and the name of an unrelated 310-line KV
+feature. It **interlocks** with the Gastown essay rather than sitting beside it:
+the core verb is *dispatch*, dispatch is the first half of orchestration, so the
+readiness engine is the structural gravity well that pulls Gastown into core —
+the boundary was undefendable by construction, not merely undefended. Two essays,
+one finding seen from two sides.
 
 ---
 
@@ -99,6 +107,7 @@ it.**
 | Agent-memory layer (prime/memory + compaction) | ✅ | AGENT_MEMORY_ANALYSIS.md |
 | Storage runtime (concurrency/durability + is_blocked + merge-repair) | ✅ | STORAGE_RUNTIME_ANALYSIS.md |
 | Authorship tension — "is beads becoming Gastown?" (essay, not survey) | ✅ | IS_BEADS_BECOMING_GASTOWN.md |
+| Product identity — "is the graph the product?" (essay; interlocks w/ above) | ✅ | IS_THE_GRAPH_THE_PRODUCT.md |
 | This index | ✅ (living) | ANALYSIS_INDEX.md |
 
 ---
