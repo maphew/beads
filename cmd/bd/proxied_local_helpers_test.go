@@ -69,6 +69,9 @@ func bdManagedLocalInit(t *testing.T, bd, prefix string, idleTimeout time.Durati
 	if info.External != nil {
 		t.Fatalf("expected managed-local topology (no External block), got %+v", info.External)
 	}
+	if info.IdleTimeout != idleTimeout {
+		t.Fatalf("persisted managed-local idle timeout: got %s, want %s", info.IdleTimeout, idleTimeout)
+	}
 	return p
 }
 

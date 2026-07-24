@@ -14,6 +14,7 @@ name: Proxied Local Smoke
 
 on:
   workflow_dispatch:
+  merge_group:
   push:
     branches: [main]
     paths:
@@ -21,9 +22,17 @@ on:
       - 'cmd/bd/proxied_server*.go'
       - 'cmd/bd/*_proxied_server.go'
       - 'cmd/bd/db_proxy_child.go'
+      - 'cmd/bd/init*.go'
+      - 'cmd/bd/proxied_integration_helpers_test.go'
+      - 'cmd/bd/store_factory*.go'
+      - 'cmd/bd/test_dolt_server_cgo_test.go'
       - 'cmd/bd/uow_factory.go'
+      - 'internal/configfile/**'
+      - 'internal/doltserver/**'
       - 'internal/storage/dbproxy/**'
       - 'internal/storage/uow/**'
+      - 'go.mod'
+      - 'go.sum'
       - '.github/workflows/proxied-local-smoke.yml'
   pull_request:
     paths:
@@ -31,9 +40,17 @@ on:
       - 'cmd/bd/proxied_server*.go'
       - 'cmd/bd/*_proxied_server.go'
       - 'cmd/bd/db_proxy_child.go'
+      - 'cmd/bd/init*.go'
+      - 'cmd/bd/proxied_integration_helpers_test.go'
+      - 'cmd/bd/store_factory*.go'
+      - 'cmd/bd/test_dolt_server_cgo_test.go'
       - 'cmd/bd/uow_factory.go'
+      - 'internal/configfile/**'
+      - 'internal/doltserver/**'
       - 'internal/storage/dbproxy/**'
       - 'internal/storage/uow/**'
+      - 'go.mod'
+      - 'go.sum'
       - '.github/workflows/proxied-local-smoke.yml'
 
 permissions:
@@ -45,6 +62,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
+      CGO_ENABLED: "1"
       # Pinned so the lane tests a known dolt CLI, not whatever the installer
       # resolves on a given day. Bump deliberately.
       DOLT_VERSION: 2.2.2
@@ -68,11 +86,25 @@ jobs:
           go build -tags gms_pure_go -o /tmp/bd-under-test ./cmd/bd
           go test -tags gms_pure_go -c -o /tmp/proxied-local-smoke.test ./cmd/bd
 
+      - name: Assert the managed-local smoke test is compiled in
+        run: |
+          listed="$(
+            BEADS_TEST_PROXIED_LOCAL=1 \
+            BEADS_TEST_SKIP=dolt \
+            /tmp/proxied-local-smoke.test \
+              -test.list '^TestManagedLocalProxiedLifecycleSmoke$'
+          )"
+          if [[ "$listed" != 'TestManagedLocalProxiedLifecycleSmoke' ]]; then
+            echo "managed-local smoke test missing or ambiguous; got: '$listed'" >&2
+            exit 1
+          fi
+
       - name: Run managed-local lifecycle smoke offline (loopback-only netns)
         run: |
           sudo env \
             "PATH=$PATH" \
             BEADS_TEST_PROXIED_LOCAL=1 \
+            BEADS_TEST_SKIP=dolt \
             BEADS_TEST_BD_BINARY=/tmp/bd-under-test \
             unshare --net -- bash -euxc '
               ip link set lo up

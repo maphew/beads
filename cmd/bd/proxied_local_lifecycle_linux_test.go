@@ -95,10 +95,11 @@ func TestManagedLocalProxiedLifecycleSmoke(t *testing.T) {
 	// binds the backend listener to 127.0.0.1 on the backend pidfile's port.
 	assertManagedConfigLoopback(t, p, backendPF.Port)
 
-	// Dynamic loopback proof: neither live process may hold any TCP
-	// listener on a non-loopback address.
-	assertLoopbackOnlyListeners(t, proxyPF.Pid, "proxy (bd db-proxy-child)")
-	assertLoopbackOnlyListeners(t, backendPF.Pid, "dolt sql-server backend")
+	// Dynamic loopback proof: each live process owns a 127.0.0.1 listener
+	// on the exact port its pidfile advertises, and neither process holds a
+	// TCP listener on a non-loopback address.
+	assertExpectedLoopbackListener(t, proxyPF.Pid, proxyPF.Port, "proxy (bd db-proxy-child)")
+	assertExpectedLoopbackListener(t, backendPF.Pid, backendPF.Port, "dolt sql-server backend")
 
 	// The held connection must reach the same data bd wrote, through the
 	// proxy listener the pidfile advertises.
@@ -144,7 +145,7 @@ func TestManagedLocalProxiedLifecycleSmoke(t *testing.T) {
 	if !processAlive(proxyPF2.Pid) {
 		t.Fatalf("restarted proxy process %d is not alive", proxyPF2.Pid)
 	}
-	assertLoopbackOnlyListeners(t, proxyPF2.Pid, "restarted proxy (bd db-proxy-child)")
+	assertExpectedLoopbackListener(t, proxyPF2.Pid, proxyPF2.Port, "restarted proxy (bd db-proxy-child)")
 }
 
 // assertManagedConfigLoopback verifies the generated backend config.yaml
@@ -172,21 +173,98 @@ func assertManagedConfigLoopback(t *testing.T, p proxiedProject, backendPort int
 	}
 }
 
-// assertLoopbackOnlyListeners fails if pid owns any listening TCP socket
-// bound to a non-loopback address.
-func assertLoopbackOnlyListeners(t *testing.T, pid int, label string) {
+// assertExpectedLoopbackListener fails unless pid owns 127.0.0.1 on the exact
+// port its pidfile advertises, or if it owns any listening TCP socket bound to
+// a non-loopback address.
+func assertExpectedLoopbackListener(t *testing.T, pid, advertisedPort int, label string) {
 	t.Helper()
 	listeners, err := listeningTCPAddrs(pid)
 	if err != nil {
 		t.Fatalf("enumerate listeners of %s (pid %d): %v", label, pid, err)
 	}
-	if len(listeners) == 0 {
-		t.Errorf("%s (pid %d) has no listening TCP sockets; expected at least its serving port", label, pid)
+	expected := netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), uint16(advertisedPort))
+	if err := validateExpectedLoopbackListener(listeners, expected); err != nil {
+		t.Errorf("%s (pid %d): %v", label, pid, err)
 	}
+}
+
+func validateExpectedLoopbackListener(listeners []netip.AddrPort, expected netip.AddrPort) error {
+	expected = unmapAddrPort(expected)
+	foundExpected := false
 	for _, ap := range listeners {
-		if !ap.Addr().Unmap().IsLoopback() {
-			t.Errorf("%s (pid %d) listens on non-loopback address %s", label, pid, ap)
+		normalized := unmapAddrPort(ap)
+		if !normalized.Addr().IsLoopback() {
+			return fmt.Errorf("listens on non-loopback address %s", ap)
 		}
+		if normalized == expected {
+			foundExpected = true
+		}
+	}
+	if !foundExpected {
+		return fmt.Errorf("does not listen on advertised address %s; listeners: %v", expected, listeners)
+	}
+	return nil
+}
+
+func unmapAddrPort(ap netip.AddrPort) netip.AddrPort {
+	return netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port())
+}
+
+func TestValidateExpectedLoopbackListener(t *testing.T) {
+	v4 := netip.MustParseAddr
+	tests := []struct {
+		name      string
+		listeners []netip.AddrPort
+		expected  netip.AddrPort
+		wantErr   string
+	}{
+		{
+			name:      "exact advertised listener",
+			listeners: []netip.AddrPort{netip.AddrPortFrom(v4("127.0.0.1"), 3307)},
+			expected:  netip.AddrPortFrom(v4("127.0.0.1"), 3307),
+		},
+		{
+			name:      "IPv4-mapped listener matches",
+			listeners: []netip.AddrPort{netip.AddrPortFrom(v4("::ffff:127.0.0.1"), 3307)},
+			expected:  netip.AddrPortFrom(v4("127.0.0.1"), 3307),
+		},
+		{
+			name: "additional loopback listener allowed",
+			listeners: []netip.AddrPort{
+				netip.AddrPortFrom(v4("127.0.0.1"), 3307),
+				netip.AddrPortFrom(v4("::1"), 3308),
+			},
+			expected: netip.AddrPortFrom(v4("127.0.0.1"), 3307),
+		},
+		{
+			name:      "missing advertised port",
+			listeners: []netip.AddrPort{netip.AddrPortFrom(v4("127.0.0.1"), 3308)},
+			expected:  netip.AddrPortFrom(v4("127.0.0.1"), 3307),
+			wantErr:   "does not listen on advertised address 127.0.0.1:3307",
+		},
+		{
+			name: "non-loopback listener rejected",
+			listeners: []netip.AddrPort{
+				netip.AddrPortFrom(v4("127.0.0.1"), 3307),
+				netip.AddrPortFrom(v4("0.0.0.0"), 3307),
+			},
+			expected: netip.AddrPortFrom(v4("127.0.0.1"), 3307),
+			wantErr:  "listens on non-loopback address 0.0.0.0:3307",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateExpectedLoopbackListener(tt.listeners, tt.expected)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("validateExpectedLoopbackListener() error: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("validateExpectedLoopbackListener() error = %v, want containing %q", err, tt.wantErr)
+			}
+		})
 	}
 }
 
