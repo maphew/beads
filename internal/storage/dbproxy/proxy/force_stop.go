@@ -32,8 +32,9 @@ type ForceStopReport struct {
 	QuarantinedPath string
 }
 
-// ForceStopUnverified is the narrow recovery primitive intended for future
-// wiring to `bd dolt stop --force`. It is not exposed by a CLI in this stage.
+// ForceStopUnverified is the narrow recovery primitive used by
+// `bd dolt stop --force` after an ordinary verified Shutdown refuses an
+// unverifiable proxy record.
 //
 // When proxy.lock is free, the function holds it while inspecting, signaling,
 // and quarantining the unchanged record. When proxy.lock is held (the usual

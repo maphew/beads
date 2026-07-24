@@ -597,7 +597,12 @@ var doltStopCmd = &cobra.Command{
 	Long: `Stop the dolt sql-server managed by beads for the current project.
 
 This sends a graceful shutdown signal. The server will restart automatically
-on the next bd command unless auto-start is disabled.`,
+on the next bd command unless auto-start is disabled.
+
+For a managed proxied server, --force can recover an unverifiable or legacy
+process record only after its live process executable is matched to bd or dolt.
+In that recovery path, force still refuses to signal a process whose executable
+identity cannot be matched to bd or dolt.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		beadsDir := selectedDoltBeadsDir()
 		if beadsDir == "" {
@@ -609,28 +614,159 @@ on the next bd command unless auto-start is disabled.`,
 		if !usesSQLServer() {
 			return HandleError("'bd dolt stop' is not supported in embedded mode (no Dolt server)")
 		}
+		force, _ := cmd.Flags().GetBool("force")
 
 		if usesProxiedServer() {
 			rootDir, err := resolveProxiedServerRootPath(beadsDir)
 			if err != nil {
 				return HandleError("%v", err)
 			}
-			if err := proxy.Shutdown(rootDir); err != nil {
-				return HandleError("%v", err)
+			shutdownErr := proxy.Shutdown(rootDir)
+			if shutdownErr == nil {
+				return renderDoltStopResult(doltStopResult{
+					Stopped:  true,
+					Force:    force,
+					Verified: boolPointer(true),
+				})
 			}
-			fmt.Println("Dolt server stopped.")
-			return nil
+			if !force || !proxy.CanForceStopUnverified(shutdownErr) {
+				return HandleErrorRespectJSON("%v", shutdownErr)
+			}
+
+			report, forceErr := proxy.ForceStopUnverified(rootDir)
+			return renderDoltStopResult(newForcedDoltStopResult(shutdownErr, report, forceErr))
 		}
 
 		serverDir := doltserver.ResolveServerDir(beadsDir)
-		force, _ := cmd.Flags().GetBool("force")
 
 		if err := doltserver.StopWithForce(serverDir, force); err != nil {
 			return HandleError("%v", err)
 		}
+		return renderDoltStopResult(doltStopResult{
+			Stopped: true,
+			Force:   force,
+		})
+	},
+}
+
+// doltStopResult is the shared JSON object for successful and refused stop
+// operations. Force-stop recovery deliberately exposes each irreversible
+// action so automation can distinguish a matched executable from a signaled
+// process and a quarantined record from one left in place.
+type doltStopResult struct {
+	Stopped               bool   `json:"stopped"`
+	Force                 bool   `json:"force"`
+	ForcedRecovery        bool   `json:"forced_recovery,omitempty"`
+	Verified              *bool  `json:"verified,omitempty"`
+	VerifiedShutdownError string `json:"verified_shutdown_error,omitempty"`
+	RecordFound           bool   `json:"record_found,omitempty"`
+	RecordPath            string `json:"record_path,omitempty"`
+	RecordLeftAlone       bool   `json:"record_left_alone,omitempty"`
+	LockWasHeld           bool   `json:"lock_was_held,omitempty"`
+	PID                   int    `json:"pid,omitempty"`
+	Executable            string `json:"executable,omitempty"`
+	ExecutableVerified    *bool  `json:"executable_verified,omitempty"`
+	ProcessWasGone        bool   `json:"process_was_gone,omitempty"`
+	SignalSent            bool   `json:"signal_sent,omitempty"`
+	ProcessLeftAlone      bool   `json:"process_left_alone,omitempty"`
+	QuarantinedPath       string `json:"quarantined_path,omitempty"`
+	Error                 string `json:"error,omitempty"`
+}
+
+func newForcedDoltStopResult(
+	shutdownErr error,
+	report proxy.ForceStopReport,
+	forceErr error,
+) doltStopResult {
+	result := doltStopResult{
+		Stopped:               forceErr == nil,
+		Force:                 true,
+		ForcedRecovery:        true,
+		Verified:              boolPointer(false),
+		VerifiedShutdownError: shutdownErr.Error(),
+		RecordFound:           report.RecordFound,
+		RecordPath:            report.RecordPath,
+		LockWasHeld:           report.LockWasHeld,
+		PID:                   report.PID,
+		Executable:            report.Executable,
+		ProcessWasGone:        report.ProcessWasGone,
+		SignalSent:            report.SignalSent,
+		QuarantinedPath:       report.QuarantinedPath,
+	}
+	if report.Executable != "" {
+		result.ExecutableVerified = boolPointer(
+			report.Executable == "bd" || report.Executable == "dolt",
+		)
+	}
+	result.ProcessLeftAlone = report.RecordFound &&
+		!report.ProcessWasGone &&
+		!report.SignalSent
+	result.RecordLeftAlone = report.RecordFound && report.QuarantinedPath == ""
+	if forceErr != nil {
+		result.Error = forceErr.Error()
+	}
+	return result
+}
+
+func boolPointer(value bool) *bool {
+	return &value
+}
+
+func renderDoltStopResult(result doltStopResult) error {
+	if jsonOutput {
+		if err := outputJSON(result); err != nil {
+			return HandleError("encode dolt stop result: %v", err)
+		}
+		if result.Error != "" {
+			return SilentExit()
+		}
+		return nil
+	}
+
+	if !result.ForcedRecovery {
 		fmt.Println("Dolt server stopped.")
 		return nil
-	},
+	}
+
+	fmt.Printf("Verified shutdown refused: %s\n", result.VerifiedShutdownError)
+	if result.Error == "" {
+		fmt.Println("Dolt server stopped with --force.")
+	} else if result.ProcessLeftAlone {
+		fmt.Println("Force stop refused; the recorded process was left alone.")
+	} else {
+		fmt.Println("Force stop incomplete; completed actions are reported below.")
+	}
+	if result.RecordFound {
+		fmt.Printf("  Record: %s\n", result.RecordPath)
+	}
+	if result.PID != 0 {
+		fmt.Printf("  PID: %d\n", result.PID)
+	}
+	if result.Executable != "" {
+		if result.ExecutableVerified != nil && *result.ExecutableVerified {
+			fmt.Printf("  Executable: %s (matched bd/dolt)\n", result.Executable)
+		} else {
+			fmt.Printf("  Executable: %s (not bd/dolt)\n", result.Executable)
+		}
+	}
+	switch {
+	case result.SignalSent:
+		fmt.Println("  Process: signal sent")
+	case result.ProcessWasGone:
+		fmt.Println("  Process: already gone; no signal sent")
+	case result.ProcessLeftAlone:
+		fmt.Println("  Process: left alone; no signal sent")
+	}
+	switch {
+	case result.QuarantinedPath != "":
+		fmt.Printf("  Record quarantined: %s\n", result.QuarantinedPath)
+	case result.RecordLeftAlone:
+		fmt.Println("  Record: left unchanged")
+	}
+	if result.Error != "" {
+		return HandleError("%s", result.Error)
+	}
+	return nil
 }
 
 var doltStatusCmd = &cobra.Command{
@@ -1479,7 +1615,7 @@ func isTimeoutError(err error) bool {
 
 func init() {
 	doltSetCmd.Flags().Bool("update-config", false, "Also write to config.yaml for team-wide defaults")
-	doltStopCmd.Flags().Bool("force", false, "Force stop the server")
+	doltStopCmd.Flags().Bool("force", false, "Force stop (proxied recovery still requires a bd/dolt executable match)")
 	doltPushCmd.Flags().Bool("force", false, "Force push (overwrite remote changes)")
 	doltPushCmd.Flags().String("remote", "", "Push to a specific named remote instead of the default")
 	doltPullCmd.Flags().String("remote", "", "Pull from a specific named remote instead of the default")

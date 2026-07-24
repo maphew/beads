@@ -4,6 +4,7 @@ package proxy
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -631,6 +632,8 @@ func TestShutdownReportsPartialOutcomeAndRefusesLegacyProcess(t *testing.T) {
 
 	err := Shutdown(root)
 	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrUnverifiableProcess)
+	assert.True(t, CanForceStopUnverified(err))
 	assert.Contains(t, err.Error(), "backend stopped; proxy left running")
 	assert.Contains(t, err.Error(), pidfile.Path(root, PIDFileName))
 	assert.Contains(t, err.Error(), "old bd binary")
@@ -639,6 +642,27 @@ func TestShutdownReportsPartialOutcomeAndRefusesLegacyProcess(t *testing.T) {
 	assertHelperExited(t, backendHelper)
 	assert.FileExists(t, pidfile.Path(root, PIDFileName))
 	assert.Empty(t, quarantines(t, root, PIDFileName))
+}
+
+func TestCanForceStopUnverifiedRequiresProxyOnlyRefusal(t *testing.T) {
+	unverifiable := fmt.Errorf("%w: legacy record", ErrUnverifiableProcess)
+	other := errors.New("unrelated shutdown failure")
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "proxy only", err: &shutdownError{proxyErr: unverifiable}, want: true},
+		{name: "backend only", err: &shutdownError{backendErr: unverifiable}},
+		{name: "both", err: &shutdownError{proxyErr: unverifiable, backendErr: other}},
+		{name: "unrelated proxy error", err: &shutdownError{proxyErr: other}},
+		{name: "bare sentinel", err: unverifiable},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, CanForceStopUnverified(tc.err))
+		})
+	}
 }
 
 func TestShutdownQuarantinesBirthMismatchWithoutKillingProcess(t *testing.T) {

@@ -25,6 +25,48 @@ type killRecordChecks struct {
 	CheckSpawnMarker bool
 }
 
+type shutdownError struct {
+	proxyErr   error
+	backendErr error
+}
+
+func (e *shutdownError) Error() string {
+	switch {
+	case e.proxyErr == nil:
+		return fmt.Sprintf("proxy.Shutdown partial: proxy stopped; backend left running: %v", e.backendErr)
+	case e.backendErr == nil:
+		return fmt.Sprintf("proxy.Shutdown partial: backend stopped; proxy left running: %v", e.proxyErr)
+	default:
+		return fmt.Sprintf(
+			"proxy.Shutdown failed: proxy left running: %v; backend left running: %v",
+			e.proxyErr,
+			e.backendErr,
+		)
+	}
+}
+
+func (e *shutdownError) Unwrap() []error {
+	errs := make([]error, 0, 2)
+	if e.proxyErr != nil {
+		errs = append(errs, e.proxyErr)
+	}
+	if e.backendErr != nil {
+		errs = append(errs, e.backendErr)
+	}
+	return errs
+}
+
+// CanForceStopUnverified reports whether err is a Shutdown refusal whose only
+// remaining process is an unverifiable proxy. ForceStopUnverified can recover
+// exactly that partial outcome; it must not be used for backend refusals or
+// unrelated shutdown failures.
+func CanForceStopUnverified(err error) bool {
+	var shutdownErr *shutdownError
+	return errors.As(err, &shutdownErr) &&
+		shutdownErr.backendErr == nil &&
+		errors.Is(shutdownErr.proxyErr, ErrUnverifiableProcess)
+}
+
 // Shutdown stops the verified proxy and backend processes for rootDir.
 //
 // Advancing the stop epoch first makes every start attempt which began before
@@ -66,16 +108,8 @@ func Shutdown(rootDir string) error {
 	switch {
 	case proxyErr == nil && backendErr == nil:
 		return nil
-	case proxyErr == nil:
-		return fmt.Errorf("proxy.Shutdown partial: proxy stopped; backend left running: %w", backendErr)
-	case backendErr == nil:
-		return fmt.Errorf("proxy.Shutdown partial: backend stopped; proxy left running: %w", proxyErr)
 	default:
-		return fmt.Errorf(
-			"proxy.Shutdown failed: proxy left running: %v; backend left running: %w",
-			proxyErr,
-			backendErr,
-		)
+		return &shutdownError{proxyErr: proxyErr, backendErr: backendErr}
 	}
 }
 

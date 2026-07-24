@@ -89,6 +89,24 @@ var (
 	readControlSecret     = identity.ReadSecret
 )
 
+// ErrUnverifiableProcess marks lifecycle operations that refuse to signal a
+// process because its workspace-scoped identity cannot be verified. Callers
+// may use errors.Is to offer a narrower recovery path without treating
+// unrelated shutdown failures as identity failures.
+var ErrUnverifiableProcess = errors.New("proxy process identity is unverifiable")
+
+type unverifiableLifecycleError struct {
+	message string
+}
+
+func (e *unverifiableLifecycleError) Error() string {
+	return e.message
+}
+
+func (e *unverifiableLifecycleError) Unwrap() error {
+	return ErrUnverifiableProcess
+}
+
 var stopEpochSequence atomic.Uint64
 
 // beforeProxyChildStart is a deterministic test hook for the otherwise tiny
@@ -798,7 +816,7 @@ func unverifiableProcessError(
 	if checks.LegacyProxy && checks.LiveEstablished {
 		stopGuidance = "stop the pre-upgrade proxy with the old bd binary"
 	}
-	return fmt.Errorf(
+	return &unverifiableLifecycleError{message: fmt.Sprintf(
 		"%s refused for unverifiable%s process pid %d recorded at %s: %v; %s, then quarantine the record manually by renaming %s to %s.stale-<unix-timestamp> before retrying",
 		operation,
 		liveness,
@@ -808,7 +826,7 @@ func unverifiableProcessError(
 		stopGuidance,
 		recordPath,
 		recordPath,
-	)
+	)}
 }
 
 func probeUnverifiablePID(pid int) (dead bool, live bool, err error) {
