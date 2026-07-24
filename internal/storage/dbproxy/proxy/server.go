@@ -195,9 +195,10 @@ func (p *proxyServer) ListenAndServe(parentCtx context.Context) error {
 		_ = stopBackendBounded(p.server)
 		return fmt.Errorf("resolve proxy root identity: %w", err)
 	}
+	upstreamID := p.server.ID(ctx)
 	identMu.Lock()
 	identReply.RootID = rootID
-	identReply.UpstreamID = p.server.ID(ctx)
+	identReply.UpstreamID = upstreamID
 	identReply.PID = os.Getpid()
 	identReply.Birth = string(birth)
 	identReply.ControlPort = control.Port()
@@ -206,7 +207,7 @@ func (p *proxyServer) ListenAndServe(parentCtx context.Context) error {
 	if err := pidfile.Write(p.rootDir, PIDFileName, pidfile.PidFile{
 		Pid:         os.Getpid(),
 		Port:        dataPort.Port,
-		UpstreamID:  p.server.ID(ctx),
+		UpstreamID:  upstreamID,
 		Schema:      pidfile.SchemaV2,
 		Kind:        pidfile.KindProxy,
 		Birth:       string(birth),
@@ -228,6 +229,14 @@ func (p *proxyServer) ListenAndServe(parentCtx context.Context) error {
 	})
 	g.Go(func() error { return p.idleWatcher(gctx) })
 	g.Go(func() error { return p.acceptLoop(gctx) })
+	g.Go(func() error {
+		select {
+		case <-gctx.Done():
+			return nil
+		case err := <-control.Errors():
+			return err
+		}
+	})
 
 	runErr := g.Wait()
 	_ = p.conns.Wait()

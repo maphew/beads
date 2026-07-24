@@ -205,10 +205,11 @@ func TestProxy_PublishesVerifiableIdentity(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
+	ts := server.New()
 	h := runProxy(t, proxy.ProxyOpts{
 		RootDir: root,
 		Port:    freeTCPPort(t),
-		Server:  server.New(),
+		Server:  ts,
 	})
 	waitListening(t, root, listenWait)
 
@@ -234,6 +235,7 @@ func TestProxy_PublishesVerifiableIdentity(t *testing.T) {
 	assert.Equal(t, pf.RootID, got.RootID)
 	assert.Equal(t, rootID, got.RootID)
 	assert.Equal(t, pf.ControlPort, got.ControlPort)
+	assert.Equal(t, int64(1), ts.Snapshot().IDCalls, "pidfile and control reply must share one captured upstream ID")
 
 	h.Cancel()
 	require.NoError(t, h.waitErr(t, shutdownWait))

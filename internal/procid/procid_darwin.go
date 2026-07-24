@@ -7,9 +7,12 @@ import (
 	"fmt"
 	"os"
 	"syscall"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
+
+const fallbackSignalConfirmTimeout = 2 * time.Second
 
 // Handle verifies before and after signaling. macOS has no pidfd equivalent
 // here, so a residual PID-reuse race remains between those operations.
@@ -30,7 +33,7 @@ func Capture(pid int) (Token, error) {
 func Verify(pid int, tok Token) (bool, error) {
 	current, err := Capture(pid)
 	if err != nil {
-		if err == unix.ESRCH {
+		if IsProcessGone(err) {
 			return false, nil
 		}
 		return false, err
@@ -62,7 +65,13 @@ func (h *Handle) Signal(sig os.Signal) error {
 		return fmt.Errorf("procid: unsupported signal %v", sig)
 	}
 	if err := syscall.Kill(h.pid, unixSig); err != nil {
+		if isFatalSignal(unixSig) && errors.Is(err, unix.ESRCH) {
+			return nil
+		}
 		return fmt.Errorf("procid: signal %d: %w", h.pid, err)
+	}
+	if isFatalSignal(unixSig) {
+		return h.confirmFatalSignal()
 	}
 	match, err = Verify(h.pid, h.token)
 	if err != nil {
@@ -74,6 +83,31 @@ func (h *Handle) Signal(sig os.Signal) error {
 	return nil
 }
 
+func (h *Handle) confirmFatalSignal() error {
+	deadline := time.Now().Add(fallbackSignalConfirmTimeout)
+	for {
+		match, err := Verify(h.pid, h.token)
+		if err != nil {
+			return err
+		}
+		if !match {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf(
+				"procid: process %d still matches token after fatal signal and %s re-check",
+				h.pid,
+				fallbackSignalConfirmTimeout,
+			)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func isFatalSignal(sig syscall.Signal) bool {
+	return sig == syscall.SIGKILL || sig == syscall.SIGTERM
+}
+
 func (h *Handle) Kill() error { return h.Signal(syscall.SIGKILL) }
 
 func (h *Handle) Close() error { return nil }
@@ -81,5 +115,7 @@ func (h *Handle) Close() error { return nil }
 // IsProcessGone reports whether err means the referenced process no longer
 // exists.
 func IsProcessGone(err error) bool {
-	return errors.Is(err, unix.ESRCH)
+	// SysctlKinfoProc returns EIO when kern.proc.pid produces a zero-length
+	// result, which is Darwin's normal missing-pid result.
+	return errors.Is(err, unix.ESRCH) || errors.Is(err, unix.EIO)
 }

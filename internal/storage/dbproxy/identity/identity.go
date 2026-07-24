@@ -21,6 +21,9 @@ const SecretFileName = "proxy.secret"
 // RootID returns the SHA-256 of rootDir's symlink-resolved absolute path.
 // It identifies the workspace proxy root, not the Dolt data directory;
 // upstream_id continues to identify the backend through DoltServer.ID.
+// Darwin's default case-insensitive filesystems can resolve the same directory
+// through differently cased path spellings; callers should use a canonical
+// workspace spelling when they need stable IDs across invocations.
 func RootID(rootDir string) (string, error) {
 	abs, err := filepath.Abs(rootDir)
 	if err != nil {

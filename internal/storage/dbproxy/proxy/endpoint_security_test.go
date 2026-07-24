@@ -1,3 +1,5 @@
+//go:build !windows
+
 package proxy
 
 import (
@@ -163,6 +165,54 @@ func TestReadAndDialClassifiesRecordsWithoutMutation(t *testing.T) {
 		assert.Equal(t, adoptionStaleDead, got.status)
 		assertHelperAlive(t, helper)
 	})
+}
+
+func TestReadAndDialProbeErrorsAreNonFatalDiscovery(t *testing.T) {
+	root := t.TempDir()
+	helper := startHelperProcess(t)
+	pf := v2Record(t, root, pidfile.KindProxy, helper)
+	pf.ControlPort = 3308
+	require.NoError(t, pidfile.Write(root, PIDFileName, pf))
+
+	originalVerify := verifyProcessIdentity
+	originalRootID := resolveRootIdentity
+	originalSecret := readControlSecret
+	t.Cleanup(func() {
+		verifyProcessIdentity = originalVerify
+		resolveRootIdentity = originalRootID
+		readControlSecret = originalSecret
+	})
+
+	t.Run("process verification", func(t *testing.T) {
+		verifyProcessIdentity = func(int, procid.Token) (bool, error) {
+			return false, errors.New("access denied")
+		}
+		got := readAndDial(root)
+		assert.Equal(t, adoptionUnverifiable, got.status)
+		assert.NotEqual(t, adoptionIOErr, got.status)
+		verifyProcessIdentity = originalVerify
+	})
+
+	t.Run("root identity", func(t *testing.T) {
+		resolveRootIdentity = func(string) (string, error) {
+			return "", errors.New("root resolution failed")
+		}
+		got := readAndDial(root)
+		assert.Equal(t, adoptionUnverifiable, got.status)
+		assert.NotEqual(t, adoptionIOErr, got.status)
+		resolveRootIdentity = originalRootID
+	})
+
+	t.Run("secret read", func(t *testing.T) {
+		readControlSecret = func(string) (string, error) {
+			return "", errors.New("secret read failed")
+		}
+		got := readAndDial(root)
+		assert.Equal(t, adoptionUnverifiable, got.status)
+		assert.NotEqual(t, adoptionIOErr, got.status)
+		readControlSecret = originalSecret
+	})
+	assertHelperAlive(t, helper)
 }
 
 func TestReadAndDialForeignListenerWithUnrelatedLiveProcess(t *testing.T) {
@@ -354,6 +404,36 @@ func TestIdentityMismatchQuarantinesRecordWithoutKillingProcess(t *testing.T) {
 	assert.Len(t, quarantines(t, root, PIDFileName), 1)
 }
 
+func TestUnverifiableDiscoveryQuarantinesUnderLockWithoutKillingProcess(t *testing.T) {
+	root := t.TempDir()
+	helper := startHelperProcess(t)
+	pf := v2Record(t, root, pidfile.KindProxy, helper)
+	pf.ControlPort = 3308
+	require.NoError(t, pidfile.Write(root, PIDFileName, pf))
+	lock, err := util.TryLock(filepath.Join(root, LockFileName))
+	require.NoError(t, err)
+
+	previous := ResolveExecutable
+	ResolveExecutable = func() (string, error) { return "", errors.New("spawn reached") }
+	t.Cleanup(func() { ResolveExecutable = previous })
+	_, err = spawnAndHandoff(
+		root,
+		externalOpenOpts(root),
+		time.Now().Add(time.Second),
+		"",
+		lock,
+		adoptionResult{
+			status:  adoptionUnverifiable,
+			pidfile: &pf,
+			err:     errors.New("identity probe denied"),
+		},
+	)
+	require.ErrorContains(t, err, "spawn reached")
+	assertHelperAlive(t, helper)
+	assert.NoFileExists(t, pidfile.Path(root, PIDFileName))
+	assert.Len(t, quarantines(t, root, PIDFileName), 1)
+}
+
 func TestMalformedRecordQuarantinesBeforeSpawn(t *testing.T) {
 	root := t.TempDir()
 	require.NoError(t, os.WriteFile(pidfile.Path(root, PIDFileName), []byte(`{"pid":`), 0o600))
@@ -413,6 +493,64 @@ func TestCleanupOrphanBackendRefusesRootMismatch(t *testing.T) {
 	assertHelperAlive(t, helper)
 	assert.FileExists(t, pidfile.Path(root, server.PIDFileName))
 	assert.Empty(t, quarantines(t, root, server.PIDFileName))
+}
+
+func TestCleanupOrphanBackendLegacyRecords(t *testing.T) {
+	t.Run("dead pid quarantines", func(t *testing.T) {
+		root := t.TempDir()
+		helper := startHelperProcess(t)
+		handle, err := procid.Open(helper.cmd.Process.Pid, helper.token)
+		require.NoError(t, err)
+		require.NoError(t, handle.Kill())
+		require.NoError(t, handle.Close())
+		assertHelperExited(t, helper)
+		require.NoError(t, pidfile.Write(root, server.PIDFileName, pidfile.PidFile{
+			Pid:  helper.cmd.Process.Pid,
+			Port: 3306,
+		}))
+
+		proxyLock, err := util.TryLock(filepath.Join(root, LockFileName))
+		require.NoError(t, err)
+		defer proxyLock.Unlock()
+		require.NoError(t, cleanupOrphanBackend(root))
+		assert.NoFileExists(t, pidfile.Path(root, server.PIDFileName))
+		assert.Len(t, quarantines(t, root, server.PIDFileName), 1)
+	})
+
+	t.Run("live pid refuses", func(t *testing.T) {
+		root := t.TempDir()
+		helper := startHelperProcess(t)
+		require.NoError(t, pidfile.Write(root, server.PIDFileName, pidfile.PidFile{
+			Pid:  helper.cmd.Process.Pid,
+			Port: 3306,
+		}))
+
+		proxyLock, err := util.TryLock(filepath.Join(root, LockFileName))
+		require.NoError(t, err)
+		defer proxyLock.Unlock()
+		err = cleanupOrphanBackend(root)
+		require.ErrorContains(t, err, "unverifiable live process")
+		require.ErrorContains(t, err, pidfile.Path(root, server.PIDFileName)+".stale-<unix-timestamp>")
+		assertHelperAlive(t, helper)
+		assert.FileExists(t, pidfile.Path(root, server.PIDFileName))
+		assert.Empty(t, quarantines(t, root, server.PIDFileName))
+	})
+}
+
+func TestCleanupOrphanBackendBirthMismatchIsDeadRecord(t *testing.T) {
+	root := t.TempDir()
+	helper := startHelperProcess(t)
+	pf := v2Record(t, root, pidfile.KindDoltBackend, helper)
+	pf.Birth += "-recycled"
+	require.NoError(t, pidfile.Write(root, server.PIDFileName, pf))
+
+	proxyLock, err := util.TryLock(filepath.Join(root, LockFileName))
+	require.NoError(t, err)
+	defer proxyLock.Unlock()
+	require.NoError(t, cleanupOrphanBackend(root))
+	assertHelperAlive(t, helper)
+	assert.NoFileExists(t, pidfile.Path(root, server.PIDFileName))
+	assert.Len(t, quarantines(t, root, server.PIDFileName), 1)
 }
 
 func TestCleanupOrphanBackendKillsVerifiedOrphanAndQuarantines(t *testing.T) {
@@ -495,21 +633,37 @@ func TestShutdownReportsPartialOutcomeAndRefusesLegacyProcess(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "backend stopped; proxy left running")
 	assert.Contains(t, err.Error(), pidfile.Path(root, PIDFileName))
+	assert.Contains(t, err.Error(), "old bd binary")
+	assert.Contains(t, err.Error(), pidfile.Path(root, PIDFileName)+".stale-<unix-timestamp>")
 	assertHelperAlive(t, proxyHelper)
 	assertHelperExited(t, backendHelper)
 	assert.FileExists(t, pidfile.Path(root, PIDFileName))
 	assert.Empty(t, quarantines(t, root, PIDFileName))
 }
 
-func TestShutdownRefusesBirthMismatchWithoutDeletingRecord(t *testing.T) {
+func TestShutdownQuarantinesBirthMismatchWithoutKillingProcess(t *testing.T) {
 	root := t.TempDir()
 	helper := startHelperProcess(t)
 	pf := v2Record(t, root, pidfile.KindProxy, helper)
 	pf.Birth += "-wrong"
 	require.NoError(t, pidfile.Write(root, PIDFileName, pf))
 
+	require.NoError(t, Shutdown(root))
+	assertHelperAlive(t, helper)
+	assert.NoFileExists(t, pidfile.Path(root, PIDFileName))
+	assert.Len(t, quarantines(t, root, PIDFileName), 1)
+}
+
+func TestShutdownRefusesForeignRootProxyRecord(t *testing.T) {
+	root := t.TempDir()
+	helper := startHelperProcess(t)
+	pf := v2Record(t, root, pidfile.KindProxy, helper)
+	pf.RootID = "foreign-workspace-root"
+	require.NoError(t, pidfile.Write(root, PIDFileName, pf))
+
 	err := Shutdown(root)
-	require.ErrorContains(t, err, "birth token mismatch")
+	require.ErrorContains(t, err, "root identity mismatch")
+	require.ErrorContains(t, err, pidfile.Path(root, PIDFileName))
 	assertHelperAlive(t, helper)
 	assert.FileExists(t, pidfile.Path(root, PIDFileName))
 	assert.Empty(t, quarantines(t, root, PIDFileName))
@@ -530,6 +684,71 @@ func TestShutdownQuarantinesVerifiedDeadRecord(t *testing.T) {
 	assert.NoFileExists(t, pidfile.Path(root, PIDFileName))
 	assert.Len(t, quarantines(t, root, PIDFileName), 1)
 }
+
+func TestShutdownQuarantinesDeadLegacyAndMalformedRecords(t *testing.T) {
+	tests := []struct {
+		name   string
+		record func(helper helperProcess) pidfile.PidFile
+	}{
+		{
+			name: "legacy",
+			record: func(helper helperProcess) pidfile.PidFile {
+				return pidfile.PidFile{Pid: helper.cmd.Process.Pid, Port: 3307}
+			},
+		},
+		{
+			name: "malformed v2",
+			record: func(helper helperProcess) pidfile.PidFile {
+				return pidfile.PidFile{
+					Schema: pidfile.SchemaV2,
+					Kind:   pidfile.KindProxy,
+					Pid:    helper.cmd.Process.Pid,
+					Port:   3307,
+				}
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			helper := startHelperProcess(t)
+			record := tc.record(helper)
+			handle, err := procid.Open(helper.cmd.Process.Pid, helper.token)
+			require.NoError(t, err)
+			require.NoError(t, handle.Kill())
+			require.NoError(t, handle.Close())
+			assertHelperExited(t, helper)
+			require.NoError(t, pidfile.Write(root, PIDFileName, record))
+
+			require.NoError(t, Shutdown(root))
+			assert.NoFileExists(t, pidfile.Path(root, PIDFileName))
+			assert.Len(t, quarantines(t, root, PIDFileName), 1)
+		})
+	}
+}
+
+func TestControlFilePathsIncludesSecretAndQuarantines(t *testing.T) {
+	root := t.TempDir()
+	proxyStale := pidfile.Path(root, PIDFileName) + ".stale-100"
+	backendStale := pidfile.Path(root, server.PIDFileName) + ".stale-200"
+	require.NoError(t, os.WriteFile(proxyStale, []byte("proxy"), 0o600))
+	require.NoError(t, os.WriteFile(backendStale, []byte("backend"), 0o600))
+	_, err := identity.WriteSecret(root)
+	require.NoError(t, err)
+
+	paths := ControlFilePaths(root)
+	assert.Contains(t, paths, filepath.Join(root, identity.SecretFileName))
+	assert.Contains(t, paths, proxyStale)
+	assert.Contains(t, paths, backendStale)
+
+	assert.Empty(t, PurgeControlFiles(root))
+	assert.NoFileExists(t, filepath.Join(root, identity.SecretFileName))
+	assert.NoFileExists(t, proxyStale)
+	assert.NoFileExists(t, backendStale)
+}
+
+// N-process cold-start convergence remains intentionally deferred to the
+// lifecycle-lane stage; this security suite covers single-spawner invariants.
 
 func externalOpenOpts(root string) OpenOpts {
 	return OpenOpts{

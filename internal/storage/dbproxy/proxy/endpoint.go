@@ -83,6 +83,12 @@ const (
 
 var ResolveExecutable = os.Executable
 
+var (
+	verifyProcessIdentity = procid.Verify
+	resolveRootIdentity   = identity.RootID
+	readControlSecret     = identity.ReadSecret
+)
+
 var stopEpochSequence atomic.Uint64
 
 // beforeProxyChildStart is a deterministic test hook for the otherwise tiny
@@ -96,6 +102,7 @@ const (
 	adoptionNoRecord
 	adoptionStaleDead
 	adoptionIdentityMismatch
+	adoptionUnverifiable
 	adoptionLegacy
 	adoptionMalformed
 	adoptionIOErr
@@ -111,6 +118,8 @@ func (s adoptionStatus) String() string {
 		return "stale dead"
 	case adoptionIdentityMismatch:
 		return "identity mismatch"
+	case adoptionUnverifiable:
+		return "identity unverifiable"
 	case adoptionLegacy:
 		return "legacy"
 	case adoptionMalformed:
@@ -221,6 +230,8 @@ func GetCreateDatabaseProxyServerEndpoint(rootDir string, opts OpenOpts) (Endpoi
 			if markerActive {
 				lock.Unlock()
 				lastSpawnErr = nil
+				// This break exits the switch only; the outer discovery loop
+				// continues with its normal bounded poll.
 				break
 			}
 
@@ -235,9 +246,13 @@ func GetCreateDatabaseProxyServerEndpoint(rootDir string, opts OpenOpts) (Endpoi
 		case !lockfile.IsLocked(err):
 			return Endpoint{}, fmt.Errorf("probe proxy lock: %w", err)
 		case discovery.status == adoptionLegacy:
+			recordPath := pidfile.Path(rootDir, PIDFileName)
 			return Endpoint{}, fmt.Errorf(
-				"legacy proxy record %s is protected by held lock %s; stop the pre-upgrade proxy with the old bd binary or wait for its idle exit",
-				pidfile.Path(rootDir, PIDFileName), filepath.Join(rootDir, LockFileName),
+				"legacy proxy record %s is protected by held lock %s; stop the pre-upgrade proxy with the old bd binary or wait for its idle exit, then quarantine the record manually by renaming %s to %s.stale-<unix-timestamp> before retrying",
+				recordPath,
+				filepath.Join(rootDir, LockFileName),
+				recordPath,
+				recordPath,
 			)
 		}
 
@@ -306,6 +321,7 @@ func spawnAndHandoff(
 	if err != nil {
 		return Endpoint{}, fmt.Errorf("fork child: %w", err)
 	}
+	defer func() { _ = clearOwnSpawnMarker(rootDir, child.marker) }()
 	defer func() {
 		if child.handle != nil {
 			_ = child.handle.Close()
@@ -330,7 +346,6 @@ func spawnAndHandoff(
 		}
 		select {
 		case <-child.done:
-			_ = clearOwnSpawnMarker(rootDir, child.marker)
 			if interrupted, ierr := stopEpochChanged(rootDir, stopEpoch); ierr != nil {
 				return Endpoint{}, ierr
 			} else if interrupted {
@@ -341,7 +356,6 @@ func spawnAndHandoff(
 			if err := killSpawnedChild(child); err != nil {
 				return Endpoint{}, fmt.Errorf("hard timeout waiting for proxy on port %d; safe child kill failed: %w", port, err)
 			}
-			_ = clearOwnSpawnMarker(rootDir, child.marker)
 			return Endpoint{}, fmt.Errorf("hard timeout (%s) waiting for proxy on port %d", spawnReadyHardTimeout, port)
 		case <-poll.C:
 		}
@@ -349,7 +363,6 @@ func spawnAndHandoff(
 			if err := killSpawnedChild(child); err != nil {
 				return Endpoint{}, fmt.Errorf("timeout waiting for proxy on port %d; safe child kill failed: %w", port, err)
 			}
-			_ = clearOwnSpawnMarker(rootDir, child.marker)
 			return Endpoint{}, fmt.Errorf("timeout waiting for proxy to become ready on port %d", port)
 		}
 	}
@@ -507,21 +520,29 @@ func readAndDial(rootDir string) adoptionResult {
 		return adoptionResult{status: adoptionMalformed, pidfile: pf, err: err}
 	}
 
-	matched, err := procid.Verify(pf.Pid, procid.Token(pf.Birth))
+	matched, err := verifyProcessIdentity(pf.Pid, procid.Token(pf.Birth))
 	if err != nil {
-		return adoptionResult{status: adoptionIOErr, pidfile: pf, err: fmt.Errorf("verify proxy pid %d: %w", pf.Pid, err)}
+		// Discovery must not turn an identity-probe failure into a fatal
+		// pidfile I/O error. In particular, Windows ERROR_ACCESS_DENIED on a
+		// recycled PID belongs in this non-adopting path; proxy.lock still
+		// gates quarantine and replacement.
+		return adoptionResult{
+			status:  adoptionUnverifiable,
+			pidfile: pf,
+			err:     fmt.Errorf("verify proxy pid %d: %w", pf.Pid, err),
+		}
 	}
 	if !matched {
 		return adoptionResult{status: adoptionStaleDead, pidfile: pf}
 	}
 
-	expectedRootID, err := identity.RootID(rootDir)
+	expectedRootID, err := resolveRootIdentity(rootDir)
 	if err != nil {
-		return adoptionResult{status: adoptionIOErr, pidfile: pf, err: err}
+		return adoptionResult{status: adoptionUnverifiable, pidfile: pf, err: err}
 	}
-	secret, err := identity.ReadSecret(rootDir)
+	secret, err := readControlSecret(rootDir)
 	if err != nil {
-		return adoptionResult{status: adoptionIdentityMismatch, pidfile: pf, err: err}
+		return adoptionResult{status: adoptionUnverifiable, pidfile: pf, err: err}
 	}
 	reply, err := identity.Identify("127.0.0.1", pf.ControlPort, secret, identityProbeTimeout)
 	if err != nil {
@@ -578,6 +599,11 @@ func quarantineForSpawn(rootDir string, discovery adoptionResult) error {
 	case adoptionIdentityMismatch:
 		log.Printf(
 			"dbproxy: refusing proxy identity at %s (%v); quarantining only its record and starting a fresh proxy",
+			pidfile.Path(rootDir, PIDFileName), discovery.err,
+		)
+	case adoptionUnverifiable:
+		log.Printf(
+			"dbproxy: proxy identity at %s could not be verified (%v); quarantining only its record under proxy.lock and starting a fresh proxy",
 			pidfile.Path(rootDir, PIDFileName), discovery.err,
 		)
 	case adoptionLegacy:
@@ -673,13 +699,40 @@ func cleanupOrphanBackend(rootDir string) error {
 	}
 
 	if readErr != nil {
+		if isMalformedPIDFileError(readErr) {
+			return unverifiableProcessError(
+				"backend cleanup",
+				recordPath,
+				0,
+				readErr,
+				unverifiableProcessChecks{},
+			)
+		}
 		return fmt.Errorf("read backend record %s: %w", recordPath, readErr)
 	}
 	if pf == nil {
 		return nil
 	}
 	if err := pf.ValidateV2(pidfile.KindDoltBackend); err != nil {
-		return unverifiableProcessError("backend cleanup", recordPath, pf.Pid, err)
+		dead, live, probeErr := probeUnverifiablePID(pf.Pid)
+		if dead {
+			if _, quarantineErr := quarantineRecord(rootDir, server.PIDFileName, time.Now()); quarantineErr != nil {
+				return fmt.Errorf("quarantine dead unverifiable backend record: %w", quarantineErr)
+			}
+			return nil
+		}
+		if probeErr != nil {
+			err = errors.Join(err, fmt.Errorf("probe recorded pid: %w", probeErr))
+		}
+		return unverifiableProcessError(
+			"backend cleanup",
+			recordPath,
+			pf.Pid,
+			err,
+			unverifiableProcessChecks{
+				LiveEstablished: live,
+			},
+		)
 	}
 	expectedRootID, err := identity.RootID(rootDir)
 	if err != nil {
@@ -691,12 +744,19 @@ func cleanupOrphanBackend(rootDir string) error {
 			recordPath,
 			pf.Pid,
 			fmt.Errorf("root identity mismatch (record has %q, workspace has %q)", pf.RootID, expectedRootID),
+			unverifiableProcessChecks{},
 		)
 	}
 
 	handle, dead, err := openRecordedProcess(pf)
 	if err != nil {
-		return unverifiableProcessError("backend cleanup", recordPath, pf.Pid, err)
+		return unverifiableProcessError(
+			"backend cleanup",
+			recordPath,
+			pf.Pid,
+			err,
+			unverifiableProcessChecks{},
+		)
 	}
 	if dead {
 		if _, err := quarantineRecord(rootDir, server.PIDFileName, time.Now()); err != nil {
@@ -718,11 +778,51 @@ func cleanupOrphanBackend(rootDir string) error {
 	return nil
 }
 
-func unverifiableProcessError(operation, recordPath string, pid int, cause error) error {
+type unverifiableProcessChecks struct {
+	LiveEstablished bool
+	LegacyProxy     bool
+}
+
+func unverifiableProcessError(
+	operation string,
+	recordPath string,
+	pid int,
+	cause error,
+	checks unverifiableProcessChecks,
+) error {
+	liveness := ""
+	if checks.LiveEstablished {
+		liveness = " live"
+	}
+	stopGuidance := "stop the recorded process with the binary that started it"
+	if checks.LegacyProxy && checks.LiveEstablished {
+		stopGuidance = "stop the pre-upgrade proxy with the old bd binary"
+	}
 	return fmt.Errorf(
-		"%s refused for unverifiable live process pid %d recorded at %s: %v; stop that process with the binary that started it, then retry",
-		operation, pid, recordPath, cause,
+		"%s refused for unverifiable%s process pid %d recorded at %s: %v; %s, then quarantine the record manually by renaming %s to %s.stale-<unix-timestamp> before retrying",
+		operation,
+		liveness,
+		pid,
+		recordPath,
+		cause,
+		stopGuidance,
+		recordPath,
+		recordPath,
 	)
+}
+
+func probeUnverifiablePID(pid int) (dead bool, live bool, err error) {
+	if pid <= 0 {
+		return false, false, errors.New("record has no valid pid")
+	}
+	_, err = procid.Capture(pid)
+	if err == nil {
+		return false, true, nil
+	}
+	if procid.IsProcessGone(err) {
+		return true, false, nil
+	}
+	return false, false, err
 }
 
 func openRecordedProcess(pf *pidfile.PidFile) (*procid.Handle, bool, error) {
@@ -742,7 +842,9 @@ func openRecordedProcess(pf *pidfile.PidFile) (*procid.Handle, bool, error) {
 		return nil, false, fmt.Errorf("open process identity: %w (recheck: %v)", err, captureErr)
 	}
 	if current != procid.Token(pf.Birth) {
-		return nil, false, fmt.Errorf("birth token mismatch")
+		// A different birth token proves the recorded process exited, even
+		// when the numeric PID has since been recycled.
+		return nil, true, nil
 	}
 	return nil, false, fmt.Errorf("open verified process handle: %w", err)
 }
@@ -798,14 +900,14 @@ func readStopEpoch(rootDir string) (string, error) {
 	return strings.TrimSpace(string(data)), nil
 }
 
-func advanceStopEpoch(rootDir string) (string, error) {
+func advanceStopEpoch(rootDir string) error {
 	epoch := strconv.FormatInt(time.Now().UnixNano(), 10) +
 		"-" + strconv.Itoa(os.Getpid()) +
 		"-" + strconv.FormatUint(stopEpochSequence.Add(1), 10)
 	if err := atomicfile.WriteFile(filepath.Join(rootDir, stopEpochFileName), []byte(epoch+"\n"), 0o600); err != nil {
-		return "", err
+		return err
 	}
-	return epoch, nil
+	return nil
 }
 
 func stopEpochChanged(rootDir, expected string) (bool, error) {

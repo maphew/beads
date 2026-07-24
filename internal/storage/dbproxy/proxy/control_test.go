@@ -33,7 +33,6 @@ func newControlServer(t *testing.T) (*controlServer, string, identity.IdentReply
 	control, err := startControl(root, func() identity.IdentReply { return want })
 	require.NoError(t, err)
 	want.ControlPort = control.Port()
-	control.reply = func() identity.IdentReply { return want }
 	t.Cleanup(func() { _ = control.Close() })
 	return control, secret, want
 }
@@ -42,6 +41,8 @@ func TestControl_Identify(t *testing.T) {
 	control, secret, want := newControlServer(t)
 	got, err := identity.Identify("127.0.0.1", control.Port(), secret, time.Second)
 	require.NoError(t, err)
+	assert.Len(t, got.MAC, 64)
+	got.MAC = ""
 	assert.Equal(t, &want, got)
 }
 
@@ -77,14 +78,17 @@ func TestControl_RejectsOversizedAndGarbageRequests(t *testing.T) {
 
 func TestControl_ConcurrentIdentify(t *testing.T) {
 	control, secret, want := newControlServer(t)
-	const calls = 16
+	const calls = maxConcurrentIdentRequests
 	errs := make(chan error, calls)
 	var wg sync.WaitGroup
 	for range calls {
 		wg.Go(func() {
 			got, err := identity.Identify("127.0.0.1", control.Port(), secret, time.Second)
-			if err == nil && *got != want {
-				err = errors.New("identity reply mismatch")
+			if err == nil {
+				got.MAC = ""
+				if *got != want {
+					err = errors.New("identity reply mismatch")
+				}
 			}
 			errs <- err
 		})
@@ -94,4 +98,78 @@ func TestControl_ConcurrentIdentify(t *testing.T) {
 	for err := range errs {
 		assert.NoError(t, err)
 	}
+}
+
+func TestControl_CapsConcurrentHandshakes(t *testing.T) {
+	control, _, _ := newControlServer(t)
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(control.Port()))
+	conns := make([]net.Conn, 0, maxConcurrentIdentRequests)
+	t.Cleanup(func() {
+		for _, conn := range conns {
+			_ = conn.Close()
+		}
+	})
+	for range maxConcurrentIdentRequests {
+		conn, err := net.DialTimeout("tcp", addr, time.Second)
+		require.NoError(t, err)
+		conns = append(conns, conn)
+	}
+	require.Eventually(t, func() bool {
+		return len(control.slots) == maxConcurrentIdentRequests
+	}, time.Second, 10*time.Millisecond)
+
+	extra, err := net.DialTimeout("tcp", addr, time.Second)
+	require.NoError(t, err)
+	defer extra.Close()
+	require.NoError(t, extra.SetDeadline(time.Now().Add(time.Second)))
+	_, err = io.WriteString(extra, "IDENT blocked blocked\n")
+	require.NoError(t, err)
+	buf := make([]byte, 1)
+	_, err = extra.Read(buf)
+	require.Error(t, err)
+}
+
+func TestControl_AcceptLoopStopsAfterPersistentErrors(t *testing.T) {
+	listener := &failingListener{err: errors.New("persistent accept failure")}
+	control := &controlServer{
+		listener: listener,
+		done:     make(chan struct{}),
+		errs:     make(chan error, 1),
+		slots:    make(chan struct{}, maxConcurrentIdentRequests),
+	}
+	go control.acceptLoop()
+
+	select {
+	case err := <-control.Errors():
+		require.ErrorContains(t, err, "control accept failed")
+	case <-time.After(time.Second):
+		t.Fatal("control accept loop did not report persistent failure")
+	}
+	select {
+	case <-control.done:
+	case <-time.After(time.Second):
+		t.Fatal("control accept loop did not stop")
+	}
+	assert.Equal(t, maxControlAcceptErrors, listener.accepts)
+	assert.True(t, listener.closed)
+}
+
+type failingListener struct {
+	err     error
+	accepts int
+	closed  bool
+}
+
+func (l *failingListener) Accept() (net.Conn, error) {
+	l.accepts++
+	return nil, l.err
+}
+
+func (l *failingListener) Close() error {
+	l.closed = true
+	return nil
+}
+
+func (l *failingListener) Addr() net.Addr {
+	return &net.TCPAddr{}
 }

@@ -9,8 +9,16 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"golang.org/x/sys/unix"
+)
+
+const fallbackSignalConfirmTimeout = 2 * time.Second
+
+var (
+	bootIDPath = "/proc/sys/kernel/random/boot_id"
+	pidfdOpen  = unix.PidfdOpen
 )
 
 // Handle identifies a process through a pidfd when the running kernel supports
@@ -24,9 +32,11 @@ type Handle struct {
 
 // Capture resolves pid's current process-birth token.
 func Capture(pid int) (Token, error) {
-	bootID, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
+	bootID, err := os.ReadFile(bootIDPath)
 	if err != nil {
-		return "", fmt.Errorf("procid: read boot ID: %w", err)
+		// Do not unwrap this environmental failure: a missing or inaccessible
+		// boot_id is not evidence that the requested process is gone.
+		return "", &bootIDReadError{path: bootIDPath, err: err}
 	}
 	startTime, err := processStartTime(pid)
 	if err != nil {
@@ -58,7 +68,7 @@ func Open(pid int, tok Token) (*Handle, error) {
 		return nil, fmt.Errorf("procid: process %d does not match token", pid)
 	}
 
-	fd, err := unix.PidfdOpen(pid, 0)
+	fd, err := pidfdOpen(pid, 0)
 	if err == nil {
 		return &Handle{pid: pid, token: tok, pidfd: fd}, nil
 	}
@@ -115,7 +125,13 @@ func (h *Handle) verifyThenSignal(sig os.Signal) error {
 		return fmt.Errorf("procid: unsupported signal %v", sig)
 	}
 	if err := syscall.Kill(h.pid, unixSig); err != nil {
+		if isFatalSignal(unixSig) && errors.Is(err, unix.ESRCH) {
+			return nil
+		}
 		return fmt.Errorf("procid: signal %d: %w", h.pid, err)
+	}
+	if isFatalSignal(unixSig) {
+		return h.confirmFatalSignal()
 	}
 	match, err = Verify(h.pid, h.token)
 	if err != nil {
@@ -127,10 +143,35 @@ func (h *Handle) verifyThenSignal(sig os.Signal) error {
 	return nil
 }
 
+func (h *Handle) confirmFatalSignal() error {
+	deadline := time.Now().Add(fallbackSignalConfirmTimeout)
+	for {
+		match, err := Verify(h.pid, h.token)
+		if err != nil {
+			return err
+		}
+		if !match {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf(
+				"procid: process %d still matches token after fatal signal and %s re-check",
+				h.pid,
+				fallbackSignalConfirmTimeout,
+			)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func isFatalSignal(sig syscall.Signal) bool {
+	return sig == syscall.SIGKILL || sig == syscall.SIGTERM
+}
+
 func processStartTime(pid int) (string, error) {
 	data, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
 	if err != nil {
-		return "", fmt.Errorf("procid: read stat for %d: %w", pid, err)
+		return "", &processStatReadError{pid: pid, err: err}
 	}
 	return parseStartTime(string(data))
 }
@@ -146,14 +187,41 @@ func parseStartTime(stat string) (string, error) {
 	if len(fields) < 20 {
 		return "", errors.New("procid: malformed proc stat: missing starttime")
 	}
+	if fields[0] == "Z" || fields[0] == "X" || fields[0] == "x" {
+		return "", fmt.Errorf("procid: process is no longer running: %w", unix.ESRCH)
+	}
 	if _, err := strconv.ParseUint(fields[19], 10, 64); err != nil {
 		return "", fmt.Errorf("procid: malformed proc stat starttime: %w", err)
 	}
 	return fields[19], nil
 }
 
+type bootIDReadError struct {
+	path string
+	err  error
+}
+
+func (e *bootIDReadError) Error() string {
+	return fmt.Sprintf("procid: read boot ID %s: %v", e.path, e.err)
+}
+
+type processStatReadError struct {
+	pid int
+	err error
+}
+
+func (e *processStatReadError) Error() string {
+	return fmt.Sprintf("procid: read stat for %d: %v", e.pid, e.err)
+}
+
+func (e *processStatReadError) Unwrap() error {
+	return e.err
+}
+
 func isGone(err error) bool {
-	return errors.Is(err, os.ErrNotExist) || errors.Is(err, unix.ESRCH)
+	var statErr *processStatReadError
+	return (errors.As(err, &statErr) && errors.Is(statErr.err, os.ErrNotExist)) ||
+		errors.Is(err, unix.ESRCH)
 }
 
 // IsProcessGone reports whether err means the referenced process no longer

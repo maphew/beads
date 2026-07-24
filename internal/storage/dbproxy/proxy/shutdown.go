@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,7 +17,13 @@ import (
 const (
 	shutdownConfirmDeadline = 5 * time.Second
 	shutdownConfirmPoll     = 50 * time.Millisecond
+	shutdownPostKillMinimum = 2 * time.Second
 )
+
+type killRecordChecks struct {
+	VerifyRoot       bool
+	CheckSpawnMarker bool
+}
 
 // Shutdown stops the verified proxy and backend processes for rootDir.
 //
@@ -27,7 +34,7 @@ const (
 // then verifies and stops whatever it published. All waits are bounded by
 // shutdownConfirmDeadline.
 func Shutdown(rootDir string) error {
-	if _, err := advanceStopEpoch(rootDir); err != nil {
+	if err := advanceStopEpoch(rootDir); err != nil {
 		return fmt.Errorf("proxy.Shutdown: publish stop epoch: %w", err)
 	}
 
@@ -36,8 +43,10 @@ func Shutdown(rootDir string) error {
 		LockFileName,
 		PIDFileName,
 		pidfile.KindProxy,
-		false,
-		true,
+		killRecordChecks{
+			VerifyRoot:       true,
+			CheckSpawnMarker: true,
+		},
 	)
 	if proxyLock != nil {
 		defer proxyLock.Unlock()
@@ -48,8 +57,7 @@ func Shutdown(rootDir string) error {
 		server.LockFileName,
 		server.PIDFileName,
 		pidfile.KindDoltBackend,
-		true,
-		false,
+		killRecordChecks{VerifyRoot: true},
 	)
 	if backendLock != nil {
 		backendLock.Unlock()
@@ -72,15 +80,23 @@ func Shutdown(rootDir string) error {
 }
 
 func ControlFilePaths(rootDir string) []string {
-	return []string{
+	paths := []string{
 		filepath.Join(rootDir, PIDFileName),
 		filepath.Join(rootDir, LockFileName),
 		filepath.Join(rootDir, LogFileName),
+		filepath.Join(rootDir, identity.SecretFileName),
 		filepath.Join(rootDir, spawnMarkerFileName),
 		filepath.Join(rootDir, stopEpochFileName),
 		filepath.Join(rootDir, server.PIDFileName),
 		filepath.Join(rootDir, server.LockFileName),
 	}
+	for _, name := range []string{PIDFileName, server.PIDFileName} {
+		matches, err := filepath.Glob(filepath.Join(rootDir, name+".stale-*"))
+		if err == nil {
+			paths = append(paths, matches...)
+		}
+	}
+	return paths
 }
 
 func PurgeControlFiles(rootDir string) []error {
@@ -101,8 +117,7 @@ func stopAndAcquire(
 	lockName string,
 	pidName string,
 	wantKind string,
-	verifyRoot bool,
-	checkSpawnMarker bool,
+	checks killRecordChecks,
 ) (*util.Lock, error) {
 	lockPath := filepath.Join(rootDir, lockName)
 	recordPath := pidfile.Path(rootDir, pidName)
@@ -113,7 +128,7 @@ func stopAndAcquire(
 		lock, err := util.TryLock(lockPath)
 		switch {
 		case err == nil:
-			if checkSpawnMarker {
+			if checks.CheckSpawnMarker {
 				active, markerErr := inspectSpawnMarkerLocked(rootDir)
 				if markerErr != nil {
 					lock.Unlock()
@@ -136,6 +151,15 @@ func stopAndAcquire(
 			pf, readErr := pidfile.Read(rootDir, pidName)
 			if readErr != nil {
 				lock.Unlock()
+				if isMalformedPIDFileError(readErr) {
+					return nil, unverifiableProcessError(
+						"shutdown",
+						recordPath,
+						0,
+						readErr,
+						unverifiableProcessChecks{},
+					)
+				}
 				return nil, fmt.Errorf("read %s: %w", recordPath, readErr)
 			}
 			if pf == nil {
@@ -150,14 +174,42 @@ func stopAndAcquire(
 			}
 			stopped = nil
 
-			if validateErr := validateKillRecord(rootDir, recordPath, pf, wantKind, verifyRoot); validateErr != nil {
+			if validateErr := validateKillRecord(rootDir, pf, wantKind, checks); validateErr != nil {
+				dead, live, probeErr := classifyInvalidKillRecord(pf, validateErr)
+				if dead {
+					if _, quarantineErr := quarantineRecord(rootDir, pidName, time.Now()); quarantineErr != nil {
+						lock.Unlock()
+						return nil, fmt.Errorf("quarantine dead unverifiable process record %s: %w", recordPath, quarantineErr)
+					}
+					return lock, nil
+				}
+				if probeErr != nil {
+					validateErr = errors.Join(validateErr, fmt.Errorf("probe recorded pid: %w", probeErr))
+				}
 				lock.Unlock()
-				return nil, validateErr
+				return nil, unverifiableProcessError(
+					"shutdown",
+					recordPath,
+					pf.Pid,
+					validateErr,
+					unverifiableProcessChecks{
+						LiveEstablished: live,
+						LegacyProxy: live &&
+							wantKind == pidfile.KindProxy &&
+							errors.Is(validateErr, pidfile.ErrLegacySchema),
+					},
+				)
 			}
 			handle, dead, openErr := openRecordedProcess(pf)
 			if openErr != nil {
 				lock.Unlock()
-				return nil, unverifiableProcessError("shutdown", recordPath, pf.Pid, openErr)
+				return nil, unverifiableProcessError(
+					"shutdown",
+					recordPath,
+					pf.Pid,
+					openErr,
+					unverifiableProcessChecks{},
+				)
 			}
 			if dead {
 				if _, quarantineErr := quarantineRecord(rootDir, pidName, time.Now()); quarantineErr != nil {
@@ -175,7 +227,8 @@ func stopAndAcquire(
 				lock.Unlock()
 				return nil, fmt.Errorf("close verified process handle for pid %d: %w", pf.Pid, closeErr)
 			}
-			if waitErr := waitForRecordedProcessExit(pf, time.Until(deadline)); waitErr != nil {
+			waitBudget := max(time.Until(deadline), shutdownPostKillMinimum)
+			if waitErr := waitForRecordedProcessExit(pf, waitBudget); waitErr != nil {
 				lock.Unlock()
 				return nil, fmt.Errorf("confirm verified pid %d stopped: %w", pf.Pid, waitErr)
 			}
@@ -191,25 +244,62 @@ func stopAndAcquire(
 
 		pf, readErr := pidfile.Read(rootDir, pidName)
 		if readErr != nil {
+			if isMalformedPIDFileError(readErr) {
+				return nil, unverifiableProcessError(
+					"shutdown",
+					recordPath,
+					0,
+					readErr,
+					unverifiableProcessChecks{},
+				)
+			}
 			return nil, fmt.Errorf("read held-lock record %s: %w", recordPath, readErr)
 		}
 		if pf != nil {
-			if validateErr := validateKillRecord(rootDir, recordPath, pf, wantKind, verifyRoot); validateErr != nil {
-				return nil, validateErr
-			}
-			handle, dead, openErr := openRecordedProcess(pf)
-			if openErr != nil {
-				return nil, unverifiableProcessError("shutdown", recordPath, pf.Pid, openErr)
-			}
-			if !dead {
-				if killErr := handle.Kill(); killErr != nil {
-					_ = handle.Close()
-					return nil, fmt.Errorf("kill verified pid %d from %s: %w", pf.Pid, recordPath, killErr)
+			if validateErr := validateKillRecord(rootDir, pf, wantKind, checks); validateErr != nil {
+				dead, live, probeErr := classifyInvalidKillRecord(pf, validateErr)
+				if !dead {
+					if probeErr != nil {
+						validateErr = errors.Join(validateErr, fmt.Errorf("probe recorded pid: %w", probeErr))
+					}
+					return nil, unverifiableProcessError(
+						"shutdown",
+						recordPath,
+						pf.Pid,
+						validateErr,
+						unverifiableProcessChecks{
+							LiveEstablished: live,
+							LegacyProxy: live &&
+								wantKind == pidfile.KindProxy &&
+								errors.Is(validateErr, pidfile.ErrLegacySchema),
+						},
+					)
 				}
-				if closeErr := handle.Close(); closeErr != nil {
-					return nil, fmt.Errorf("close verified process handle for pid %d: %w", pf.Pid, closeErr)
+				// A dead malformed or legacy record can only be quarantined
+				// after the held lock becomes available, so continue polling.
+				pf = nil
+			}
+			if pf != nil {
+				handle, dead, openErr := openRecordedProcess(pf)
+				if openErr != nil {
+					return nil, unverifiableProcessError(
+						"shutdown",
+						recordPath,
+						pf.Pid,
+						openErr,
+						unverifiableProcessChecks{},
+					)
 				}
-				stopped = pf
+				if !dead {
+					if killErr := handle.Kill(); killErr != nil {
+						_ = handle.Close()
+						return nil, fmt.Errorf("kill verified pid %d from %s: %w", pf.Pid, recordPath, killErr)
+					}
+					if closeErr := handle.Close(); closeErr != nil {
+						return nil, fmt.Errorf("close verified process handle for pid %d: %w", pf.Pid, closeErr)
+					}
+					stopped = pf
+				}
 			}
 		}
 
@@ -232,28 +322,37 @@ func stopAndAcquire(
 
 func validateKillRecord(
 	rootDir string,
-	recordPath string,
 	pf *pidfile.PidFile,
 	wantKind string,
-	verifyRoot bool,
+	checks killRecordChecks,
 ) error {
 	if err := pf.ValidateV2(wantKind); err != nil {
-		return unverifiableProcessError("shutdown", recordPath, pf.Pid, err)
+		return err
 	}
-	if !verifyRoot {
+	if !checks.VerifyRoot {
 		return nil
 	}
 	rootID, err := identity.RootID(rootDir)
 	if err != nil {
-		return fmt.Errorf("resolve workspace identity for %s: %w", recordPath, err)
+		return fmt.Errorf("resolve workspace identity: %w", err)
 	}
 	if pf.RootID != rootID {
-		return unverifiableProcessError(
-			"shutdown",
-			recordPath,
-			pf.Pid,
-			fmt.Errorf("root identity mismatch (record has %q, workspace has %q)", pf.RootID, rootID),
-		)
+		return fmt.Errorf("root identity mismatch (record has %q, workspace has %q)", pf.RootID, rootID)
 	}
 	return nil
+}
+
+func classifyInvalidKillRecord(pf *pidfile.PidFile, validationErr error) (dead bool, live bool, err error) {
+	if !isPIDFileValidationError(validationErr) {
+		return false, false, nil
+	}
+	return probeUnverifiablePID(pf.Pid)
+}
+
+func isPIDFileValidationError(err error) bool {
+	return errors.Is(err, pidfile.ErrLegacySchema) ||
+		errors.Is(err, pidfile.ErrBadPid) ||
+		errors.Is(err, pidfile.ErrBadPort) ||
+		errors.Is(err, pidfile.ErrKindMismatch) ||
+		errors.Is(err, pidfile.ErrMissingBirth)
 }

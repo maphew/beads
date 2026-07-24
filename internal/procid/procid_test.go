@@ -1,3 +1,5 @@
+//go:build !windows
+
 package procid
 
 import (
@@ -48,6 +50,8 @@ func TestVerifyExitedChild(t *testing.T) {
 	if matched {
 		t.Fatal("Verify(exited child) = true, want false")
 	}
+	// On Darwin this specifically exercises SysctlKinfoProc's zero-length/EIO
+	// missing-pid result; Linux normally reports ENOENT from /proc/<pid>/stat.
 }
 
 func TestVerifyWrongToken(t *testing.T) {
@@ -107,10 +111,14 @@ func TestOpen(t *testing.T) {
 	if !IsProcessGone(err) {
 		t.Fatalf("IsProcessGone(Capture(exited child)) = false for %v", err)
 	}
+	// The Darwin assertion above covers both wrapped ESRCH and the EIO mapping
+	// used by SysctlKinfoProc for a zero-length missing-pid result.
 }
 
 func TestCaptureNonexistentProcess(t *testing.T) {
 	if _, err := Capture(1 << 22); err == nil {
 		t.Fatal("Capture(nonexistent process) succeeded, want error")
+	} else if !IsProcessGone(err) {
+		t.Fatalf("IsProcessGone(Capture(nonexistent process)) = false for %v", err)
 	}
 }

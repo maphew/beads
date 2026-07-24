@@ -2,7 +2,16 @@
 
 package procid
 
-import "testing"
+import (
+	"errors"
+	"os"
+	"os/exec"
+	"syscall"
+	"testing"
+	"time"
+
+	"golang.org/x/sys/unix"
+)
 
 func TestParseStartTime(t *testing.T) {
 	tests := []struct {
@@ -31,5 +40,94 @@ func TestParseStartTime(t *testing.T) {
 				t.Errorf("parseStartTime = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestCaptureBootIDFailureIsNotProcessGone(t *testing.T) {
+	previous := bootIDPath
+	bootIDPath = "/definitely-not-a-real-procid-boot-id"
+	t.Cleanup(func() { bootIDPath = previous })
+
+	_, err := Capture(os.Getpid())
+	if err == nil {
+		t.Fatal("Capture succeeded with missing boot_id, want error")
+	}
+	if IsProcessGone(err) {
+		t.Fatalf("IsProcessGone(%v) = true, want false for environmental boot_id failure", err)
+	}
+	if matched, verifyErr := Verify(os.Getpid(), "linux-v1:irrelevant:1"); verifyErr == nil || matched {
+		t.Fatalf("Verify with missing boot_id = (%v, %v), want (false, error)", matched, verifyErr)
+	}
+}
+
+func TestFallbackFatalSignalAcceptsExitedTarget(t *testing.T) {
+	previous := pidfdOpen
+	pidfdOpen = func(int, int) (int, error) { return -1, unix.ENOSYS }
+	t.Cleanup(func() { pidfdOpen = previous })
+
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start child: %v", err)
+	}
+	waited := make(chan error, 1)
+	go func() { waited <- cmd.Wait() }()
+
+	tok, err := Capture(cmd.Process.Pid)
+	if err != nil {
+		_ = cmd.Process.Kill()
+		<-waited
+		t.Fatalf("Capture(child): %v", err)
+	}
+	handle, err := Open(cmd.Process.Pid, tok)
+	if err != nil {
+		_ = cmd.Process.Kill()
+		<-waited
+		t.Fatalf("Open(child): %v", err)
+	}
+	defer func() { _ = handle.Close() }()
+	if handle.pidfd != -1 {
+		t.Fatalf("Open fallback pidfd = %d, want -1", handle.pidfd)
+	}
+	if err := handle.Kill(); err != nil {
+		t.Fatalf("fallback Kill: %v", err)
+	}
+	select {
+	case <-waited:
+	case <-time.After(5 * time.Second):
+		t.Fatal("fallback-signaled child did not exit")
+	}
+}
+
+func TestVerifyZombieChildIsGone(t *testing.T) {
+	cmd := exec.Command("sleep", "0.05")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start child: %v", err)
+	}
+	tok, err := Capture(cmd.Process.Pid)
+	if err != nil {
+		_ = cmd.Wait()
+		t.Fatalf("Capture(child): %v", err)
+	}
+	defer func() { _ = cmd.Wait() }()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		matched, verifyErr := Verify(cmd.Process.Pid, tok)
+		if verifyErr != nil {
+			t.Fatalf("Verify(zombie child): %v", verifyErr)
+		}
+		if !matched {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("Verify(zombie child) remained true")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Signal 0 still sees an unreaped zombie's PID, proving Verify classified
+	// process state rather than relying only on /proc/<pid> disappearing.
+	if err := syscall.Kill(cmd.Process.Pid, 0); err != nil && !errors.Is(err, unix.EPERM) {
+		t.Fatalf("signal 0 to unreaped zombie: %v", err)
 	}
 }
