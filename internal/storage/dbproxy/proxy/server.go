@@ -104,6 +104,9 @@ func (p *proxyServer) ListenAndServe(parentCtx context.Context) error {
 		return fmt.Errorf("acquire %s: %w", LockFileName, err)
 	}
 	defer lock.Unlock()
+	if err := clearSpawnMarkerAfterLock(p.rootDir); err != nil {
+		return fmt.Errorf("clear proxy spawn marker: %w", err)
+	}
 
 	logPath := filepath.Join(p.rootDir, LogFileName)
 	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600) // #nosec G304 -- logPath is derived from operator-supplied config, not untrusted request input

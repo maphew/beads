@@ -100,6 +100,13 @@ func TestOpen(t *testing.T) {
 	if _, err := Open(cmd.Process.Pid, childToken); err == nil {
 		t.Fatal("Open(exited child) succeeded, want error")
 	}
+	_, err = Capture(cmd.Process.Pid)
+	if err == nil {
+		t.Fatal("Capture(exited child) succeeded, want error")
+	}
+	if !IsProcessGone(err) {
+		t.Fatalf("IsProcessGone(Capture(exited child)) = false for %v", err)
+	}
 }
 
 func TestCaptureNonexistentProcess(t *testing.T) {

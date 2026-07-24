@@ -3,6 +3,7 @@
 package procid
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"syscall"
@@ -76,3 +77,9 @@ func (h *Handle) Signal(sig os.Signal) error {
 func (h *Handle) Kill() error { return h.Signal(syscall.SIGKILL) }
 
 func (h *Handle) Close() error { return nil }
+
+// IsProcessGone reports whether err means the referenced process no longer
+// exists.
+func IsProcessGone(err error) bool {
+	return errors.Is(err, unix.ESRCH)
+}

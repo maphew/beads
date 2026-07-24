@@ -155,3 +155,10 @@ func parseStartTime(stat string) (string, error) {
 func isGone(err error) bool {
 	return errors.Is(err, os.ErrNotExist) || errors.Is(err, unix.ESRCH)
 }
+
+// IsProcessGone reports whether err means the referenced process no longer
+// exists. Callers use it to distinguish a dead recorded process from a live
+// process whose birth token does not match.
+func IsProcessGone(err error) bool {
+	return isGone(err)
+}

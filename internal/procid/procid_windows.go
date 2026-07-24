@@ -3,6 +3,7 @@
 package procid
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -17,7 +18,7 @@ type Handle struct {
 }
 
 func Capture(pid int) (Token, error) {
-	process, err := openProcess(pid)
+	process, err := openProcess(pid, windows.PROCESS_QUERY_LIMITED_INFORMATION)
 	if err != nil {
 		return "", fmt.Errorf("procid: open process %d: %w", pid, err)
 	}
@@ -26,7 +27,7 @@ func Capture(pid int) (Token, error) {
 }
 
 func Verify(pid int, tok Token) (bool, error) {
-	process, err := openProcess(pid)
+	process, err := openProcess(pid, windows.PROCESS_QUERY_LIMITED_INFORMATION)
 	if err != nil {
 		if err == windows.ERROR_INVALID_PARAMETER {
 			return false, nil
@@ -42,7 +43,7 @@ func Verify(pid int, tok Token) (bool, error) {
 }
 
 func Open(pid int, tok Token) (*Handle, error) {
-	process, err := openProcess(pid)
+	process, err := openProcess(pid, windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.PROCESS_TERMINATE)
 	if err != nil {
 		return nil, fmt.Errorf("procid: open process %d: %w", pid, err)
 	}
@@ -92,8 +93,8 @@ func (h *Handle) verify() error {
 	return nil
 }
 
-func openProcess(pid int) (windows.Handle, error) {
-	return windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+func openProcess(pid int, access uint32) (windows.Handle, error) {
+	return windows.OpenProcess(access, false, uint32(pid))
 }
 
 func tokenForProcess(process windows.Handle) (Token, error) {
@@ -103,4 +104,10 @@ func tokenForProcess(process windows.Handle) (Token, error) {
 	}
 	value := uint64(created.HighDateTime)<<32 | uint64(created.LowDateTime)
 	return Token("windows-v1:" + strconv.FormatUint(value, 10)), nil
+}
+
+// IsProcessGone reports whether err means the referenced process no longer
+// exists.
+func IsProcessGone(err error) bool {
+	return errors.Is(err, windows.ERROR_INVALID_PARAMETER)
 }
