@@ -167,6 +167,10 @@ type spawnMarker struct {
 var errStartInterrupted = errors.New("proxy startup interrupted by concurrent shutdown")
 
 func PickFreePort() (int, error) {
+	// The managed proxy no longer uses this bind-close allocator: its child
+	// binds port 0 and publishes the kernel-assigned port. The remaining
+	// production caller allocates the Dolt config port; that race requires
+	// the managed-config ownership/retry contract deferred to the PR-C RFC.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return 0, err
@@ -326,16 +330,8 @@ func spawnAndHandoff(
 		return Endpoint{}, err
 	}
 
-	port := opts.Port
-	if port == 0 {
-		var err error
-		if port, err = PickFreePort(); err != nil {
-			return Endpoint{}, fmt.Errorf("pick port: %w", err)
-		}
-	}
-
 	handedOff = true
-	child, err := forkExecChild(rootDir, opts, port, stopEpoch, lock)
+	child, err := forkExecChild(rootDir, opts, opts.Port, stopEpoch, lock)
 	if err != nil {
 		return Endpoint{}, fmt.Errorf("fork child: %w", err)
 	}
@@ -363,32 +359,41 @@ func spawnAndHandoff(
 			return Endpoint{}, fmt.Errorf("discover spawned proxy: %w", discovered.err)
 		}
 		select {
-		case <-child.done:
+		case childErr := <-child.done:
 			if interrupted, ierr := stopEpochChanged(rootDir, stopEpoch); ierr != nil {
 				return Endpoint{}, ierr
 			} else if interrupted {
 				return Endpoint{}, fmt.Errorf("%w for %s", errStartInterrupted, rootDir)
 			}
-			return Endpoint{}, fmt.Errorf("proxy child on port %d exited before becoming ready (likely lost lock race)", port)
+			if childErr == nil {
+				childErr = errors.New("child exited without reporting an error")
+			}
+			if opts.Port != 0 {
+				return Endpoint{}, fmt.Errorf(
+					"proxy child could not listen on explicitly configured port %d: %w",
+					opts.Port, childErr,
+				)
+			}
+			return Endpoint{}, fmt.Errorf("proxy child exited before publishing its OS-assigned port: %w", childErr)
 		case <-hard.C:
 			if err := killSpawnedChild(child); err != nil {
-				return Endpoint{}, fmt.Errorf("hard timeout waiting for proxy on port %d; safe child kill failed: %w", port, err)
+				return Endpoint{}, fmt.Errorf("hard timeout waiting for proxy on port %d; safe child kill failed: %w", opts.Port, err)
 			}
-			return Endpoint{}, fmt.Errorf("hard timeout (%s) waiting for proxy on port %d", spawnReadyHardTimeout, port)
+			return Endpoint{}, fmt.Errorf("hard timeout (%s) waiting for proxy on port %d", spawnReadyHardTimeout, opts.Port)
 		case <-poll.C:
 		}
 		if time.Now().After(deadline) {
 			if err := killSpawnedChild(child); err != nil {
-				return Endpoint{}, fmt.Errorf("timeout waiting for proxy on port %d; safe child kill failed: %w", port, err)
+				return Endpoint{}, fmt.Errorf("timeout waiting for proxy on port %d; safe child kill failed: %w", opts.Port, err)
 			}
-			return Endpoint{}, fmt.Errorf("timeout waiting for proxy to become ready on port %d", port)
+			return Endpoint{}, fmt.Errorf("timeout waiting for proxy to become ready on port %d", opts.Port)
 		}
 	}
 }
 
 type spawnedProxyChild struct {
 	cmd    *exec.Cmd
-	done   <-chan struct{}
+	done   <-chan error
 	handle *procid.Handle
 	marker spawnMarker
 }
@@ -488,11 +493,12 @@ func forkExecChild(rootDir string, opts OpenOpts, port int, stopEpoch string, lo
 		return nil, fmt.Errorf("start proxy child: %w", err)
 	}
 
-	done := make(chan struct{})
+	done := make(chan error, 1)
 	go func() {
-		defer close(done)
-		_ = cmd.Wait()
+		waitErr := cmd.Wait()
 		_ = logFile.Close()
+		done <- waitErr
+		close(done)
 	}()
 
 	// Theoretical race: the birth token is captured after Start, so the child

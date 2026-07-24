@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -886,6 +887,168 @@ func TestValidateProxiedServerConfig(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, strings.ToLower(err.Error()), "parse")
 	})
+}
+
+func TestValidateManagedListenerHost(t *testing.T) {
+	tests := []struct {
+		name    string
+		host    *string
+		wantErr bool
+	}{
+		{name: "omitted uses trusted Dolt loopback default", host: nil},
+		{name: "IPv4 loopback", host: stringPtr("127.0.0.1")},
+		{name: "IPv4 loopback range", host: stringPtr("127.42.0.9")},
+		{name: "IPv6 loopback", host: stringPtr("::1")},
+		{name: "IPv4 wildcard", host: stringPtr("0.0.0.0"), wantErr: true},
+		{name: "IPv6 wildcard", host: stringPtr("::"), wantErr: true},
+		{name: "public IPv4", host: stringPtr("203.0.113.7"), wantErr: true},
+		{name: "public IPv6", host: stringPtr("2001:db8::7"), wantErr: true},
+		{name: "localhost hostname", host: stringPtr("localhost"), wantErr: true},
+		{name: "other hostname", host: stringPtr("db.internal"), wantErr: true},
+		{name: "garbage", host: stringPtr("not an address !"), wantErr: true},
+		{name: "explicit empty binds wildcard", host: stringPtr(""), wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &servercfg.YAMLConfig{
+				ListenerConfig: servercfg.ListenerYAMLConfig{HostStr: tt.host},
+			}
+			err := validateManagedListenerHost(cfg)
+			if !tt.wantErr {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "127.0.0.1")
+			assert.Contains(t, err.Error(), "--proxied-server-external-host")
+			assert.Contains(t, err.Error(), "--proxied-server-external-port")
+			assert.Contains(t, err.Error(), "--proxied-server-external-socket-path")
+			assert.NotContains(t, err.Error(), "--server-")
+		})
+	}
+}
+
+func TestManagedListenerPolicyEveryConfigPathAtInitAndRuntime(t *testing.T) {
+	type setupFn func(t *testing.T, beadsDir string) string
+	tests := []struct {
+		name  string
+		setup setupFn
+	}{
+		{
+			name: "environment custom",
+			setup: func(t *testing.T, beadsDir string) string {
+				path := writeListenerConfig(t, filepath.Join(t.TempDir(), "env.yaml"), "0.0.0.0", false, false)
+				t.Setenv("BEADS_PROXIED_SERVER_CONFIG", path)
+				return ""
+			},
+		},
+		{
+			name: "sidecar custom",
+			setup: func(t *testing.T, beadsDir string) string {
+				t.Setenv("BEADS_PROXIED_SERVER_CONFIG", "")
+				path := writeListenerConfig(t, filepath.Join(t.TempDir(), "sidecar.yaml"), "0.0.0.0", false, false)
+				writeProxiedClientInfo(t, beadsDir, &configfile.ProxiedServerClientInfo{ConfigPath: path})
+				return ""
+			},
+		},
+		{
+			name: "pre-marker default path",
+			setup: func(t *testing.T, beadsDir string) string {
+				t.Setenv("BEADS_PROXIED_SERVER_CONFIG", "")
+				path := proxiedServerConfigPath(beadsDir)
+				writeListenerConfig(t, path, "0.0.0.0", false, false)
+				return ""
+			},
+		},
+		{
+			name: "marker file hand edit",
+			setup: func(t *testing.T, beadsDir string) string {
+				t.Setenv("BEADS_PROXIED_SERVER_CONFIG", "")
+				path := proxiedServerConfigPath(beadsDir)
+				writeListenerConfig(t, path, "0.0.0.0", true, false)
+				return ""
+			},
+		},
+		{
+			name: "marker parse fallback with interpolation",
+			setup: func(t *testing.T, beadsDir string) string {
+				t.Setenv("BEADS_PROXIED_SERVER_CONFIG", "")
+				t.Setenv("BEADS_TEST_MANAGED_LISTENER_PORT", "54321")
+				path := proxiedServerConfigPath(beadsDir)
+				writeListenerConfig(t, path, "0.0.0.0", true, true)
+				return ""
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			beadsDir := t.TempDir()
+			explicitPath := tt.setup(t, beadsDir)
+
+			initErr := validateManagedProxiedServerConfigAtInit(beadsDir, explicitPath)
+			assertManagedListenerPolicyError(t, initErr)
+
+			_, runtimeErr := ensureProxiedServerConfig(beadsDir, true)
+			assertManagedListenerPolicyError(t, runtimeErr)
+		})
+	}
+}
+
+func TestManagedListenerPolicyLoopbackCustomConfigPassesInitAndRuntime(t *testing.T) {
+	t.Setenv("BEADS_PROXIED_SERVER_CONFIG", "")
+	beadsDir := t.TempDir()
+	path := writeListenerConfig(t, filepath.Join(t.TempDir(), "loopback.yaml"), "127.0.0.1", false, false)
+	writeProxiedClientInfo(t, beadsDir, &configfile.ProxiedServerClientInfo{ConfigPath: path})
+
+	require.NoError(t, validateManagedProxiedServerConfigAtInit(beadsDir, ""))
+	got, err := ensureProxiedServerConfig(beadsDir, true)
+	require.NoError(t, err)
+	assert.Equal(t, path, got)
+}
+
+func TestManagedListenerPolicyOmittedHostPasses(t *testing.T) {
+	t.Setenv("BEADS_PROXIED_SERVER_CONFIG", "")
+	beadsDir := t.TempDir()
+	path := filepath.Join(t.TempDir(), "omitted.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("listener:\n  port: 54321\n"), 0o600))
+	writeProxiedClientInfo(t, beadsDir, &configfile.ProxiedServerClientInfo{ConfigPath: path})
+
+	require.NoError(t, validateManagedProxiedServerConfigAtInit(beadsDir, ""))
+	_, err := ensureProxiedServerConfig(beadsDir, true)
+	require.NoError(t, err)
+}
+
+func stringPtr(value string) *string {
+	return &value
+}
+
+func writeListenerConfig(t *testing.T, path, host string, marker, interpolatedPort bool) string {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
+	body := ""
+	if marker {
+		body = managedProxiedServerConfigMarker
+	}
+	port := "54321"
+	if interpolatedPort {
+		port = "${BEADS_TEST_MANAGED_LISTENER_PORT}"
+	}
+	body += fmt.Sprintf("listener:\n  host: %q\n  port: %s\n", host, port)
+	require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+	return path
+}
+
+func assertManagedListenerPolicyError(t *testing.T, err error) {
+	t.Helper()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "numeric loopback IP literal")
+	assert.Contains(t, err.Error(), "127.0.0.1")
+	assert.Contains(t, err.Error(), "--proxied-server-external-host")
+	assert.Contains(t, err.Error(), "--proxied-server-external-port")
+	assert.Contains(t, err.Error(), "--proxied-server-external-socket-path")
+	assert.NotContains(t, err.Error(), "--server-")
 }
 
 // TestCheckExistingBeadsDataAt_ProxiedServerNoData asserts that a proxied

@@ -800,6 +800,12 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// to ensure consistent path representation.
 		beadsDir := beadsDirForInit
 
+		if initProxiedServer && externalConfig == nil {
+			if err := validateManagedProxiedServerConfigAtInit(beadsDir, serverConfigPath); err != nil {
+				return fmt.Errorf("managed proxied-server config: %w", err)
+			}
+		}
+
 		// Prevent nested .beads directories
 		// Check if current working directory is inside a .beads directory
 		if strings.Contains(filepath.Clean(cwd), string(filepath.Separator)+".beads"+string(filepath.Separator)) ||
