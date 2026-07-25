@@ -528,18 +528,20 @@ func TestIsPathInSafeBoundary_TempDirSymlinkEscape(t *testing.T) {
 // distinguishing runner.
 func TestIsPathInSafeBoundary_TempDirPhysicalForm(t *testing.T) {
 	base := t.TempDir()
-	phys := filepath.Join(base, "phys")
-	if err := os.MkdirAll(phys, 0o755); err != nil {
-		t.Fatalf("mkdir phys: %v", err)
+	linkTarget := filepath.Join(base, "phys")
+	if err := os.MkdirAll(linkTarget, 0o755); err != nil {
+		t.Fatalf("mkdir link target: %v", err)
 	}
 	link := filepath.Join(base, "link")
-	if err := os.Symlink(phys, link); err != nil {
+	if err := os.Symlink(linkTarget, link); err != nil {
 		t.Skipf("cannot create symlink: %v", err)
 	}
 	t.Setenv("TMPDIR", link)
 
-	// Physical form of a (not-yet-created) subpath of the temp dir: must be safe.
-	target := filepath.Join(phys, "proj", ".beads")
+	// Canonicalize the link target before appending the not-yet-created tail.
+	// On macOS base still uses the lexical /var/folders spelling, so merely
+	// joining linkTarget would not exercise the physical /private/var form.
+	target := resolveLongestExistingAncestor(filepath.Join(linkTarget, "proj", ".beads"))
 	if !isPathInSafeBoundary(target) {
 		t.Errorf("isPathInSafeBoundary(%q) = false, want true (physical form of TMPDIR subpath)", target)
 	}
