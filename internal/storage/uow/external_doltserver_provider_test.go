@@ -2,6 +2,7 @@ package uow
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"path/filepath"
 	"strconv"
@@ -288,4 +289,69 @@ func TestNewExternalDoltServerUOWProvider_FreshInitSelfHealsAfterMidPassFailure(
 	defer statusRows.Close()
 	assert.False(t, statusRows.Next(), "issues still dirty in dolt_status after init")
 	require.NoError(t, statusRows.Err())
+}
+
+// TestNewExternalDoltServerUOWProvider_PreexistingDirtyDatabaseIsNotHealed is
+// the ownership-negative counterpart of the fresh-init self-heal: an
+// initializer that did NOT create the database (its bare CREATE DATABASE loses
+// to an existing one) must keep the #4566 guard's refusal and must not
+// DOLT_RESET the working set — the dirt it sees could be another actor's
+// legitimate uncommitted state, which only the proven creator may discard.
+func TestNewExternalDoltServerUOWProvider_PreexistingDirtyDatabaseIsNotHealed(t *testing.T) {
+	port := testutil.StartIsolatedDoltContainer(t)
+	portInt, err := strconv.Atoi(port)
+	require.NoError(t, err)
+
+	bdBin := buildBDBinary(t)
+	prev := proxy.ResolveExecutable
+	proxy.ResolveExecutable = func() (string, error) { return bdBin, nil }
+	t.Cleanup(func() { proxy.ResolveExecutable = prev })
+
+	t.Setenv("HOME", t.TempDir())
+
+	storeRootDir := t.TempDir()
+	shutdownOnInterrupt(t, storeRootDir)
+	t.Cleanup(func() {
+		if err := proxy.Shutdown(storeRootDir); err != nil {
+			t.Logf("proxy.Shutdown(%s): %v", storeRootDir, err)
+		}
+	})
+	logPath := filepath.Join(t.TempDir(), "server.log")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// Another actor created the database and left `issues` dirty in the
+	// working set (created, never Dolt-committed) — the state a mid-pass
+	// death leaves behind, indistinguishable from uncommitted user work.
+	admin, err := sql.Open("mysql", fmt.Sprintf("root:@tcp(127.0.0.1:%d)/?parseTime=true", portInt))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = admin.Close() })
+	_, err = admin.ExecContext(ctx, "CREATE DATABASE beads_loser")
+	require.NoError(t, err)
+	_, err = admin.ExecContext(ctx, "CREATE TABLE beads_loser.issues (id INT PRIMARY KEY)")
+	require.NoError(t, err)
+
+	provider, err := NewExternalDoltServerUOWProvider(
+		ctx,
+		storeRootDir,
+		"beads_loser",
+		logPath,
+		configfile.ExternalDoltConfig{Host: "127.0.0.1", Port: portInt},
+		"root",
+		"",
+		0,
+		0,
+	)
+	if provider != nil {
+		t.Cleanup(func() { _ = provider.Close(context.Background()) })
+	}
+	require.Error(t, err, "non-creator init over a dirty database must keep the #4566 refusal")
+	require.Contains(t, err.Error(), "pending schema migrations alter pre-existing dirty tables: issues")
+
+	// The dirt must be untouched: no DOLT_RESET may have fired.
+	var count int
+	require.NoError(t, admin.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM beads_loser.dolt_status WHERE table_name = 'issues'").Scan(&count))
+	require.Equal(t, 1, count, "issues working-set dirt was discarded by a non-creator init")
 }
