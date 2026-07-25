@@ -68,6 +68,18 @@ func (p *doltSQLProvider) initSchema(ctx context.Context, database string) error
 	// full cold-start migration pass (every migration + a Dolt commit each),
 	// not just a transient blip — it grows as migrations accumulate.
 	bo.MaxElapsedTime = 60 * time.Second
+	// Fresh-bootstrap detection for the #4566 guard self-heal
+	// (gastownhall/beads#5012): probed once, before this init's CREATE
+	// DATABASE runs. When the database did not exist before this init, a
+	// retry attempt that finds dirty tables can only be seeing a previous
+	// attempt's own half-applied migration step (a session that died between
+	// a step's SQL and its per-step Dolt commit — the "busy buffer" shape on
+	// a loaded shared server), never pre-existing user data, so the migrate
+	// call may discard that debris and converge instead of failing the init
+	// permanently. The probe is best-effort: on probe error the heal stays
+	// disabled and behavior is unchanged.
+	createdFresh := false
+	probed := false
 	return backoff.Retry(func() error {
 		conn, err := p.db.Conn(ctx)
 		if err != nil {
@@ -78,6 +90,13 @@ func (p *doltSQLProvider) initSchema(ctx context.Context, database string) error
 		}
 		defer conn.Close()
 
+		if !probed {
+			if exists, probeErr := databaseExists(ctx, conn, database); probeErr == nil {
+				createdFresh = !exists
+				probed = true
+			}
+		}
+
 		ddl := db.NewDDLSQLRepository(conn)
 		if err := ddl.CreateDatabaseIfNotExists(ctx, database); err != nil {
 			return backoff.Permanent(fmt.Errorf("uow: creating database: %w", err))
@@ -86,7 +105,11 @@ func (p *doltSQLProvider) initSchema(ctx context.Context, database string) error
 			return backoff.Permanent(fmt.Errorf("uow: switching to database: %w", err))
 		}
 
-		if _, err := schema.MigrateUpWithLock(ctx, conn, database); err != nil {
+		var migrateOpts []schema.MigrateLockOption
+		if createdFresh {
+			migrateOpts = append(migrateOpts, schema.WithFreshBootstrapHeal())
+		}
+		if _, err := schema.MigrateUpWithLock(ctx, conn, database, migrateOpts...); err != nil {
 			if isSerializationError(err) || schema.IsMigrationLockError(err) {
 				return fmt.Errorf("uow: migrate: %w", err)
 			}
@@ -94,6 +117,29 @@ func (p *doltSQLProvider) initSchema(ctx context.Context, database string) error
 		}
 		return nil
 	}, backoff.WithContext(bo, ctx))
+}
+
+// databaseExists reports whether the named database is already present on the
+// server. It iterates SHOW DATABASES rather than filtering
+// information_schema.schemata because Dolt does not push predicates down into
+// information_schema scans.
+func databaseExists(ctx context.Context, conn *sql.Conn, database string) (bool, error) {
+	rows, err := conn.QueryContext(ctx, "SHOW DATABASES")
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return false, err
+		}
+		if name == database {
+			return true, rows.Err()
+		}
+	}
+	return false, rows.Err()
 }
 
 func buildDSN(ep proxy.Endpoint, database, user, password, tlsConfigName string) string {
