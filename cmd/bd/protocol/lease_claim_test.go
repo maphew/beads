@@ -382,14 +382,28 @@ func TestProtocol_GrantingReplicaRoundTripsJSONL(t *testing.T) {
 	}
 
 	// The laptop's reaper must decline this stale lease: mini granted it, and
-	// the laptop's view of alice's liveness is a full sync interval old.
-	reclaimOut, err := fresh.tryRunEnv([]string{"BEADS_NODE_ID=laptop"},
+	// the laptop's view of alice's liveness is a full sync interval old. The
+	// guard also writes a stderr audit line naming the skipped issue (that is
+	// the whole point of the audit line), so the assertion must read the
+	// --json result from stdout alone rather than combined output, or it
+	// would trip on the very audit line proving the guard worked.
+	reclaimStdout, reclaimStderr, err := fresh.tryRunEnvSplit([]string{"BEADS_NODE_ID=laptop"},
 		"reclaim", "--older-than", "0s", "--json")
 	if err != nil {
-		t.Fatalf("reclaim on laptop: %v\n%s", err, reclaimOut)
+		t.Fatalf("reclaim on laptop: %v\nstdout:\n%s\nstderr:\n%s", err, reclaimStdout, reclaimStderr)
 	}
-	if strings.Contains(reclaimOut, leased) {
-		t.Errorf("laptop reclaimed a lease granted by mini:\n%s", reclaimOut)
+	// reclaimStderr carries the replica guard's audit line naming leased —
+	// expected, and irrelevant to this assertion, which reads stdout only.
+	reclaimResult := parseJSONOutput(t, reclaimStdout)[0]
+	if got := reclaimResult["count"]; got != float64(0) {
+		t.Errorf("laptop reclaimed %v lease(s), want 0:\n%s", got, reclaimStdout)
+	}
+	if reclaimedList, ok := reclaimResult["reclaimed"].([]any); ok {
+		for _, r := range reclaimedList {
+			if row, ok := r.(map[string]any); ok && row["id"] == leased {
+				t.Errorf("laptop reclaimed a lease granted by mini:\n%s", reclaimStdout)
+			}
+		}
 	}
 	if after := fresh.showJSON(leased); after["status"] != "in_progress" {
 		t.Fatalf("issue status = %v after a declined reclaim, want in_progress", after["status"])

@@ -17,6 +17,7 @@
 package protocol
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
@@ -61,6 +62,22 @@ func (w *workspace) tryRunEnv(extraEnv []string, args ...string) (string, error)
 	cmd := w.command(extraEnv, args...)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
+}
+
+// tryRunEnvSplit runs bd with extra environment appended, like tryRunEnv, but
+// captures stdout and stderr separately instead of folding them into one
+// stream. Some commands (e.g. `reclaim`) write a human-audit line to stderr
+// that legitimately names an issue ID a --json result on stdout correctly
+// omits (the audit line reports *why* the guard skipped it), so an assertion
+// that needs the machine-readable result alone must not use CombinedOutput.
+func (w *workspace) tryRunEnvSplit(extraEnv []string, args ...string) (stdout, stderr string, err error) {
+	w.t.Helper()
+	cmd := w.command(extraEnv, args...)
+	var outBuf, errBuf bytes.Buffer
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+	err = cmd.Run()
+	return outBuf.String(), errBuf.String(), err
 }
 
 // runEnvExpectError runs bd with extra environment appended, expecting a
