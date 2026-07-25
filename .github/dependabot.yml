@@ -9,6 +9,18 @@ updates:
     labels:
       - "dependencies"
       - "go"
+    # Group minor/patch Go bumps into a single PR. Every gomod bump rewrites
+    # go.sum, which invalidates the nix vendorHash in default.nix; N singleton
+    # PRs mean N vendorHash bot-commits and N '@dependabot recreate' rounds
+    # after each merge (see update-vendor-hash.yml caveat). One grouped PR
+    # gets one bot-computed hash. Majors stay separate so a breaking bump
+    # cannot block the routine group.
+    groups:
+      go-deps:
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
 
   # GitHub Actions
   - package-ecosystem: "github-actions"
@@ -19,6 +31,11 @@ updates:
     labels:
       - "dependencies"
       - "ci"
+    groups:
+      actions:
+        applies-to: version-updates
+        patterns:
+          - "*"
 
   # Python (beads-mcp)
   - package-ecosystem: "uv"
@@ -30,3 +47,8 @@ updates:
       - "dependencies"
       - "python"
       - "mcp"
+    groups:
+      beads-mcp-python:
+        applies-to: version-updates
+        patterns:
+          - "*"
