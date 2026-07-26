@@ -495,6 +495,12 @@ func forkExecChild(rootDir string, opts OpenOpts, port int, stopEpoch string, lo
 		_ = logFile.Close()
 	}()
 
+	// Theoretical race: the birth token is captured after Start, so the child
+	// could exit and its PID be recycled before Capture runs, making the
+	// handle describe the unrelated replacement. The window is a few
+	// milliseconds against OS PID-reuse latency, and the OS has no primitive
+	// to atomically capture identity at spawn, so this is accepted and
+	// documented rather than defended.
 	var handle *procid.Handle
 	childBirth, captureErr := procid.Capture(cmd.Process.Pid)
 	if captureErr == nil {
@@ -566,7 +572,9 @@ func readAndDial(rootDir string) adoptionResult {
 	if err != nil {
 		return adoptionResult{status: adoptionIdentityMismatch, pidfile: pf, err: err}
 	}
-	if reply.Schema != pidfile.SchemaV2 ||
+	// Accept schema v2 or newer, matching pidfile.ValidateV2's forward-compat
+	// policy for records.
+	if reply.Schema < pidfile.SchemaV2 ||
 		reply.Role != pidfile.KindProxy ||
 		reply.RootID != expectedRootID ||
 		reply.RootID != pf.RootID ||
@@ -782,10 +790,15 @@ func cleanupOrphanBackend(rootDir string) error {
 		}
 		return nil
 	}
-	defer func() { _ = handle.Close() }()
-
 	if err := handle.Kill(); err != nil {
+		_ = handle.Close()
 		return fmt.Errorf("kill verified orphan backend pid %d from %s: %w", pf.Pid, recordPath, err)
+	}
+	// Close before waiting: an open handle on Windows keeps the dead PID
+	// allocated, so procid.Verify would keep matching it and the exit wait
+	// below would always time out.
+	if err := handle.Close(); err != nil {
+		return fmt.Errorf("close verified backend process handle for pid %d: %w", pf.Pid, err)
 	}
 	if err := waitForRecordedProcessExit(pf, backendExitTimeout); err != nil {
 		return fmt.Errorf("wait for verified orphan backend pid %d: %w", pf.Pid, err)
@@ -891,9 +904,13 @@ func killSpawnedChild(child *spawnedProxyChild) error {
 	default:
 	}
 	if child.handle == nil {
-		return fmt.Errorf("verified process handle for pid %d is unavailable", child.cmd.Process.Pid)
-	}
-	if err := child.handle.Kill(); err != nil {
+		// No verified handle could be opened at spawn time. The child is our
+		// own un-reaped process, so its PID cannot have been recycled and a
+		// direct kill is safe; the alternative is leaking a live proxy child.
+		if err := child.cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			return fmt.Errorf("kill spawned proxy child pid %d: %w", child.cmd.Process.Pid, err)
+		}
+	} else if err := child.handle.Kill(); err != nil {
 		return err
 	}
 	timer := time.NewTimer(shutdownConfirmDeadline)

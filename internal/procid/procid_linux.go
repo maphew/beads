@@ -59,23 +59,39 @@ func Verify(pid int, tok Token) (bool, error) {
 }
 
 // Open verifies pid's token and opens a handle suitable for safe signaling.
+//
+// The pidfd is opened before the token check: a pidfd pins the PID number
+// against reuse, so verifying afterwards proves the fd refers to the process
+// the token describes. Verifying first would leave a window where the
+// verified process exits, the PID is recycled, and the pidfd targets the
+// unrelated replacement.
 func Open(pid int, tok Token) (*Handle, error) {
-	match, err := Verify(pid, tok)
+	fd, err := pidfdOpen(pid, 0)
 	if err != nil {
-		return nil, err
+		if !errors.Is(err, unix.ENOSYS) {
+			return nil, fmt.Errorf("procid: pidfd open %d: %w", pid, err)
+		}
+		// Kernel without pidfds: fall back to verify-then-signal, which
+		// retains the documented small PID-reuse race.
+		match, verifyErr := Verify(pid, tok)
+		if verifyErr != nil {
+			return nil, verifyErr
+		}
+		if !match {
+			return nil, fmt.Errorf("procid: process %d does not match token", pid)
+		}
+		return &Handle{pid: pid, token: tok, pidfd: -1}, nil
+	}
+	match, verifyErr := Verify(pid, tok)
+	if verifyErr != nil {
+		_ = unix.Close(fd)
+		return nil, verifyErr
 	}
 	if !match {
+		_ = unix.Close(fd)
 		return nil, fmt.Errorf("procid: process %d does not match token", pid)
 	}
-
-	fd, err := pidfdOpen(pid, 0)
-	if err == nil {
-		return &Handle{pid: pid, token: tok, pidfd: fd}, nil
-	}
-	if !errors.Is(err, unix.ENOSYS) {
-		return nil, fmt.Errorf("procid: pidfd open %d: %w", pid, err)
-	}
-	return &Handle{pid: pid, token: tok, pidfd: -1}, nil
+	return &Handle{pid: pid, token: tok, pidfd: fd}, nil
 }
 
 // Signal sends sig to the verified process.
@@ -86,6 +102,11 @@ func (h *Handle) Signal(sig os.Signal) error {
 			return fmt.Errorf("procid: unsupported signal %v", sig)
 		}
 		if err := unix.PidfdSendSignal(h.pidfd, unixSig, nil, 0); err != nil {
+			if isFatalSignal(unixSig) && errors.Is(err, unix.ESRCH) {
+				// The target exited on its own after Open; a fatal signal's
+				// goal is already met, matching the fallback path.
+				return nil
+			}
 			return fmt.Errorf("procid: pidfd signal %d: %w", h.pid, err)
 		}
 		return nil

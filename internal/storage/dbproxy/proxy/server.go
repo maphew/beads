@@ -229,14 +229,6 @@ func (p *proxyServer) ListenAndServe(parentCtx context.Context) error {
 	})
 	g.Go(func() error { return p.idleWatcher(gctx) })
 	g.Go(func() error { return p.acceptLoop(gctx) })
-	g.Go(func() error {
-		select {
-		case <-gctx.Done():
-			return nil
-		case err := <-control.Errors():
-			return err
-		}
-	})
 
 	runErr := g.Wait()
 	_ = p.conns.Wait()

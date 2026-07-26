@@ -56,15 +56,21 @@ func (e *shutdownError) Unwrap() []error {
 	return errs
 }
 
-// CanForceStopUnverified reports whether err is a Shutdown refusal whose only
-// remaining process is an unverifiable proxy. ForceStopUnverified can recover
-// exactly that partial outcome; it must not be used for backend refusals or
-// unrelated shutdown failures.
+// CanForceStopUnverified reports whether err is a Shutdown refusal whose
+// remaining processes are all unverifiable. ForceStopUnverified covers both
+// the proxy and backend records, and a pre-v2 managed-local deployment leaves
+// BOTH as unverifiable legacy records, so either side (or both) may carry the
+// refusal. It must not be used for unrelated shutdown failures.
 func CanForceStopUnverified(err error) bool {
 	var shutdownErr *shutdownError
-	return errors.As(err, &shutdownErr) &&
-		shutdownErr.backendErr == nil &&
+	if !errors.As(err, &shutdownErr) {
+		return false
+	}
+	proxyRecoverable := shutdownErr.proxyErr == nil ||
 		errors.Is(shutdownErr.proxyErr, ErrUnverifiableProcess)
+	backendRecoverable := shutdownErr.backendErr == nil ||
+		errors.Is(shutdownErr.backendErr, ErrUnverifiableProcess)
+	return proxyRecoverable && backendRecoverable
 }
 
 // Shutdown stops the verified proxy and backend processes for rootDir.

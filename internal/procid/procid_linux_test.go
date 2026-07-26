@@ -98,6 +98,79 @@ func TestFallbackFatalSignalAcceptsExitedTarget(t *testing.T) {
 	}
 }
 
+func requirePidfdSupport(t *testing.T) {
+	t.Helper()
+	fd, err := pidfdOpen(os.Getpid(), 0)
+	if errors.Is(err, unix.ENOSYS) {
+		t.Skip("kernel has no pidfd support")
+	}
+	if err != nil {
+		t.Fatalf("pidfd open self: %v", err)
+	}
+	_ = unix.Close(fd)
+}
+
+// A fatal signal whose target exited naturally between Open and Signal must
+// count as success on the pidfd path, matching the fallback path: the process
+// is gone, which is the goal.
+func TestPidfdFatalSignalAcceptsExitedTarget(t *testing.T) {
+	requirePidfdSupport(t)
+
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start child: %v", err)
+	}
+	tok, err := Capture(cmd.Process.Pid)
+	if err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		t.Fatalf("Capture(child): %v", err)
+	}
+	handle, err := Open(cmd.Process.Pid, tok)
+	if err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		t.Fatalf("Open(child): %v", err)
+	}
+	defer func() { _ = handle.Close() }()
+	if handle.pidfd < 0 {
+		t.Fatalf("Open pidfd = %d, want >= 0", handle.pidfd)
+	}
+	if err := cmd.Process.Kill(); err != nil {
+		t.Fatalf("kill child: %v", err)
+	}
+	_ = cmd.Wait() // reap, so the target is fully gone, not a zombie
+	if err := handle.Kill(); err != nil {
+		t.Fatalf("Kill after natural exit = %v, want nil", err)
+	}
+}
+
+// Open must not hand back a handle for an exited process, and the failure has
+// to classify as gone so lifecycle callers quarantine instead of refusing.
+func TestOpenReapedChildReportsGone(t *testing.T) {
+	requirePidfdSupport(t)
+
+	cmd := exec.Command("sleep", "0.05")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start child: %v", err)
+	}
+	tok, err := Capture(cmd.Process.Pid)
+	if err != nil {
+		_ = cmd.Wait()
+		t.Fatalf("Capture(child): %v", err)
+	}
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("wait child: %v", err)
+	}
+	_, err = Open(cmd.Process.Pid, tok)
+	if err == nil {
+		t.Fatal("Open(reaped child) succeeded, want error")
+	}
+	if !IsProcessGone(err) {
+		t.Fatalf("IsProcessGone(Open(reaped child)) = false for %v", err)
+	}
+}
+
 func TestVerifyZombieChildIsGone(t *testing.T) {
 	cmd := exec.Command("sleep", "0.05")
 	if err := cmd.Start(); err != nil {

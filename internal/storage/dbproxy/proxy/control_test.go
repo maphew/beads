@@ -129,40 +129,42 @@ func TestControl_CapsConcurrentHandshakes(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestControl_AcceptLoopStopsAfterPersistentErrors(t *testing.T) {
-	listener := &failingListener{err: errors.New("persistent accept failure")}
+// Persistent transient Accept failures (e.g. EMFILE) must not tear down the
+// control server: the data path may still be healthy, and losing control only
+// degrades adoption to the caller's poll/retry path.
+func TestControl_AcceptLoopSurvivesPersistentErrors(t *testing.T) {
+	listener := &failingListener{err: errors.New("transient accept failure"), failures: 5}
 	control := &controlServer{
 		listener: listener,
 		done:     make(chan struct{}),
-		errs:     make(chan error, 1),
+		closing:  make(chan struct{}),
 		slots:    make(chan struct{}, maxConcurrentIdentRequests),
 	}
 	go control.acceptLoop()
 
 	select {
-	case err := <-control.Errors():
-		require.ErrorContains(t, err, "control accept failed")
-	case <-time.After(time.Second):
-		t.Fatal("control accept loop did not report persistent failure")
-	}
-	select {
 	case <-control.done:
-	case <-time.After(time.Second):
-		t.Fatal("control accept loop did not stop")
+	case <-time.After(10 * time.Second):
+		t.Fatal("control accept loop did not exit after the listener closed")
 	}
-	assert.Equal(t, maxControlAcceptErrors, listener.accepts)
-	assert.True(t, listener.closed)
+	assert.Equal(t, listener.failures+1, listener.accepts,
+		"loop must retry through every transient failure until the listener reports closed")
+	assert.False(t, listener.closed, "accept failures must not close the control listener")
 }
 
 type failingListener struct {
-	err     error
-	accepts int
-	closed  bool
+	err      error
+	failures int
+	accepts  int
+	closed   bool
 }
 
 func (l *failingListener) Accept() (net.Conn, error) {
 	l.accepts++
-	return nil, l.err
+	if l.accepts <= l.failures {
+		return nil, l.err
+	}
+	return nil, net.ErrClosed
 }
 
 func (l *failingListener) Close() error {

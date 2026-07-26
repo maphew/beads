@@ -11,6 +11,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/procid"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/pidfile"
+	"github.com/steveyegge/beads/internal/storage/dbproxy/server"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/util"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -18,7 +19,7 @@ import (
 
 func TestForceStopUnverifiedFreeLock(t *testing.T) {
 	root := t.TempDir()
-	helper := startNamedForceStopHelper(t, "bd")
+	helper := startNamedForceStopHelper(t, root, "bd")
 	writeLegacyProxyRecord(t, root, helper)
 
 	report, err := ForceStopUnverified(root)
@@ -36,7 +37,7 @@ func TestForceStopUnverifiedFreeLock(t *testing.T) {
 
 func TestForceStopUnverifiedHeldLock(t *testing.T) {
 	root := t.TempDir()
-	helper := startNamedForceStopHelper(t, "dolt")
+	helper := startNamedForceStopHelper(t, root, "dolt")
 	writeLegacyProxyRecord(t, root, helper)
 	held, err := util.TryLock(filepath.Join(root, LockFileName))
 	require.NoError(t, err)
@@ -59,7 +60,7 @@ func TestForceStopUnverifiedHeldLock(t *testing.T) {
 
 func TestForceStopUnverifiedGoneProcess(t *testing.T) {
 	root := t.TempDir()
-	helper := startNamedForceStopHelper(t, "bd")
+	helper := startNamedForceStopHelper(t, root, "bd")
 	writeLegacyProxyRecord(t, root, helper)
 	handle, err := procid.Open(helper.cmd.Process.Pid, helper.token)
 	require.NoError(t, err)
@@ -72,6 +73,41 @@ func TestForceStopUnverifiedGoneProcess(t *testing.T) {
 	assert.True(t, report.ProcessWasGone)
 	assert.False(t, report.SignalSent)
 	assert.NotEmpty(t, report.QuarantinedPath)
+}
+
+// A pre-v2 managed-local deployment leaves BOTH proxy.pid and proxy-child.pid
+// as legacy records, so Shutdown refuses on both sides and the force path must
+// still be offered and recover both records.
+func TestForceStopUnverifiedPairedLegacyRecords(t *testing.T) {
+	root := t.TempDir()
+	proxyHelper := startNamedForceStopHelper(t, root, "bd")
+	backendHelper := startNamedForceStopHelper(t, root, "dolt")
+	writeLegacyProxyRecord(t, root, proxyHelper)
+	require.NoError(t, pidfile.Write(root, server.PIDFileName, pidfile.PidFile{
+		Pid:  backendHelper.cmd.Process.Pid,
+		Port: 3308,
+	}))
+
+	shutdownErr := Shutdown(root)
+	require.Error(t, shutdownErr)
+	assert.ErrorIs(t, shutdownErr, ErrUnverifiableProcess)
+	assert.True(t, CanForceStopUnverified(shutdownErr),
+		"paired legacy records must remain eligible for --force recovery")
+
+	report, err := ForceStopUnverified(root)
+	require.NoError(t, err)
+	assert.True(t, report.SignalSent)
+	assert.NotEmpty(t, report.QuarantinedPath)
+	require.NotNil(t, report.Backend)
+	assert.True(t, report.Backend.RecordFound)
+	assert.Equal(t, backendHelper.cmd.Process.Pid, report.Backend.PID)
+	assert.Equal(t, "dolt", report.Backend.Executable)
+	assert.True(t, report.Backend.SignalSent)
+	assert.NotEmpty(t, report.Backend.QuarantinedPath)
+	assertHelperExited(t, proxyHelper)
+	assertHelperExited(t, backendHelper)
+	assert.NoFileExists(t, pidfile.Path(root, PIDFileName))
+	assert.NoFileExists(t, pidfile.Path(root, server.PIDFileName))
 }
 
 func TestForceStopUnverifiedRejectsForeignExecutable(t *testing.T) {
@@ -87,9 +123,26 @@ func TestForceStopUnverifiedRejectsForeignExecutable(t *testing.T) {
 	assert.FileExists(t, pidfile.Path(root, PIDFileName))
 }
 
+// A recycled PID can point at an unrelated live bd process; a basename match
+// alone must not be a license to SIGKILL it. The command line has to tie the
+// process to this workspace.
+func TestForceStopUnverifiedRejectsForeignWorkspaceProcess(t *testing.T) {
+	root := t.TempDir()
+	helper := startNamedForceStopHelper(t, t.TempDir(), "bd")
+	writeLegacyProxyRecord(t, root, helper)
+
+	report, err := ForceStopUnverified(root)
+	require.ErrorContains(t, err, "does not reference workspace")
+	assert.Equal(t, "bd", report.Executable)
+	assert.False(t, report.SignalSent)
+	assert.Empty(t, report.QuarantinedPath)
+	assertHelperAlive(t, helper)
+	assert.FileExists(t, pidfile.Path(root, PIDFileName))
+}
+
 func TestForceStopUnverifiedRejectsVerifiableV2Record(t *testing.T) {
 	root := t.TempDir()
-	helper := startNamedForceStopHelper(t, "bd")
+	helper := startNamedForceStopHelper(t, root, "bd")
 	record := v2Record(t, root, pidfile.KindProxy, helper)
 	require.NoError(t, pidfile.Write(root, PIDFileName, record))
 
@@ -101,7 +154,11 @@ func TestForceStopUnverifiedRejectsVerifiableV2Record(t *testing.T) {
 	assert.FileExists(t, pidfile.Path(root, PIDFileName))
 }
 
-func startNamedForceStopHelper(t *testing.T, name string) helperProcess {
+// startNamedForceStopHelper starts a long-sleeping process whose executable
+// basename is name and whose command line references dir (the binary lives
+// inside it), matching how a workspace's own bd/dolt processes reference
+// their root path.
+func startNamedForceStopHelper(t *testing.T, dir, name string) helperProcess {
 	t.Helper()
 	sleepPath, err := exec.LookPath("sleep")
 	require.NoError(t, err)
@@ -109,7 +166,7 @@ func startNamedForceStopHelper(t *testing.T, name string) helperProcess {
 	require.NoError(t, err)
 	data, err := os.ReadFile(sleepPath)
 	require.NoError(t, err)
-	executable := filepath.Join(t.TempDir(), name)
+	executable := filepath.Join(dir, name)
 	require.NoError(t, os.WriteFile(executable, data, 0o700))
 
 	cmd := exec.Command(executable, "30")

@@ -599,10 +599,12 @@ var doltStopCmd = &cobra.Command{
 This sends a graceful shutdown signal. The server will restart automatically
 on the next bd command unless auto-start is disabled.
 
-For a managed proxied server, --force can recover an unverifiable or legacy
-process record only after its live process executable is matched to bd or dolt.
-In that recovery path, force still refuses to signal a process whose executable
-identity cannot be matched to bd or dolt.`,
+For a managed proxied server, --force can recover unverifiable or legacy
+process records (both the proxy and its backend) only after each live process
+executable is matched to bd or dolt and its command line ties it to this
+workspace. In that recovery path, force still refuses to signal a process
+whose executable identity cannot be matched to bd or dolt, or whose workspace
+scope cannot be established.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		beadsDir := selectedDoltBeadsDir()
 		if beadsDir == "" {
@@ -654,23 +656,37 @@ identity cannot be matched to bd or dolt.`,
 // action so automation can distinguish a matched executable from a signaled
 // process and a quarantined record from one left in place.
 type doltStopResult struct {
-	Stopped               bool   `json:"stopped"`
-	Force                 bool   `json:"force"`
-	ForcedRecovery        bool   `json:"forced_recovery,omitempty"`
-	Verified              *bool  `json:"verified,omitempty"`
-	VerifiedShutdownError string `json:"verified_shutdown_error,omitempty"`
-	RecordFound           bool   `json:"record_found,omitempty"`
-	RecordPath            string `json:"record_path,omitempty"`
-	RecordLeftAlone       bool   `json:"record_left_alone,omitempty"`
-	LockWasHeld           bool   `json:"lock_was_held,omitempty"`
-	PID                   int    `json:"pid,omitempty"`
-	Executable            string `json:"executable,omitempty"`
-	ExecutableVerified    *bool  `json:"executable_verified,omitempty"`
-	ProcessWasGone        bool   `json:"process_was_gone,omitempty"`
-	SignalSent            bool   `json:"signal_sent,omitempty"`
-	ProcessLeftAlone      bool   `json:"process_left_alone,omitempty"`
-	QuarantinedPath       string `json:"quarantined_path,omitempty"`
-	Error                 string `json:"error,omitempty"`
+	Stopped               bool                  `json:"stopped"`
+	Force                 bool                  `json:"force"`
+	ForcedRecovery        bool                  `json:"forced_recovery,omitempty"`
+	Verified              *bool                 `json:"verified,omitempty"`
+	VerifiedShutdownError string                `json:"verified_shutdown_error,omitempty"`
+	RecordFound           bool                  `json:"record_found,omitempty"`
+	RecordPath            string                `json:"record_path,omitempty"`
+	RecordLeftAlone       bool                  `json:"record_left_alone,omitempty"`
+	LockWasHeld           bool                  `json:"lock_was_held,omitempty"`
+	PID                   int                   `json:"pid,omitempty"`
+	Executable            string                `json:"executable,omitempty"`
+	ExecutableVerified    *bool                 `json:"executable_verified,omitempty"`
+	ProcessWasGone        bool                  `json:"process_was_gone,omitempty"`
+	SignalSent            bool                  `json:"signal_sent,omitempty"`
+	ProcessLeftAlone      bool                  `json:"process_left_alone,omitempty"`
+	QuarantinedPath       string                `json:"quarantined_path,omitempty"`
+	Backend               *doltStopRecordResult `json:"backend,omitempty"`
+	Error                 string                `json:"error,omitempty"`
+}
+
+// doltStopRecordResult mirrors the per-record force-stop fields for the
+// backend (proxy-child) record.
+type doltStopRecordResult struct {
+	RecordFound     bool   `json:"record_found,omitempty"`
+	RecordPath      string `json:"record_path,omitempty"`
+	LockWasHeld     bool   `json:"lock_was_held,omitempty"`
+	PID             int    `json:"pid,omitempty"`
+	Executable      string `json:"executable,omitempty"`
+	ProcessWasGone  bool   `json:"process_was_gone,omitempty"`
+	SignalSent      bool   `json:"signal_sent,omitempty"`
+	QuarantinedPath string `json:"quarantined_path,omitempty"`
 }
 
 func newForcedDoltStopResult(
@@ -702,6 +718,18 @@ func newForcedDoltStopResult(
 		!report.ProcessWasGone &&
 		!report.SignalSent
 	result.RecordLeftAlone = report.RecordFound && report.QuarantinedPath == ""
+	if report.Backend != nil {
+		result.Backend = &doltStopRecordResult{
+			RecordFound:     report.Backend.RecordFound,
+			RecordPath:      report.Backend.RecordPath,
+			LockWasHeld:     report.Backend.LockWasHeld,
+			PID:             report.Backend.PID,
+			Executable:      report.Backend.Executable,
+			ProcessWasGone:  report.Backend.ProcessWasGone,
+			SignalSent:      report.Backend.SignalSent,
+			QuarantinedPath: report.Backend.QuarantinedPath,
+		}
+	}
 	if forceErr != nil {
 		result.Error = forceErr.Error()
 	}
@@ -762,6 +790,25 @@ func renderDoltStopResult(result doltStopResult) error {
 		fmt.Printf("  Record quarantined: %s\n", result.QuarantinedPath)
 	case result.RecordLeftAlone:
 		fmt.Println("  Record: left unchanged")
+	}
+	if backend := result.Backend; backend != nil {
+		fmt.Printf("  Backend record: %s\n", backend.RecordPath)
+		if backend.PID != 0 {
+			fmt.Printf("  Backend PID: %d\n", backend.PID)
+		}
+		switch {
+		case backend.SignalSent:
+			fmt.Println("  Backend process: signal sent")
+		case backend.ProcessWasGone:
+			fmt.Println("  Backend process: already gone; no signal sent")
+		default:
+			fmt.Println("  Backend process: left alone; no signal sent")
+		}
+		if backend.QuarantinedPath != "" {
+			fmt.Printf("  Backend record quarantined: %s\n", backend.QuarantinedPath)
+		} else {
+			fmt.Println("  Backend record: left unchanged")
+		}
 	}
 	if result.Error != "" {
 		return HandleError("%s", result.Error)

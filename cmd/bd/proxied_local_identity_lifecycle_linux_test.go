@@ -549,6 +549,10 @@ func startCopiedBDManagedHelper(t *testing.T, bd string, p proxiedProject) manag
 	}()
 	upstreamPort := upstream.Addr().(*net.TCPAddr).Port
 	helperRoot := t.TempDir()
+	// The helper isolates its records under helperRoot, but force-stop only
+	// signals a process whose command line references the target workspace (a
+	// real pre-upgrade proxy carries the workspace in its --root argument);
+	// logging under p.proxyRoot models that scope without record collisions.
 	cmd := exec.Command(
 		copyPath,
 		"db-proxy-child",
@@ -556,7 +560,7 @@ func startCopiedBDManagedHelper(t *testing.T, bd string, p proxiedProject) manag
 		"--port", "0",
 		"--idle-timeout", "-1ns",
 		"--backend", string(proxy.BackendExternal),
-		"--logpath", filepath.Join(helperRoot, "proxy.log"),
+		"--logpath", filepath.Join(p.proxyRoot, "copied-bd-helper.log"),
 		"--external-host", "127.0.0.1",
 		"--external-port", strconv.Itoa(upstreamPort),
 	)

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"strings"
 	"sync"
@@ -19,17 +20,17 @@ const (
 	maxIdentRequestBytes       = 256
 	identDeadline              = 2 * time.Second
 	maxConcurrentIdentRequests = 8
-	maxControlAcceptErrors     = 3
 	controlAcceptRetryDelay    = 10 * time.Millisecond
+	controlAcceptRetryMax      = 5 * time.Second
 )
 
 type controlServer struct {
 	listener net.Listener
 	secret   string
 	done     chan struct{}
+	closing  chan struct{}
 	once     sync.Once
 	reply    func() identity.IdentReply
-	errs     chan error
 	slots    chan struct{}
 }
 
@@ -46,8 +47,8 @@ func startControl(rootDir string, reply func() identity.IdentReply) (*controlSer
 		listener: ln,
 		secret:   secret,
 		done:     make(chan struct{}),
+		closing:  make(chan struct{}),
 		reply:    reply,
-		errs:     make(chan error, 1),
 		slots:    make(chan struct{}, maxConcurrentIdentRequests),
 	}
 	go s.acceptLoop()
@@ -58,13 +59,10 @@ func (s *controlServer) Port() int {
 	return s.listener.Addr().(*net.TCPAddr).Port
 }
 
-func (s *controlServer) Errors() <-chan error {
-	return s.errs
-}
-
 func (s *controlServer) Close() error {
 	var err error
 	s.once.Do(func() {
+		close(s.closing)
 		err = s.listener.Close()
 		if errors.Is(err, net.ErrClosed) {
 			err = nil
@@ -74,9 +72,14 @@ func (s *controlServer) Close() error {
 	return err
 }
 
+// acceptLoop retries transient Accept failures (e.g. EMFILE) indefinitely
+// with capped exponential backoff instead of tearing anything down: the data
+// path may still be perfectly healthy, and a proxy that stops answering
+// identity probes merely degrades adoption to the caller's poll/retry path.
 func (s *controlServer) acceptLoop() {
 	defer close(s.done)
 	consecutiveErrors := 0
+	delay := controlAcceptRetryDelay
 	for {
 		conn, err := s.listener.Accept()
 		if err != nil {
@@ -84,19 +87,22 @@ func (s *controlServer) acceptLoop() {
 				return
 			}
 			consecutiveErrors++
-			if consecutiveErrors >= maxControlAcceptErrors {
-				acceptErr := fmt.Errorf("proxy: control accept failed %d times: %w", consecutiveErrors, err)
-				select {
-				case s.errs <- acceptErr:
-				default:
-				}
-				_ = s.listener.Close()
+			log.Printf(
+				"dbproxy: control accept failed %d consecutive time(s), retrying in %s: %v",
+				consecutiveErrors, delay, err,
+			)
+			select {
+			case <-s.closing:
 				return
+			case <-time.After(delay):
 			}
-			time.Sleep(time.Duration(consecutiveErrors) * controlAcceptRetryDelay)
+			if delay *= 2; delay > controlAcceptRetryMax {
+				delay = controlAcceptRetryMax
+			}
 			continue
 		}
 		consecutiveErrors = 0
+		delay = controlAcceptRetryDelay
 		select {
 		case s.slots <- struct{}{}:
 			go func() {

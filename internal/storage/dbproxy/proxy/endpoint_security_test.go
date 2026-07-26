@@ -330,6 +330,60 @@ func TestReadAndDialRejectsAuthenticatedRootMismatch(t *testing.T) {
 	assert.Equal(t, adoptionIdentityMismatch, got.status)
 }
 
+// The handshake accepts schema v2 or newer, matching pidfile.ValidateV2's
+// forward-compat policy for records: a newer proxy that still answers the v2
+// handshake remains adoptable.
+func TestReadAndDialAcceptsNewerSchemaHandshake(t *testing.T) {
+	root := t.TempDir()
+	token, err := procid.Capture(os.Getpid())
+	require.NoError(t, err)
+	rootID, err := identity.RootID(root)
+	require.NoError(t, err)
+
+	dataListener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = dataListener.Close() })
+	dataPort := dataListener.Addr().(*net.TCPAddr).Port
+
+	_, err = identity.WriteSecret(root)
+	require.NoError(t, err)
+	var reply identity.IdentReply
+	var replyMu sync.RWMutex
+	control, err := startControl(root, func() identity.IdentReply {
+		replyMu.RLock()
+		defer replyMu.RUnlock()
+		return reply
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = control.Close() })
+	replyMu.Lock()
+	reply = identity.IdentReply{
+		Schema:      pidfile.SchemaV2 + 1,
+		Role:        pidfile.KindProxy,
+		RootID:      rootID,
+		UpstreamID:  "upstream",
+		PID:         os.Getpid(),
+		Birth:       string(token),
+		DataPort:    dataPort,
+		ControlPort: control.Port(),
+	}
+	replyMu.Unlock()
+	require.NoError(t, pidfile.Write(root, PIDFileName, pidfile.PidFile{
+		Schema:      pidfile.SchemaV2 + 1,
+		Kind:        pidfile.KindProxy,
+		Pid:         os.Getpid(),
+		Birth:       string(token),
+		Port:        dataPort,
+		ControlPort: control.Port(),
+		RootID:      rootID,
+		UpstreamID:  "upstream",
+	}))
+
+	got := readAndDial(root)
+	assert.Equal(t, adoptionAdopted, got.status)
+	assert.Equal(t, dataPort, got.endpoint.Port)
+}
+
 func TestLegacyRecordFailClosed(t *testing.T) {
 	t.Run("held lock returns actionable error without kill", func(t *testing.T) {
 		root := t.TempDir()
@@ -644,7 +698,7 @@ func TestShutdownReportsPartialOutcomeAndRefusesLegacyProcess(t *testing.T) {
 	assert.Empty(t, quarantines(t, root, PIDFileName))
 }
 
-func TestCanForceStopUnverifiedRequiresProxyOnlyRefusal(t *testing.T) {
+func TestCanForceStopUnverifiedRequiresUnverifiableRefusals(t *testing.T) {
 	unverifiable := fmt.Errorf("%w: legacy record", ErrUnverifiableProcess)
 	other := errors.New("unrelated shutdown failure")
 	tests := []struct {
@@ -653,8 +707,9 @@ func TestCanForceStopUnverifiedRequiresProxyOnlyRefusal(t *testing.T) {
 		want bool
 	}{
 		{name: "proxy only", err: &shutdownError{proxyErr: unverifiable}, want: true},
-		{name: "backend only", err: &shutdownError{backendErr: unverifiable}},
-		{name: "both", err: &shutdownError{proxyErr: unverifiable, backendErr: other}},
+		{name: "backend only", err: &shutdownError{backendErr: unverifiable}, want: true},
+		{name: "paired legacy", err: &shutdownError{proxyErr: unverifiable, backendErr: unverifiable}, want: true},
+		{name: "unverifiable proxy with unrelated backend error", err: &shutdownError{proxyErr: unverifiable, backendErr: other}},
 		{name: "unrelated proxy error", err: &shutdownError{proxyErr: other}},
 		{name: "bare sentinel", err: unverifiable},
 	}
