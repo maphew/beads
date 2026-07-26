@@ -288,21 +288,10 @@ func ResolveDoltDir(beadsDir string) string {
 		}
 	}
 
-	// Check env var first (highest priority)
-	if d := os.Getenv("BEADS_DOLT_DATA_DIR"); d != "" {
-		if filepath.IsAbs(d) {
-			return d
-		}
-		return filepath.Join(beadsDir, d)
-	}
-	// Only load config if metadata.json exists (avoids legacy migration side effect)
-	metadataPath := filepath.Join(beadsDir, "metadata.json")
-	if _, err := os.Stat(metadataPath); err == nil {
-		if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil {
-			return cfg.DatabasePath(beadsDir)
-		}
-	}
-	return filepath.Join(beadsDir, "dolt")
+	// Env var, metadata.json dolt_data_dir (stat-guarded), then default —
+	// shared with the side-effect-free DoltDirPath so the two resolvers
+	// cannot drift.
+	return projectDoltDirPath(beadsDir)
 }
 
 // Config holds the server configuration.

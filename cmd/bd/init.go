@@ -822,6 +822,34 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			initDBDirAbs = filepath.Clean(initDBDir)
 		}
 
+		// Workspace operation gate: bd init REPLACES/creates workspace state,
+		// so it holds the workspace gate (plus any resolvable physical-root
+		// gates, e.g. a shared-server dolt dir) EXCLUSIVELY for the rest of
+		// init. init is in noDbCommands, so the PersistentPreRunE chokepoint
+		// never covers it — this is its own acquisition site. The workspace
+		// gate file lives BESIDE .beads (<parent>/.beads.gate.lock), so it
+		// works before .beads exists; the acquisition must come before any
+		// directory writes below, and before acquireEmbeddedLock (lock
+		// ordering: gates rank before every other beads lock).
+		initDBPathAbs, err := filepath.Abs(initDBPath)
+		if err != nil {
+			initDBPathAbs = filepath.Clean(initDBPath)
+		}
+		// Physical-root gates guard DIRECTORIES. With --db the path can be
+		// a database FILE; gating it verbatim would create
+		// <file>.gate.lock and leave the directory that actually holds the
+		// data ungated, so normalize to the containing directory. A
+		// nonexistent path is assumed to be a directory (the default
+		// resolver paths are all dolt data dirs).
+		if fi, statErr := os.Stat(initDBPathAbs); statErr == nil && !fi.IsDir() {
+			initDBPathAbs = filepath.Dir(initDBPathAbs)
+		}
+		initGateHandle, gateErr := acquireExclusiveWorkspaceGates(rootCtx, beadsDirAbs, "bd init", initDBPathAbs)
+		if gateErr != nil {
+			return fmt.Errorf("bd init refuses to run over live bd activity on this workspace: %w", gateErr)
+		}
+		defer func() { _ = initGateHandle.Release() }()
+
 		// Always create local .beads/ when using default location (CWD/.beads).
 		// The local directory is needed for metadata.json, config.yaml,
 		// .gitignore, and hooks — regardless of where dolt data lives.

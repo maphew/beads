@@ -773,7 +773,7 @@ var rootCmd = &cobra.Command{
 		// No subcommand - show help
 		_ = cmd.Help() // Help() always returns nil for cobra commands
 	},
-	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+	PersistentPreRunE: func(cmd *cobra.Command, args []string) (retErr error) {
 		applyNoColorFlag()
 
 		// Initialize CommandContext to hold runtime state (replaces scattered globals)
@@ -1159,6 +1159,30 @@ var rootCmd = &cobra.Command{
 		beadsDir := resolveCommandBeadsDir(dbPath)
 		prepareSelectedCommandContext(beadsDir, true)
 		refreshBoundCommandConfig(cmd)
+
+		// Workspace operation gate: every command that reaches this point
+		// will open the store (the skipsStoreInit early return is above),
+		// so take the workspace + physical-root gates now, in the final
+		// mode (SHARED for normal commands, EXCLUSIVE for bd backup
+		// restore — there is no upgrade path). See workspace_gate.go for
+		// the fail-open/fail-closed posture. The handle is released in
+		// PersistentPostRunE after store close; if this PreRunE fails
+		// later, cobra never runs PostRunE, so the deferred release below
+		// covers the PreRunE error paths after acquisition.
+		if err := acquireCommandWorkspaceGates(rootCtx, cmd, beadsDir); err != nil {
+			return err
+		}
+		defer func() {
+			if retErr != nil {
+				// Gate-outlives-store: a PreRunE failure AFTER the store
+				// opened (cobra will skip PostRunE) must close the
+				// store/provider before the gates drop, or maintenance
+				// could start against un-quiesced storage.
+				closeStoreBeforeGateRelease()
+				releaseWorkspaceGates()
+			}
+		}()
+
 		if _, err := getDoltAutoCommitMode(); err != nil {
 			return HandleError("%v", err)
 		}
@@ -1478,6 +1502,17 @@ var rootCmd = &cobra.Command{
 	},
 	PersistentPostRunE: func(cmd *cobra.Command, args []string) error {
 		defer restoreChangeDirSelection()
+		// Release the workspace/physical-root gates on EVERY exit from
+		// PostRunE — deferred so the early error returns below cannot leak
+		// the handle past the function. Ordering is enforced, not assumed:
+		// the success path closes uowProvider/store itself (and nils them),
+		// making the close call here a no-op; on the early error returns
+		// the store is still open, so it is closed HERE, before the gates
+		// drop — gates must always outlive the store.
+		defer func() {
+			closeStoreBeforeGateRelease()
+			releaseWorkspaceGates()
+		}()
 
 		if proxiedServerMode {
 			if uowProvider != nil {
@@ -1548,6 +1583,9 @@ var rootCmd = &cobra.Command{
 
 			if store != nil {
 				_ = store.Close() // Best effort cleanup
+				// Mark closed so the deferred gate-release cleanup above
+				// does not double-close it.
+				store = nil
 			}
 		}
 

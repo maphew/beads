@@ -539,6 +539,20 @@ func executeBootstrapPlan(plan BootstrapPlan, cfg *configfile.Config, nonInterac
 
 	ctx := context.Background()
 
+	// Workspace operation gate: every bootstrap action below replaces or
+	// creates workspace state (sync/restore/jsonl-import/init), and
+	// bootstrap is a skip-store command that the PersistentPreRunE
+	// chokepoint never gates. This is the single point where the target
+	// workspace is known and no state has been touched yet, so acquire the
+	// workspace + physical-root gates EXCLUSIVELY here for the rest of the
+	// plan execution. Exclusive failures are hard errors: bootstrap
+	// refuses to run over live bd activity rather than pretend.
+	gateHandle, gateErr := acquireExclusiveWorkspaceGates(ctx, plan.BeadsDir, "bd bootstrap "+plan.Action)
+	if gateErr != nil {
+		return fmt.Errorf("bd bootstrap refuses to run over live bd activity on this workspace: %w", gateErr)
+	}
+	defer func() { _ = gateHandle.Release() }()
+
 	switch plan.Action {
 	case "sync":
 		return executeSyncAction(ctx, plan, cfg)
