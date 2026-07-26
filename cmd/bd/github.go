@@ -421,7 +421,7 @@ func runGitHubSync(cmd *cobra.Command, args []string) error {
 
 	// Set up GitHub-specific pull and push hooks
 	engine.PullHooks = buildGitHubPullHooks(ctx)
-	engine.PushHooks = buildGitHubPushHooks(gt)
+	engine.PushHooks = buildGitHubPushHooks(ctx, gt)
 
 	// Build sync options from CLI flags
 	pull := !githubSyncPushOnly
@@ -482,12 +482,36 @@ func runGitHubSync(cmd *cobra.Command, args []string) error {
 // The ContentEqual hook lets the engine skip issues whose pushable fields
 // already match GitHub, so repeated `github sync --push-only` / `github push`
 // runs don't re-PATCH unchanged issues (gastownhall/beads#4214).
-func buildGitHubPushHooks(gt *github.Tracker) *tracker.PushHooks {
+// The FormatDescription hook renders the managed Beads metadata footer into
+// the pushed body (gastownhall/beads#4307); ContentEqual and ContentHash
+// operate on that same rendered body so the no-op detection matches what is
+// actually on GitHub, and so a dependency-graph change invalidates the cache.
+func buildGitHubPushHooks(ctx context.Context, gt *github.Tracker) *tracker.PushHooks {
 	config := gt.MappingConfig()
 	if config == nil {
 		config = github.DefaultMappingConfig()
 	}
+	formatDescription := func(issue *types.Issue) string {
+		dependencies, depErr := store.GetDependenciesWithMetadata(ctx, issue.ID)
+		dependents, dependentErr := store.GetDependentsWithMetadata(ctx, issue.ID)
+		if depErr != nil {
+			dependencies = nil
+		}
+		if dependentErr != nil {
+			dependents = nil
+		}
+		return github.RenderGitHubIssueBody(issue, dependencies, dependents)
+	}
+	// The engine hands ContentEqual/ContentHash the raw local issue but pushes
+	// the FormatDescription output, so compare/hash a copy carrying the
+	// rendered body.
+	withRenderedBody := func(local *types.Issue) *types.Issue {
+		rendered := *local
+		rendered.Description = formatDescription(local)
+		return &rendered
+	}
 	return &tracker.PushHooks{
+		FormatDescription: formatDescription,
 		ContentEqual: func(local *types.Issue, remote *tracker.TrackerIssue) bool {
 			if remote == nil {
 				return false
@@ -496,14 +520,14 @@ func buildGitHubPushHooks(gt *github.Tracker) *tracker.PushHooks {
 			if !ok || gh == nil {
 				return false
 			}
-			return github.PushFieldsEqual(local, gh, config)
+			return github.PushFieldsEqual(withRenderedBody(local), gh, config)
 		},
 		// ContentHash lets the engine skip the per-issue GitHub fetch entirely
 		// when an issue is unchanged since its last push, so a no-op
 		// `github sync --push-only` makes ~zero REST calls instead of one GET
 		// per linked issue (gastownhall/beads#4214).
 		ContentHash: func(local *types.Issue) string {
-			return github.PushContentHash(local, config)
+			return github.PushContentHash(withRenderedBody(local), config)
 		},
 		// TargetScope supplies the host and repository omitted by shorthand refs
 		// such as github:42, so changing GitHub target configuration invalidates
@@ -534,3 +558,4 @@ func buildGitHubPullHooks(ctx context.Context) *tracker.PullHooks {
 		},
 	}
 }
+
