@@ -48,7 +48,45 @@ func TestManagedLocalProxiedListenerPolicy(t *testing.T) {
 		assertManagedListenerPolicyOutput(t, stdout+stderr)
 	})
 
+	t.Run("non-loopback config under flagged root path refused at init", func(t *testing.T) {
+		dir := t.TempDir()
+		initGitRepoAt(t, dir)
+		rootDir := t.TempDir()
+		writeListenerConfig(
+			t,
+			filepath.Join(rootDir, proxiedServerConfigName),
+			"0.0.0.0",
+			false,
+			false,
+		)
+
+		stdout, stderr, err := bdProxiedRunBuffersWithEnv(
+			t,
+			bd,
+			dir,
+			nil,
+			"init",
+			"--proxied-server",
+			"--proxied-server-root-path", rootDir,
+			"--quiet",
+			"--prefix", "mlpolicyroot",
+			"--non-interactive",
+			"--skip-agents",
+			"--skip-hooks",
+		)
+		if err == nil {
+			t.Fatalf("managed init unexpectedly accepted 0.0.0.0 under --proxied-server-root-path:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+		assertManagedListenerPolicyOutput(t, stdout+stderr)
+	})
+
 	t.Run("loopback custom config completes lifecycle then hand edit is refused", func(t *testing.T) {
+		// PickFreePort here recreates the bind-close-launch race this PR
+		// removes from the proxy itself: the port is released before the
+		// managed dolt sql-server binds it. That is inherent to handing a
+		// pre-written custom config a concrete backend port, so the small
+		// EADDRINUSE flake window is accepted and documented rather than
+		// retried around.
 		backendPort, err := proxy.PickFreePort()
 		if err != nil {
 			t.Fatalf("pick custom backend port: %v", err)

@@ -27,7 +27,8 @@ import (
 const archiveLevelSupportNoticeFormat = "Info: external dolt predates archive_level config support (need >= Dolt %s); " +
 	"this managed server's background auto-GC may still produce zstd archives.\n"
 
-const managedListenerHostRemediation = "set listener.host to 127.0.0.1; for non-local topology use " +
+const managedListenerHostRemediation = "set listener.host to 127.0.0.1 (or another 127.0.0.0/8 / ::1 " +
+	"loopback address); for non-local topology use " +
 	"--proxied-server-external-host with --proxied-server-external-port, " +
 	"--proxied-server-external-socket-path, or switch to non-proxied server mode"
 
@@ -266,7 +267,29 @@ func resolveProxiedServerLogPath(beadsDir string) (path string, isCustom bool, e
 // itself would accept it. NewYamlConfig on raw bytes is only safe for a
 // Beads-managed file (marker present), because Beads itself never writes
 // interpolation syntax into a file it generates.
+//
+// The managed listener policy (validateManagedServerConfigPolicy) is applied
+// exactly once, on the resolved path, via the interpolation-aware
+// validateProxiedServerConfig — never on raw pre-interpolation bytes. A
+// marker config whose listener.host is a ${VAR} placeholder is therefore
+// judged on what it expands to, matching the degrade-gracefully contract for
+// hand-edited managed files below.
 func ensureProxiedServerConfig(beadsDir string, archiveLevelSupported bool) (string, error) {
+	path, err := resolveOrCreateProxiedServerConfig(beadsDir, archiveLevelSupported)
+	if err != nil {
+		return "", err
+	}
+	if err := validateProxiedServerConfig(path); err != nil {
+		return "", fmt.Errorf("ensureProxiedServerConfig: %w", err)
+	}
+	return path, nil
+}
+
+// resolveOrCreateProxiedServerConfig is ensureProxiedServerConfig without the
+// final policy gate: it only resolves, generates, reconciles, and warns. All
+// callers go through the exported entry point so the policy check cannot be
+// skipped or duplicated per branch.
+func resolveOrCreateProxiedServerConfig(beadsDir string, archiveLevelSupported bool) (string, error) {
 	path, isCustom, err := resolveProxiedServerConfigPath(beadsDir)
 	if err != nil {
 		return "", err
@@ -283,9 +306,6 @@ func ensureProxiedServerConfig(beadsDir string, archiveLevelSupported bool) (str
 		cfg, err := servercfg.YamlConfigFromFile(filesys.LocalFS, path)
 		if err != nil {
 			return "", fmt.Errorf("ensureProxiedServerConfig: custom config %s: parse: %w", path, err)
-		}
-		if err := validateManagedListenerHost(cfg); err != nil {
-			return "", fmt.Errorf("ensureProxiedServerConfig: custom config %s: %w", path, err)
 		}
 		// A custom config is always user-owned, whether or not it happens to
 		// carry the marker — never rewritten, only warned about.
@@ -328,18 +348,8 @@ func ensureProxiedServerConfig(beadsDir string, archiveLevelSupported bool) (str
 				if cerr != nil {
 					return "", fmt.Errorf("ensureProxiedServerConfig: existing config %s: parse: %w", path, cerr)
 				}
-				if err := validateManagedListenerHost(cfg); err != nil {
-					return "", fmt.Errorf("ensureProxiedServerConfig: existing config %s: %w", path, err)
-				}
 				warnUnmanagedProxiedServerConfig(path, cfg, archiveLevelSupported)
 				return path, nil
-			}
-			cfg, err := servercfg.NewYamlConfig(reconciled)
-			if err != nil {
-				return "", fmt.Errorf("ensureProxiedServerConfig: existing config %s: parse reconciled config: %w", path, err)
-			}
-			if err := validateManagedListenerHost(cfg); err != nil {
-				return "", fmt.Errorf("ensureProxiedServerConfig: existing config %s: %w", path, err)
 			}
 			if changed {
 				// os.Rename (inside atomicWriteFile) does not follow a
@@ -359,9 +369,6 @@ func ensureProxiedServerConfig(beadsDir string, archiveLevelSupported bool) (str
 			cfg, err := servercfg.YamlConfigFromFile(filesys.LocalFS, path)
 			if err != nil {
 				return "", fmt.Errorf("ensureProxiedServerConfig: existing config %s: parse: %w", path, err)
-			}
-			if err := validateManagedListenerHost(cfg); err != nil {
-				return "", fmt.Errorf("ensureProxiedServerConfig: existing config %s: %w", path, err)
 			}
 			warnUnmanagedProxiedServerConfig(path, cfg, archiveLevelSupported)
 		}
@@ -428,38 +435,63 @@ func validateProxiedServerConfig(path string) error {
 	if err != nil {
 		return fmt.Errorf("%s: parse: %w", path, err)
 	}
-	if err := validateManagedListenerHost(cfg); err != nil {
+	if err := validateManagedServerConfigPolicy(cfg); err != nil {
 		return fmt.Errorf("%s: %w", path, err)
 	}
 	return nil
 }
 
-// validateManagedListenerHost enforces the trust boundary for the Dolt child
-// that Beads launches with root and an empty password. External proxied
-// topology never calls this validator because it launches no managed child.
-func validateManagedListenerHost(cfg servercfg.ServerConfig) error {
-	host := cfg.Host()
-
-	// servercfg treats an omitted listener.host as DefaultHost. The pinned
-	// Dolt default is its built-in "localhost" loopback setting. Allow that
-	// trusted omission while still rejecting an explicitly configured
-	// hostname below; resolver trust is not proof for user-provided values.
+// validateManagedServerConfigPolicy enforces the trust boundary for the Dolt
+// child that Beads launches with root and an empty password: every listener
+// the config can open must stay loopback-only, so the whole config is in
+// scope, not just listener.host. External proxied topology never calls this
+// validator because it launches no managed child.
+func validateManagedServerConfigPolicy(cfg servercfg.ServerConfig) error {
+	// listener.host policy: an explicit numeric loopback IP, nothing else.
+	// An omitted host is rejected rather than trusted: servercfg resolves it
+	// to DefaultHost ("localhost"), and CheckForUnixSocket treats a
+	// "localhost" host as license to also open the shared-namespace default
+	// unix socket — strictly worse than the explicit hostname it looks like.
 	if yc, ok := cfg.(*servercfg.YAMLConfig); ok && yc.ListenerConfig.HostStr == nil {
-		defaultIP := net.ParseIP(servercfg.DefaultHost)
-		if (defaultIP != nil && defaultIP.IsLoopback()) || servercfg.DefaultHost == "localhost" {
-			return nil
-		}
 		return fmt.Errorf(
-			"managed proxied-server listener.host is omitted, but Dolt's default %q is not proven loopback: %s",
+			"managed proxied-server listener.host is omitted (Dolt would default to %q, "+
+				"which can also open the default unix socket) and must be a numeric loopback IP literal: %s",
 			servercfg.DefaultHost, managedListenerHostRemediation,
 		)
 	}
-
+	host := cfg.Host()
 	ip := net.ParseIP(host)
 	if ip == nil || !ip.IsLoopback() {
 		return fmt.Errorf(
 			"managed proxied-server listener.host %q must be a numeric loopback IP literal: %s",
 			host, managedListenerHostRemediation,
+		)
+	}
+	// A unix socket bypasses the loopback TCP trust boundary entirely
+	// (shared filesystem namespace). Socket() maps an explicitly empty
+	// listener.socket to Dolt's default socket path, so it is rejected too.
+	if socket := cfg.Socket(); socket != "" {
+		return fmt.Errorf(
+			"managed proxied-server config sets listener.socket %q, which bypasses the loopback trust boundary: "+
+				"remove listener.socket; %s",
+			socket, managedListenerHostRemediation,
+		)
+	}
+	// remotesapi.port opens an HTTP+gRPC listener on all interfaces; there
+	// is no host knob for it, so its presence alone breaks the boundary.
+	if port := cfg.RemotesapiPort(); port != nil {
+		return fmt.Errorf(
+			"managed proxied-server config sets remotesapi.port %d, which listens on all interfaces: "+
+				"remove the remotesapi block; %s",
+			*port, managedListenerHostRemediation,
+		)
+	}
+	// cluster.remotesapi.port likewise listens on all interfaces.
+	if cfg.ClusterConfig() != nil {
+		return fmt.Errorf(
+			"managed proxied-server config sets a cluster block, whose remotesapi listens on all interfaces: "+
+				"remove the cluster block; %s",
+			managedListenerHostRemediation,
 		)
 	}
 	return nil
@@ -469,13 +501,23 @@ func validateManagedListenerHost(cfg servercfg.ServerConfig) error {
 // managed-local config before init performs filesystem mutations. A missing
 // Beads-default path is valid because init/runtime will generate the
 // loopback-only config. Missing custom paths remain hard errors.
-func validateManagedProxiedServerConfigAtInit(beadsDir, explicitPath string) error {
+//
+// explicitRootPath is the --proxied-server-root-path flag value: at this
+// point the sidecar is not persisted yet, so resolveProxiedServerConfigPath
+// cannot see the flag and it must be applied here. An explicit
+// --proxied-server-config-path needs no handling here — init.go already
+// validated it at flag-parse time, and when no config env override is set it
+// IS the effective config, so there is nothing further to check.
+func validateManagedProxiedServerConfigAtInit(beadsDir, explicitPath, explicitRootPath string) error {
 	if explicitPath != "" && os.Getenv("BEADS_PROXIED_SERVER_CONFIG") == "" {
-		return validateProxiedServerConfig(explicitPath)
+		return nil
 	}
 	path, isCustom, err := resolveProxiedServerConfigPath(beadsDir)
 	if err != nil {
 		return err
+	}
+	if !isCustom && explicitRootPath != "" && os.Getenv("BEADS_PROXIED_SERVER_ROOT_PATH") == "" {
+		path = filepath.Join(explicitRootPath, proxiedServerConfigName)
 	}
 	if _, err := os.Stat(path); err != nil {
 		if os.IsNotExist(err) && !isCustom {
@@ -537,9 +579,6 @@ func renderProxiedServerConfig(port int, archiveLevelSupported bool) ([]byte, er
 			HostStr:    &host,
 			PortNumber: &port,
 		},
-	}
-	if err := validateManagedListenerHost(yc); err != nil {
-		return nil, err
 	}
 	if archiveLevelSupported {
 		archiveLevel := 0
