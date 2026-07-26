@@ -424,11 +424,19 @@ func expectOnePendingMigration(t *testing.T, mock sqlmock.Sqlmock) {
 	// no-ops without scanning/updating rows.
 	expectColumnExists(mock, false)
 	expectColumnExists(mock, false)
-	// rekeyAuxRowIDs reads the ignored cursor to see whether its clone-local
-	// marker is pending; at latest it is not, so the re-key no-ops.
+	// rekeyAuxRowIDsAllPasses reads the ignored cursor to see whether any
+	// pass's clone-local marker is pending; at latest none is. Each pass then
+	// reads the clone-local re-key state — its crash sentinel and the #4380
+	// drift record, either of which would re-admit it; this mocked world has no
+	// local_metadata table, so each read stops at the table-existence probe and
+	// the re-key no-ops.
 	expectCursorProbe(mock, "ignored_schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", latestIgnored)
 	expectIgnoredSentinelProbes(mock, true)
+	for range auxRekeyPasses {
+		mock.ExpectQuery(`SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.TABLES`).
+			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	}
 	mock.ExpectExec("(?s)^CREATE TABLE IF NOT EXISTS ignored_schema_migrations").
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	expectContentHashColumnExists(mock)
@@ -525,7 +533,7 @@ func expectDirtyGuardRefusal(t *testing.T, mock sqlmock.Sqlmock) {
 	// Nothing staged -> no unstage exec; seed was a no-op -> no seed commit.
 	// committableDirtyTables re-reads dolt_status (ignored tables excluded).
 	expectDoltStatusDirtyEvents(mock)
-	// auxRekeyResumePending: no local_metadata table, no crashed rekey pass.
+	// readAnyAuxRekeyState: no local_metadata table, no crashed rekey pass.
 	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.TABLES`).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 	// pendingMigrationDirtyTables: cursor read, then pending 0062's SQL

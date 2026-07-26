@@ -625,12 +625,25 @@ func MigrateUp(ctx context.Context, db DBConn) (int, error) {
 	// pre-existing user writes: dropping them from dirtyBefore exempts them
 	// from the changed-signature guard (the resumed rekey is about to change
 	// them) and lets stageSchemaTables commit them with the rest of the pass.
-	if resuming, err := anyAuxRekeyResumePending(ctx, db); err != nil {
-		return 0, fmt.Errorf("reading aux rekey sentinel: %w", err)
-	} else if resuming {
+	//
+	// A table skipped for #11131 encoding drift (#4380) needs the same
+	// exemption on the pass that retries it, and needs it more: the
+	// changed-signature guard below reads dirty tables through dolt_diff, which
+	// decodes exactly the cells that panic — so leaving a drifted table in
+	// dirtyBefore would fail the pass on the read, re-creating the unopenable
+	// database this exemption path exists to rescue. Only the recorded tables
+	// are exempted there, since only those will be touched.
+	auxRekeyOwed, err := readAnyAuxRekeyState(ctx, db)
+	if err != nil {
+		return 0, fmt.Errorf("reading aux rekey state: %w", err)
+	}
+	if auxRekeyOwed.resume {
 		for _, t := range auxRekeyTables {
 			delete(dirtyBefore, t.name)
 		}
+	}
+	for _, name := range auxRekeyOwed.drifted {
+		delete(dirtyBefore, name)
 	}
 	touchedDirtyTables, err := mainSource.pendingMigrationDirtyTables(ctx, db, dirtyBefore)
 	if err != nil {
