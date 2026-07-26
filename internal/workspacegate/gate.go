@@ -43,7 +43,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -61,9 +63,21 @@ type Mode int
 const (
 	// Shared is held by normal commands for the lifetime of their open
 	// store or UOW provider. Any number of shared holders coexist.
+	//
+	// Starvation note: a rolling sequence of shared holders (e.g. one bd
+	// command after another against a busy workspace) can starve an
+	// Exclusive acquirer indefinitely — acquisition is LOCK_NB polling
+	// with no intent signal, so a new shared holder has no way to know an
+	// exclusive attempt is queued and back off. A future extension could
+	// have Exclusive publish an advisory "waiting" marker (parallel to
+	// the holder-info sidecar) that new Shared acquisitions check and
+	// voluntarily defer to, but that does not exist yet: Options.Wait on
+	// an Exclusive acquisition is not a fairness guarantee.
 	Shared Mode = iota
 	// Exclusive is held by maintenance operations. It conflicts with
-	// every other holder, shared or exclusive.
+	// every other holder, shared or exclusive. See the starvation note
+	// on Shared: nothing here prevents shared holders from starving an
+	// Exclusive acquirer.
 	Exclusive
 )
 
@@ -87,7 +101,11 @@ type Options struct {
 	// attempt. Zero or negative means exactly one non-blocking try.
 	// The underlying blocking lock primitives have no deadline support,
 	// so waiting is implemented as timed polling of the non-blocking
-	// primitive.
+	// primitive. This is not a fairness guarantee: see the starvation
+	// note on Exclusive — a Wait on an Exclusive acquisition can still
+	// exhaust its budget against a rolling sequence of Shared holders
+	// that each individually released before it, none of which had any
+	// signal that an exclusive acquirer was waiting.
 	Wait time.Duration
 	// PollInterval is the retry cadence while waiting (default 100ms).
 	PollInterval time.Duration
@@ -111,6 +129,21 @@ type Gate struct {
 // Path returns the gate file location (diagnostics only — never lock this
 // file through other means, and never delete it).
 func (g Gate) Path() string { return g.path }
+
+// gateKey derives the comparison key AcquireAll uses to dedupe and sort
+// gate paths. On case-insensitive-capable filesystems (Windows, macOS
+// default HFS+/APFS) two differently-cased spellings of the same gate
+// path are the same file, so comparing raw paths would treat one physical
+// gate as two, defeating both dedupe and the deadlock-free total order.
+// Lowercasing on those platforms only widens the set of paths treated as
+// equal; it never splits an otherwise-equal pair. Gate.path (the open
+// path) is left untouched — only this comparison key is lowered.
+func gateKey(path string) string {
+	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
+		return strings.ToLower(path)
+	}
+	return path
+}
 
 // gateFileName maps a guarded directory base name to its sibling gate
 // file name: ".beads" -> ".beads.gate.lock", "dolt" -> "dolt.gate.lock".
@@ -168,6 +201,21 @@ func ForWorkspace(beadsDir string) (Gate, error) { return forDir(beadsDir) }
 // Distinct workspaces that point at the same physical root resolve to the
 // same gate file, which is the point: a workspace-level gate alone cannot
 // stop workspace B from restarting the server workspace A is draining.
+//
+// Cross-user shared roots are unsupported: the gate file is created 0o600
+// (see Acquire), so a second OS user attempting to gate a shared root such
+// as ~/.beads/shared-server/dolt hits EACCES on the sibling gate file, not
+// a graceful degradation. Do not widen the mode to 0o666 to work around
+// this without an explicit owner decision — that would let any local user
+// release or corrupt another user's gate.
+//
+// Derived invariant for an in-.beads physical root (e.g.
+// .beads/embeddeddolt): the gate file for that root lives beside it,
+// INSIDE .beads (see forDir), so callers must not replace or recreate
+// .beads itself while such a root is gated — doing so replaces the gate
+// file's parent along with everything else in it, which is exactly the
+// split-inode hazard the package comment warns against for the guarded
+// root's own parent.
 func ForPhysicalRoot(root string) (Gate, error) { return forDir(root) }
 
 // Info is the advisory holder-info sidecar written next to the gate file
@@ -224,10 +272,22 @@ func (g Gate) busyDetail(mode Mode) string {
 	if !info.StartedAt.IsZero() {
 		desc += " since " + info.StartedAt.UTC().Format(time.RFC3339)
 	}
+	stale := func() bool {
+		host, _ := os.Hostname()
+		return host == info.Hostname && !pidAlive(info.PID)
+	}
 	if mode == Shared {
+		// A live exclusive holder is the only thing that blocks a SHARED
+		// attempt, so a readable sidecar should describe it — but the
+		// sidecar write and the flock are not atomic with each other, so
+		// a dead recorded PID must still be reported as stale rather than
+		// presented as fact.
+		if stale() {
+			return fmt.Sprintf("other bd processes (a stale exclusive-holder record from dead pid %d was ignored)", info.PID)
+		}
 		return desc
 	}
-	if host, _ := os.Hostname(); host == info.Hostname && !pidAlive(info.PID) {
+	if stale() {
 		return fmt.Sprintf("other bd processes (a stale exclusive-holder record from dead pid %d was ignored)", info.PID)
 	}
 	return "possibly " + desc + ", or shared holders"
@@ -246,6 +306,7 @@ func pidAlive(pid int) bool {
 		// Windows: FindProcess fails when no such process exists.
 		return false
 	}
+	defer func() { _ = p.Release() }() // Windows: FindProcess opens a handle; release it on every return path.
 	err = p.Signal(syscall.Signal(0))
 	if err == nil {
 		return true
@@ -390,7 +451,7 @@ func (g Gate) writeInfo(reason string) {
 	}
 	tmp := fmt.Sprintf("%s.%d.tmp", g.infoPath(), os.Getpid())
 	_ = os.Remove(tmp)
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600) //nolint:gosec // G304: path derives from the gate location this package computed, not request input; O_EXCL refuses pre-planted files
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600) //nolint:gosec // G304: path derives from the gate location this package computed, not request input; the preceding os.Remove clears a pre-planted file, and O_EXCL closes the remove-then-open window so a symlink replanted in between is refused rather than followed
 	if err != nil {
 		return
 	}
@@ -449,13 +510,13 @@ func AcquireAll(ctx context.Context, mode Mode, opts Options, gates ...Gate) (*M
 		if g.path == "" {
 			return nil, errors.New("workspacegate: zero Gate in AcquireAll")
 		}
-		uniq[g.path] = g
+		uniq[gateKey(g.path)] = g
 	}
 	ordered := make([]Gate, 0, len(uniq))
 	for _, g := range uniq {
 		ordered = append(ordered, g)
 	}
-	sort.Slice(ordered, func(i, j int) bool { return ordered[i].path < ordered[j].path })
+	sort.Slice(ordered, func(i, j int) bool { return gateKey(ordered[i].path) < gateKey(ordered[j].path) })
 
 	perGate := opts
 	if opts.OnWait != nil {
@@ -500,7 +561,10 @@ func (g Gate) ExclusiveHolder() (held bool, info *Info, err error) {
 	if g.path == "" {
 		return false, nil, errors.New("workspacegate: zero Gate")
 	}
-	f, err := os.OpenFile(g.path, os.O_RDWR, 0o600)
+	// O_RDONLY: this is a read-only probe (flock does not require a
+	// writable descriptor), and it widens reach — a gate file owned by
+	// another user with no write permission for us is still probeable.
+	f, err := os.OpenFile(g.path, os.O_RDONLY, 0o600)
 	if err != nil {
 		if os.IsNotExist(err) {
 			// No gate file: nothing has ever gated here.

@@ -3,6 +3,7 @@ package workspacegate
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -32,8 +33,12 @@ func TestMain(m *testing.M) {
 //	hold <gate-parent-dir> <shared|exclusive> — acquire, print ACQUIRED,
 //	    hold until stdin closes, release, print RELEASED.
 //	sleep — sleep long without touching any gate (handle-inheritance probe).
+//	exit — exit immediately, so the caller has a real, now-dead PID (used
+//	    to fabricate a stale holder-info sidecar in tests).
 func helperMain() {
 	switch os.Getenv("WORKSPACEGATE_HELPER") {
+	case "exit":
+		os.Exit(0)
 	case "hold":
 		dir := os.Args[1]
 		mode := Shared
@@ -460,6 +465,110 @@ func TestInfoSidecarDoesNotFollowSymlink(t *testing.T) {
 	}
 	if string(got) != "precious" {
 		t.Fatalf("victim file was modified through the sidecar symlink: %q", got)
+	}
+}
+
+// deadPID returns a real PID that is guaranteed already dead: spawn a
+// trivial helper subprocess and wait for it to exit.
+func deadPID(t *testing.T) int {
+	t.Helper()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	cmd := exec.Command(exe)
+	cmd.Env = append(os.Environ(), "WORKSPACEGATE_HELPER=exit")
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("running exit helper: %v", err)
+	}
+	return cmd.Process.Pid
+}
+
+// writeStaleInfo fabricates a holder-info sidecar naming a known-dead PID,
+// bypassing the normal writeInfo path (which always records the live
+// caller's own PID).
+func writeStaleInfo(t *testing.T, g Gate, pid int) {
+	t.Helper()
+	host, _ := os.Hostname()
+	data, err := json.Marshal(Info{
+		PID:       pid,
+		Hostname:  host,
+		Reason:    "stale test holder",
+		StartedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(g.infoPath(), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// busyDetail must report a sidecar naming a known-dead PID as stale, not
+// as fact, in BOTH Shared and Exclusive modes (2c: the Exclusive branch
+// already qualified against pidAlive; the Shared branch did not).
+func TestBusyDetailStaleHolderBothModes(t *testing.T) {
+	g, _ := testGate(t)
+	pid := deadPID(t)
+
+	// Materialize the gate file so g.path exists (busyDetail only reads
+	// the sidecar, but keep the setup realistic).
+	h := mustAcquire(t, g, Shared, Options{})
+	writeStaleInfo(t, g, pid)
+
+	for _, mode := range []Mode{Shared, Exclusive} {
+		got := g.busyDetail(mode)
+		if !strings.Contains(got, "stale") || !strings.Contains(got, fmt.Sprint(pid)) {
+			t.Errorf("busyDetail(%s) = %q, want it to call out dead pid %d as stale", mode, got, pid)
+		}
+	}
+	_ = h.Release()
+}
+
+// The comparison-key function AcquireAll uses for dedupe/sort must lower
+// on case-insensitive-capable platforms (Windows, macOS) and leave the
+// path untouched elsewhere. Case-variant dedupe itself is hard to test
+// portably (it depends on the actual filesystem's case sensitivity, not
+// just the GOOS), so this exercises the key function directly.
+func TestGateKeyCaseFolding(t *testing.T) {
+	const mixed = "/Some/Mixed/Case/Path.gate.lock"
+	got := gateKey(mixed)
+	switch runtime.GOOS {
+	case "windows", "darwin":
+		if got != strings.ToLower(mixed) {
+			t.Fatalf("gateKey(%q) = %q on %s, want lowercased", mixed, got, runtime.GOOS)
+		}
+	default:
+		if got != mixed {
+			t.Fatalf("gateKey(%q) = %q on %s, want unchanged", mixed, got, runtime.GOOS)
+		}
+	}
+}
+
+// ExclusiveHolder's error return must be distinguishable from "not held":
+// an unreadable gate file (permission denied) is an error, not a false
+// "held=false".
+func TestExclusiveHolderErrorReturn(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores file permissions")
+	}
+	g, _ := testGate(t)
+
+	// Materialize the gate file, then strip all access so opening it
+	// fails with a permission error rather than ENOENT.
+	h := mustAcquire(t, g, Shared, Options{})
+	_ = h.Release()
+	if err := os.Chmod(g.Path(), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(g.Path(), 0o600) })
+
+	held, info, err := g.ExclusiveHolder()
+	if err == nil {
+		t.Fatalf("ExclusiveHolder on an unreadable gate file: held=%v info=%+v err=nil, want a non-nil error", held, info)
+	}
+	if held {
+		t.Fatalf("ExclusiveHolder on an unreadable gate file reported held=true with an error; want held=false alongside the error")
 	}
 }
 
