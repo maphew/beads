@@ -34,10 +34,10 @@ hand-maintaining them.
 
   bd schema | jq '.types.issue'        # the issue record schema
   bd schema | jq '.types.dependency'   # the dependency record schema`,
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		// Raw: the document carries its own schema_version; do not double-wrap
 		// it in the --json envelope.
-		outputJSONRaw(schemaDocument())
+		return outputJSONRaw(schemaDocument())
 	},
 }
 

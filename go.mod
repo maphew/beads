@@ -43,7 +43,6 @@ require (
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cockroachdb/apd/v3 v3.2.3 // indirect
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
-	github.com/mailru/easyjson v0.7.7 // indirect
 	github.com/moby/moby/api v1.54.2 // indirect
 	github.com/moby/moby/client v0.4.0 // indirect
 	github.com/pb33f/ordered-map/v2 v2.3.1 // indirect

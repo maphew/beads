@@ -641,7 +641,6 @@ const TypeEvent IssueType = "event"
 //   - event: set-state audit trail beads (GH#1356)
 // (message was re-promoted to built-in for inter-agent communication — GH#1347.)
 
-// IsValid checks if the issue type is a core work type.
 // AllIssueTypes lists the built-in issue types (excludes TypeEvent and custom
 // types, matching IssueType.IsValid). Single source for IsValid and the
 // `bd schema` enum.
@@ -650,6 +649,7 @@ var AllIssueTypes = []IssueType{
 	TypeMessage, TypeMolecule, TypeGate, TypeSpike, TypeStory, TypeMilestone,
 }
 
+// IsValid checks if the issue type is a core work type.
 // Core work types (bug, feature, task, epic, chore, decision, message, spike, story, milestone)
 // and internal types (molecule, gate) are built-in. Other types require types.custom configuration.
 func (t IssueType) IsValid() bool {
