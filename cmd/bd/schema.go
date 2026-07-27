@@ -25,6 +25,10 @@ import (
 var schemaCmd = &cobra.Command{
 	Use:   "schema",
 	Short: "Print the JSON Schema for bd's --json / export output",
+	// The schema is reflected from static Go types; no store is needed, and
+	// opening one would make this fail outside a workspace (or on a CGO-less
+	// build) for no reason.
+	Annotations: map[string]string{skipStoreAnnotation: "1"},
 	Long: `Print the JSON Schema for bd's canonical output record types.
 
 The schema is reflected from the same Go structs bd serializes, so it stays in
