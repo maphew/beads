@@ -33,9 +33,13 @@ anything that merges on green — includes a prior-art pass over **older open PR
 and issues**:
 
 ```bash
-scripts/pr-preflight.sh --search "<topic keywords>"
-gh search prs --repo gastownhall/beads --state open "<bug keywords>"
+scripts/pr-preflight.sh --search "<topic keywords>"                       # open PRs
+gh search issues --repo gastownhall/beads --state open "<bug keywords>"   # open issues
 ```
+
+(`pr-preflight.sh --search` covers open PRs only, so the issue search is a
+separate command until preflight learns to search both and exclude the PR
+under review.)
 
 The rule at the top of this section always covered implementing, competing, and
 closing; the missing case was *merging*: a newer PR under review can itself be
@@ -53,11 +57,12 @@ When an older open PR covers the same change:
 
 Motivating incident (2026-07-26, #4376 vs #4939): a 44-day-old PR whose author
 had complied with a requested rebase in under 24 hours sat merge-ready for 20
-days while a 5-day-old duplicate was reviewed and auto-merged with zero
-comments ever posted on it. The original author learned their work was dead
-from the retire notice. Both the review of the newer PR and the queue
-follow-through on the older one had the information to prevent this; neither
-used it.
+days while a 5-day-old duplicate was reviewed twice and auto-merged without
+anyone discovering or discussing the older PR. The failure was not absence of
+review — it was that the review never checked for prior art. The original
+author learned their work was dead from the retire notice. Both the review of
+the newer PR and the queue follow-through on the older one had the information
+to prevent this; neither used it.
 
 ## Triage Groups
 
@@ -140,8 +145,11 @@ These rules apply to everyone who can merge — human maintainers and agents ali
 Do not ask a contributor to rebase when that is the only thing left. If the
 review verdict is "correct once rebased," the verdict is **fix-merge**: check
 out the PR branch, rebase and resolve conflicts ourselves, push back to the
-contributor's branch (maintainer edits), and take it to merge — in the same
-session.
+contributor's branch (maintainer edits), and take it to merge. The maintainer
+retains ownership through merge: CI and any required review still run their
+course like any other PR, and if the merge tail outlives the session, leave an
+explicit tracked handoff — what must never happen is the PR falling back into
+the ambient queue with the contributor as the one waiting.
 
 - Ask for a rebase only when bundled with substantive changes that only the
   contributor can make. When they comply, the PR goes straight to merge, not
