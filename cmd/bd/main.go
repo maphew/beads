@@ -1408,6 +1408,11 @@ var rootCmd = &cobra.Command{
 		storeIsReadOnly = doltCfg.ReadOnly
 
 		if err != nil {
+			// A failed factory can return a typed-nil concrete pointer,
+			// which the interface assignment above makes non-nil; the
+			// gate-release cleanup would then call Close on a nil
+			// receiver and panic. No store was opened, so drop it.
+			store = nil
 			// Check for fresh clone scenario
 			if handleFreshCloneError(err) {
 				return SilentExit()
