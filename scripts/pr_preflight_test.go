@@ -41,7 +41,7 @@ const (
             ;;
         esac
       done
-      printf '%s\n' "{\"number\":${PR_NUMBER},\"title\":\"Compatibility fixture\",\"author\":{\"login\":\"contributor\"},\"url\":\"${PR_URL}\",\"baseRefName\":\"main\",\"headRefName\":\"fix/preflight\",\"headRepositoryOwner\":{\"login\":\"contributor\"},\"isCrossRepository\":true,\"isDraft\":false,\"maintainerCanModify\":true,\"mergeStateStatus\":\"CLEAN\",\"mergeable\":\"MERGEABLE\",\"reviewDecision\":\"APPROVED\",\"changedFiles\":1,\"additions\":1,\"deletions\":0,\"files\":[{\"path\":\"README.md\"}],\"statusCheckRollup\":[],\"latestReviews\":[]}"
+      printf '%s\n' "{\"number\":${PR_NUMBER},\"title\":\"Compatibility fixture\",\"author\":{\"login\":\"contributor\"},\"url\":\"${PR_URL}\",\"baseRefName\":\"main\",\"headRefName\":\"fix/preflight\",\"headRepositoryOwner\":{\"login\":\"contributor\"},\"isCrossRepository\":true,\"isDraft\":false,\"maintainerCanModify\":true,\"mergeStateStatus\":\"CLEAN\",\"mergeable\":\"MERGEABLE\",\"reviewDecision\":\"APPROVED\",\"changedFiles\":1,\"additions\":1,\"deletions\":0,\"files\":[{\"path\":\"README.md\"}],\"statusCheckRollup\":${PR_ROLLUP:-[]},\"latestReviews\":[]}"
       ;;
     "run list")
       printf '[]\n'
@@ -68,6 +68,7 @@ type preflightFixture struct {
 	canonicalURL    string
 	graphQLResponse string
 	graphQLExit     string
+	rollup          string
 }
 
 type preflightRun struct {
@@ -260,6 +261,41 @@ func TestPRPreflightFixtureIgnoresHostShellAndGitHubState(t *testing.T) {
 	}
 }
 
+// A head SHA whose earlier check suites were cancelled or failed keeps those
+// stale entries in statusCheckRollup next to the fresh green re-runs of the
+// same checks. GitHub's mergeability is latest-per-name; preflight must be
+// too, or green PRs stay blocked forever (gastownhall/beads#5073-5076).
+func TestPRPreflightChecksUseLatestRunPerName(t *testing.T) {
+	staleGreenRollup := `[` +
+		`{"name":"CI Gate / Required","status":"COMPLETED","conclusion":"FAILURE","completedAt":"2026-07-27T10:00:00Z"},` +
+		`{"name":"CI Gate / Required","status":"COMPLETED","conclusion":"SUCCESS","completedAt":"2026-07-28T10:00:00Z"},` +
+		`{"name":"Test (Proxied 1/2)","status":"COMPLETED","conclusion":"CANCELLED","completedAt":"2026-07-27T09:00:00Z"},` +
+		`{"name":"Test (Proxied 1/2)","status":"COMPLETED","conclusion":"SUCCESS","completedAt":"2026-07-28T09:00:00Z"},` +
+		`{"name":"Lint","status":"COMPLETED","conclusion":"SUCCESS","completedAt":"2026-07-28T08:00:00Z"}` +
+		`]`
+
+	t.Run("stale failures and cancellations are superseded by newer green runs", func(t *testing.T) {
+		run := runPRPreflightWithFakeGH(t, preflightFixture{rollup: staleGreenRollup})
+		if !strings.Contains(run.output, "No failed or pending status checks reported.") {
+			t.Fatalf("expected stale rollup entries to be superseded:\n%s", run.output)
+		}
+		if strings.Contains(run.output, "failed or require action") {
+			t.Fatalf("stale rollup entries still counted as failures:\n%s", run.output)
+		}
+	})
+
+	t.Run("a genuinely failing latest run still blocks", func(t *testing.T) {
+		freshRedRollup := `[` +
+			`{"name":"CI Gate / Required","status":"COMPLETED","conclusion":"SUCCESS","completedAt":"2026-07-27T10:00:00Z"},` +
+			`{"name":"CI Gate / Required","status":"COMPLETED","conclusion":"FAILURE","completedAt":"2026-07-28T10:00:00Z"}` +
+			`]`
+		run := runPRPreflightWithFakeGH(t, preflightFixture{rollup: freshRedRollup})
+		if !strings.Contains(run.output, "1 status check(s) failed or require action.") {
+			t.Fatalf("expected the latest failing run to block:\n%s", run.output)
+		}
+	})
+}
+
 func runPRPreflightWithFakeGH(t *testing.T, fixture preflightFixture) preflightRun {
 	t.Helper()
 
@@ -277,6 +313,9 @@ func runPRPreflightWithFakeGH(t *testing.T, fixture preflightFixture) preflightR
 	}
 	if fixture.graphQLExit == "" {
 		fixture.graphQLExit = "0"
+	}
+	if fixture.rollup == "" {
+		fixture.rollup = "[]"
 	}
 
 	bash, path := prPreflightProcessTools(t)
@@ -319,6 +358,7 @@ func runPRPreflightWithFakeGH(t *testing.T, fixture preflightFixture) preflightR
 		"GRAPHQL_RESPONSE="+fixture.graphQLResponse,
 		"PR_NUMBER="+fixture.returnedNumber,
 		"PR_URL="+fixture.canonicalURL,
+		"PR_ROLLUP="+fixture.rollup,
 	)
 	out, runErr := cmd.CombinedOutput()
 	logBytes, readErr := os.ReadFile(callLog)

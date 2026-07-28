@@ -292,11 +292,22 @@ else
   warn "Could not determine CI health of base branch ${base_ref}; check it manually before merging."
 fi
 
-failed_checks=$(jq '[.statusCheckRollup[]? | select(
+# statusCheckRollup keeps every check run on the head SHA, including runs
+# from cancelled or superseded check suites. A head whose earlier suite was
+# cancelled mid-flight carries stale CANCELLED/FAILURE entries forever, next
+# to the fresh green re-runs of the same checks — GitHub's own mergeability
+# uses latest-per-name, so counting raw entries permanently blocks PRs that
+# GitHub reports CLEAN (observed on gastownhall/beads#5073–5076: 20 stale
+# CANCELLED runs + 1 stale gate FAILURE alongside 80 green checks). Collapse
+# to the most recent entry per check name/context before classifying.
+rollup_latest=$(jq '[.statusCheckRollup[]?]
+  | group_by(.name // .context // "")
+  | map(max_by(.completedAt // .startedAt // .createdAt // ""))' <<<"$json")
+failed_checks=$(jq '[.[] | select(
   ((.conclusion // "") | test("FAILURE|CANCELLED|TIMED_OUT|ACTION_REQUIRED")) or
   ((.state // "") | test("ERROR|FAILURE"))
-)] | length' <<<"$json")
-pending_checks=$(jq '[.statusCheckRollup[]? | select(
+)] | length' <<<"$rollup_latest")
+pending_checks=$(jq '[.[] | select(
   if (.status? // null) != null then
     .status != "COMPLETED"
   elif (.state? // null) != null then
@@ -304,7 +315,7 @@ pending_checks=$(jq '[.statusCheckRollup[]? | select(
   else
     true
   end
-)] | length' <<<"$json")
+)] | length' <<<"$rollup_latest")
 if [[ "$failed_checks" -gt 0 ]]; then
   block "$failed_checks status check(s) failed or require action."
 elif [[ "$pending_checks" -gt 0 ]]; then
