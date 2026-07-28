@@ -300,9 +300,19 @@ fi
 # GitHub reports CLEAN (observed on gastownhall/beads#5073–5076: 20 stale
 # CANCELLED runs + 1 stale gate FAILURE alongside 80 green checks). Collapse
 # to the most recent entry per check name/context before classifying.
-rollup_latest=$(jq '[.statusCheckRollup[]?]
-  | group_by(.name // .context // "")
-  | map(max_by(.completedAt // .startedAt // .createdAt // ""))' <<<"$json")
+# Group key includes __typename and workflowName: a commit status and a
+# check run sharing a name are independent gates (GitHub requires both),
+# and identically named jobs in different workflows must not collapse into
+# one entry where a green run could mask the other workflow's red one.
+# gh exports absent CheckRun times as the zero time (0001-01-01...), so
+# normalize before comparing or the // fallback never fires; "latest" is
+# the max of completed/started/created so a fresh in-progress rerun beats
+# an old completed failure (and is then reported as pending, not failed).
+rollup_latest=$(jq '
+  def nz: (. // "") | if startswith("0001-") then "" else . end;
+  [.statusCheckRollup[]?]
+  | group_by([(.__typename // ""), (.workflowName // ""), (.name // .context // "")])
+  | map(max_by([(.completedAt | nz), (.startedAt | nz), (.createdAt | nz)] | max))' <<<"$json")
 failed_checks=$(jq '[.[] | select(
   ((.conclusion // "") | test("FAILURE|CANCELLED|TIMED_OUT|ACTION_REQUIRED")) or
   ((.state // "") | test("ERROR|FAILURE"))

@@ -294,6 +294,42 @@ func TestPRPreflightChecksUseLatestRunPerName(t *testing.T) {
 			t.Fatalf("expected the latest failing run to block:\n%s", run.output)
 		}
 	})
+
+	t.Run("a commit status cannot supersede a same-named check run", func(t *testing.T) {
+		// GitHub treats a check run and a commit status sharing a name as
+		// independent required gates; both must pass.
+		mixedRollup := `[` +
+			`{"__typename":"CheckRun","name":"build","status":"COMPLETED","conclusion":"FAILURE","completedAt":"2026-07-28T10:00:00Z"},` +
+			`{"__typename":"StatusContext","context":"build","state":"SUCCESS","startedAt":"2026-07-28T11:00:00Z"}` +
+			`]`
+		run := runPRPreflightWithFakeGH(t, preflightFixture{rollup: mixedRollup})
+		if !strings.Contains(run.output, "1 status check(s) failed or require action.") {
+			t.Fatalf("expected the failing check run to block despite the same-named commit status:\n%s", run.output)
+		}
+	})
+
+	t.Run("identically named jobs in different workflows stay independent", func(t *testing.T) {
+		crossWorkflowRollup := `[` +
+			`{"__typename":"CheckRun","workflowName":"Main","name":"Test","status":"COMPLETED","conclusion":"FAILURE","completedAt":"2026-07-28T10:00:00Z"},` +
+			`{"__typename":"CheckRun","workflowName":"Nightly","name":"Test","status":"COMPLETED","conclusion":"SUCCESS","completedAt":"2026-07-28T11:00:00Z"}` +
+			`]`
+		run := runPRPreflightWithFakeGH(t, preflightFixture{rollup: crossWorkflowRollup})
+		if !strings.Contains(run.output, "1 status check(s) failed or require action.") {
+			t.Fatalf("expected the other workflow's red job to keep blocking:\n%s", run.output)
+		}
+	})
+
+	t.Run("an in-progress rerun with a zero completion time supersedes an old failure as pending", func(t *testing.T) {
+		// gh exports absent CheckRun times as the Go zero time, not null.
+		rerunRollup := `[` +
+			`{"__typename":"CheckRun","workflowName":"Main","name":"CI","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-07-27T09:00:00Z","completedAt":"2026-07-27T10:00:00Z"},` +
+			`{"__typename":"CheckRun","workflowName":"Main","name":"CI","status":"IN_PROGRESS","conclusion":"","startedAt":"2026-07-28T12:00:00Z","completedAt":"0001-01-01T00:00:00Z"}` +
+			`]`
+		run := runPRPreflightWithFakeGH(t, preflightFixture{rollup: rerunRollup})
+		if !strings.Contains(run.output, "1 status check(s) are still pending.") {
+			t.Fatalf("expected the fresh rerun to classify as pending, not stale failure:\n%s", run.output)
+		}
+	})
 }
 
 func runPRPreflightWithFakeGH(t *testing.T, fixture preflightFixture) preflightRun {
