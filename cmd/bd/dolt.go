@@ -562,7 +562,13 @@ For Hosted Dolt, set DOLT_REMOTE_USER and DOLT_REMOTE_PASSWORD environment
 variables for authentication.
 
 Use --remote to pull from a specific named remote instead of the default.
-The remote must already exist (see 'bd dolt remote add').`,
+The remote must already exist (see 'bd dolt remote add').
+
+Use --strategy ours|theirs to resolve conflicts the auto-resolver declines
+(e.g. both sides edited the same issue since the last sync) instead of
+aborting the pull for manual resolution. Embedded storage only (#4992); on
+server-mode/sql-server storage use 'bd conflicts resolve' after a pull that
+reports conflicts.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if isDoltLocalOnly() {
 			if jsonOutput {
@@ -582,9 +588,29 @@ The remote must already exist (see 'bd dolt remote add').`,
 			return HandleError("no store available")
 		}
 		remote, _ := cmd.Flags().GetString("remote")
+		strategy, _ := cmd.Flags().GetString("strategy")
+		if strategy != "" {
+			if err := versioncontrolops.ValidateConflictStrategy(strategy); err != nil {
+				return HandleError("%v", err)
+			}
+		}
+		var puller storage.StrategicPuller
+		if strategy != "" {
+			var ok bool
+			puller, ok = storage.UnwrapStore(st).(storage.StrategicPuller)
+			if !ok {
+				return HandleError("storage backend %T does not support --strategy pulls (#4992): only embedded storage does; on server-mode/sql-server storage, resolve conflicts with 'bd conflicts resolve' or the raw dolt CLI", storage.UnwrapStore(st))
+			}
+		}
 		if remote != "" {
 			fmt.Printf("Pulling from Dolt remote %q...\n", remote)
-			if err := st.PullRemote(ctx, remote); err != nil {
+			var err error
+			if strategy != "" {
+				err = puller.PullRemoteWithStrategy(ctx, remote, strategy)
+			} else {
+				err = st.PullRemote(ctx, remote)
+			}
+			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				if isRemoteNotFoundErr(err) {
 					fmt.Fprintf(os.Stderr, "\nRemote %q is not configured.\n", remote)
@@ -601,7 +627,13 @@ The remote must already exist (see 'bd dolt remote add').`,
 			return nil
 		}
 		fmt.Println("Pulling from Dolt remote...")
-		if err := st.Pull(ctx); err != nil {
+		var err error
+		if strategy != "" {
+			err = puller.PullWithStrategy(ctx, strategy)
+		} else {
+			err = st.Pull(ctx)
+		}
+		if err != nil {
 			if isConfirmedNoRemote(ctx, st, err) {
 				printNoRemoteGuidance()
 				return nil
@@ -1682,6 +1714,7 @@ func init() {
 	doltPushCmd.Flags().Bool("force", false, "Force push (overwrite remote changes)")
 	doltPushCmd.Flags().String("remote", "", "Push to a specific named remote instead of the default")
 	doltPullCmd.Flags().String("remote", "", "Pull from a specific named remote instead of the default")
+	doltPullCmd.Flags().String("strategy", "", "Conflict resolution strategy for conflicts the auto-resolver declines: 'ours' or 'theirs' (embedded storage only, #4992)")
 	doltCommitCmd.Flags().StringP("message", "m", "", "Commit message (default: auto-generated)")
 	doltCleanDatabasesCmd.Flags().Bool("dry-run", false, "Show what would be dropped without dropping")
 	doltCleanDatabasesCmd.Flags().Bool("purge-dropped", false, "After dropping, also run CALL DOLT_PURGE_DROPPED_DATABASES() — server-global and irreversible, see --help")
