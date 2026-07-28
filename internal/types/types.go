@@ -56,6 +56,15 @@ type Issue struct {
 	// below (json:"-", never serialized).
 	LeaseExpiresAt *time.Time `json:"lease_expires_at,omitempty"` // When the current claim's lease expires
 	HeartbeatAt    *time.Time `json:"heartbeat_at,omitempty"`     // Last heartbeat from the lease owner
+	// LeaseGrantedNode names the replica that granted the lease
+	// (config.NodeID() at claim time). A lease is only enforceable there: on
+	// any other replica the liveness view is stale by up to one sync interval,
+	// so reclaim refuses a positively-foreign lease unless explicitly
+	// overridden. Empty means "provenance unknown" (a pre-0016 lease row, or a
+	// deployment that cannot name its replicas), which is treated as local.
+	// It rides the JSONL interchange so an imported lease keeps its true
+	// granting replica.
+	LeaseGrantedNode string `json:"lease_granted_node,omitempty"`
 
 	// ===== Concurrency (Go-only; never serialized) =====
 	// RowVersion is an opaque optimistic-concurrency token for the library's own
@@ -144,6 +153,14 @@ type Issue struct {
 	Actor     string `json:"actor,omitempty"`      // Entity URI who caused this event
 	Target    string `json:"target,omitempty"`     // Entity URI or bead ID affected
 	Payload   string `json:"payload,omitempty"`    // Event-specific JSON data
+
+	// ===== Internal Hydration Flags (not serialized) =====
+	// IsLitePartial is set to true when this Issue was produced by a lite SELECT
+	// (see issueops.ScanIssueLiteFrom). When true, the heavy text columns
+	// (Description, Design, AcceptanceCriteria, Notes, Payload, Waiters) were not
+	// hydrated and remain zero-valued. Callers that need the full body must call
+	// store.GetIssue(ctx, id) to refetch. Internal-only — never on the wire.
+	IsLitePartial bool `json:"-"`
 }
 
 // ComputeContentHash creates a deterministic hash of the issue's content.
@@ -403,13 +420,17 @@ const (
 	StatusHooked     Status = "hooked" // Work actively claimed by a worker
 )
 
+// AllStatuses lists the built-in issue statuses (excludes custom statuses). It
+// is the single source consulted by Status.IsValid and the `bd schema` enum, so
+// adding a status here surfaces it in both validation and the published schema.
+var AllStatuses = []Status{
+	StatusOpen, StatusInProgress, StatusBlocked, StatusDeferred,
+	StatusClosed, StatusPinned, StatusHooked,
+}
+
 // IsValid checks if the status value is valid (built-in statuses only)
 func (s Status) IsValid() bool {
-	switch s {
-	case StatusOpen, StatusInProgress, StatusBlocked, StatusDeferred, StatusClosed, StatusPinned, StatusHooked:
-		return true
-	}
-	return false
+	return slices.Contains(AllStatuses, s)
 }
 
 // IsValidWithCustom checks if the status is valid, including custom statuses.
@@ -620,16 +641,19 @@ const TypeEvent IssueType = "event"
 //   - event: set-state audit trail beads (GH#1356)
 // (message was re-promoted to built-in for inter-agent communication — GH#1347.)
 
+// AllIssueTypes lists the built-in issue types (excludes TypeEvent and custom
+// types, matching IssueType.IsValid). Single source for IsValid and the
+// `bd schema` enum.
+var AllIssueTypes = []IssueType{
+	TypeBug, TypeFeature, TypeTask, TypeEpic, TypeChore, TypeDecision,
+	TypeMessage, TypeMolecule, TypeGate, TypeSpike, TypeStory, TypeMilestone,
+}
+
 // IsValid checks if the issue type is a core work type.
 // Core work types (bug, feature, task, epic, chore, decision, message, spike, story, milestone)
 // and internal types (molecule, gate) are built-in. Other types require types.custom configuration.
 func (t IssueType) IsValid() bool {
-	switch t {
-	case TypeBug, TypeFeature, TypeTask, TypeEpic, TypeChore, TypeDecision, TypeMessage, TypeMolecule,
-		TypeGate, TypeSpike, TypeStory, TypeMilestone:
-		return true
-	}
-	return false
+	return slices.Contains(AllIssueTypes, t)
 }
 
 // IsBuiltIn returns true for core work types and system-internal types
@@ -872,6 +896,14 @@ type IssueDetails struct {
 	DependencyCount *int64 `json:"dependency_count,omitempty"`
 	CommentCount    *int64 `json:"comment_count,omitempty"`
 
+	// CommentsOmitted is set true only when CommentCount is nonzero AND
+	// Comments was left nil (count-only mode, no --include-comments). Without
+	// it, a positive CommentCount with no Comments key reads as a client bug,
+	// and a caller checking only `.comments` sees `null`/absent and concludes
+	// "no comments" — both wrong (ga-clgh). Never set alongside a populated
+	// Comments slice or a zero count: a true empty stays plain omission.
+	CommentsOmitted *bool `json:"comments_omitted,omitempty"`
+
 	// Epic progress fields (populated only for issue_type=epic with children)
 	EpicTotalChildren  *int  `json:"epic_total_children,omitempty"`
 	EpicClosedChildren *int  `json:"epic_closed_children,omitempty"`
@@ -916,6 +948,19 @@ const (
 	// Delegation types (work delegation chains)
 	DepDelegatedFrom DependencyType = "delegated-from" // Work delegated from parent; completion cascades up
 )
+
+// AllDependencyTypes lists the built-in dependency types, in declaration order.
+// Single source for the `bd schema` enum so the published schema enumerates
+// exactly the types bd recognizes.
+var AllDependencyTypes = []DependencyType{
+	DepBlocks, DepParentChild, DepConditionalBlocks, DepWaitsFor,
+	DepRelated, DepDiscoveredFrom,
+	DepRepliesTo, DepRelatesTo, DepDuplicates, DepSupersedes,
+	DepAuthoredBy, DepAssignedTo, DepApprovedBy, DepAttests,
+	DepTracks,
+	DepUntil, DepCausedBy, DepValidates,
+	DepDelegatedFrom,
+}
 
 // IsValid checks if the dependency type value is valid.
 // Accepts any non-empty string up to 50 characters.
@@ -967,6 +1012,16 @@ type WaitsForMeta struct {
 	// SpawnerID identifies which step/issue spawns the children to wait for.
 	// If empty, waits for all direct children of the depends_on_id issue.
 	SpawnerID string `json:"spawner_id,omitempty"`
+	// AlsoBlocks marks a waits-for edge that was collapsed from a redundant
+	// depends_on/needs blocks edge onto the same spawner (GH#3783): the
+	// caller skipped emitting a separate DepBlocks edge because it collided
+	// with this DepWaitsFor edge, so this edge must additionally carry
+	// classic blocking semantics — it blocks while the spawner itself is
+	// open, not only while the spawner has an open child. Omitted (and thus
+	// COALESCEd to false by readers) for a plain waits_for with no matching
+	// needs/depends_on entry, which must retain the original fanout-only
+	// semantics.
+	AlsoBlocks bool `json:"also_blocks,omitempty"`
 }
 
 // WaitsForGate constants
@@ -1024,6 +1079,32 @@ func NewGraphEdgeDependency(fromID, toID string, depType DependencyType, gate, s
 // cannot drift.
 func NewWaitsForDependency(issueID, spawnerID, gate string) (*Dependency, error) {
 	return NewGraphEdgeDependency(issueID, spawnerID, DepWaitsFor, gate, "", "", "", nil)
+}
+
+// NewWaitsForBlockingDependency builds a waits-for dependency that also
+// carries classic blocking semantics (GH#3783): set also_blocks in the
+// metadata so waitsForGateBlockedSQL additionally blocks while the spawner
+// itself is open, not only while it has an open parent-child child. Use this
+// instead of NewWaitsForDependency exactly when the caller is collapsing a
+// would-be DepBlocks edge (from needs/depends_on) into this waits-for edge
+// because the two would otherwise collide on the same (source, target) pair
+// — never for a plain waits_for with no matching needs/depends_on entry.
+func NewWaitsForBlockingDependency(issueID, spawnerID, gate string) (*Dependency, error) {
+	dep, err := NewWaitsForDependency(issueID, spawnerID, gate)
+	if err != nil {
+		return nil, err
+	}
+	var meta WaitsForMeta
+	if err := json.Unmarshal([]byte(dep.Metadata), &meta); err != nil {
+		return nil, fmt.Errorf("parsing waits-for metadata to set also_blocks: %w", err)
+	}
+	meta.AlsoBlocks = true
+	raw, err := json.Marshal(meta)
+	if err != nil {
+		return nil, fmt.Errorf("serializing waits-for also_blocks metadata: %w", err)
+	}
+	dep.Metadata = string(raw)
+	return dep, nil
 }
 
 // NewGraphNodeDependency builds the dependency record for a graph-plan node's
@@ -1535,6 +1616,21 @@ type IssueFilter struct {
 	// Expected values: "--max-rows", "BEADS_MAX_ROWS", or "" (library users
 	// who set MaxRows directly without source attribution).
 	MaxRowsSource string
+
+	// Lite, when true, switches the SELECT shape to issueops.IssueSelectColumnsLite,
+	// which omits heavy TEXT columns (description, design, acceptance_criteria, notes,
+	// payload, waiters). Returned issues carry IsLitePartial=true; their heavy fields
+	// are zero-valued. WHERE-clause filters that reference heavy columns
+	// (DescriptionContains, NotesContains, EmptyDescription) keep working — they
+	// reference columns in WHERE regardless of SELECT shape. Default false preserves
+	// today's behavior at every call site.
+	//
+	// Backend coverage: honored by the issueops-backed stores (Dolt, embedded
+	// Dolt). The proxied-server (domain/db) path does not check this field yet
+	// and always returns fully-hydrated issues with IsLitePartial=false —
+	// correct results, no lite optimization. Wiring Lite through domain/db is
+	// deferred to the CLI-wiring follow-up. See engdocs/EXTENDING.md.
+	Lite bool
 }
 
 // SortPolicy determines how ready work is ordered
@@ -1590,10 +1686,21 @@ type ReclaimFilter struct {
 	Labels        []string // AND semantics: issue must have ALL these labels
 	LabelsAny     []string // OR semantics: issue must have AT LEAST ONE of these labels
 	ExcludeLabels []string // Exclusion: issue must NOT have ANY of these labels
+
+	// AnyReplica is the one field here that WIDENS rather than narrows: it
+	// disarms the granting-replica guard, letting this reaper revert a lease
+	// another replica granted (see issueops.ReclaimExpiredLeasesInTx). It is
+	// an operator escape hatch for a permanently-departed replica or a
+	// renamed node, never a normal setting — the machine that granted a lease
+	// is the only one with a first-hand view of whether its holder is alive.
+	// It does NOT widen past staleness or past the scope fields above.
+	AnyReplica bool
 }
 
 // IsEmpty reports whether the filter constrains nothing, i.e. reclaim runs in
-// its global, unscoped form.
+// its global, unscoped form. AnyReplica is deliberately excluded: it is an
+// override, not a scope, so a reaper reporting "scoped" still means "narrowed
+// to a partition".
 func (f ReclaimFilter) IsEmpty() bool {
 	return len(f.IDs) == 0 && len(f.Assignees) == 0 &&
 		len(f.Labels) == 0 && len(f.LabelsAny) == 0 && len(f.ExcludeLabels) == 0
@@ -1601,7 +1708,12 @@ func (f ReclaimFilter) IsEmpty() bool {
 
 // WorkFilter is used to filter ready work queries
 type WorkFilter struct {
-	Status        Status
+	Status Status
+	// Statuses filters to any of the given statuses (OR semantics) in a
+	// single query, so multi-status callers avoid one GetReadyWork round
+	// trip per status. Ignored when Status is set; when both are empty the
+	// legacy default of ('open', 'in_progress') applies.
+	Statuses      []Status
 	Type          string // Filter by issue type (task, bug, feature, epic, merge-request, etc.)
 	Priority      *int
 	Assignee      *string
