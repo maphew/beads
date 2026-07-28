@@ -110,11 +110,20 @@ func envWithout(env []string, name string) []string {
 	return out
 }
 
+// isEmbeddedLockOutput recognizes every "another process holds the lock"
+// outcome for concurrent bd commands against the same embedded workspace:
+// the embedded Dolt flock's own messages, and the workspacegate EXCLUSIVE
+// contention message (workspacegate.ErrBusy = "workspace gate busy"). The
+// gate is acquired BEFORE the embedded flock is ever attempted, so a losing
+// concurrent `bd init` today reports gate contention rather than a flock
+// error — both are the same class of outcome from the caller's point of
+// view: another bd process holds the lock, retry later.
 func isEmbeddedLockOutput(out string) bool {
 	out = strings.ToLower(out)
 	return strings.Contains(out, "one writer at a time") ||
 		strings.Contains(out, "database is locked") ||
-		strings.Contains(out, "locked by another dolt process")
+		strings.Contains(out, "locked by another dolt process") ||
+		strings.Contains(out, "workspace gate busy")
 }
 
 func runCommandBuffers(t *testing.T, cmd *exec.Cmd) (stdout, stderr bytes.Buffer, err error) {
@@ -1863,8 +1872,14 @@ func TestEmbeddedInit(t *testing.T) {
 	})
 }
 
-// TestEmbeddedInitConcurrent verifies the exclusive flock prevents concurrent
-// writers. Exactly one process should succeed; the rest get the lock error.
+// TestEmbeddedInitConcurrent verifies concurrent `bd init` writers are
+// serialized rather than corrupting the workspace. The EXCLUSIVE workspace
+// gate (see acquireExclusiveWorkspaceGates in cmd/bd/init.go) is acquired
+// before the embedded Dolt flock is ever attempted, so contention here
+// normally surfaces as gate-busy output rather than a flock error; either is
+// classified by isEmbeddedLockOutput as the same "another process holds the
+// lock" outcome. At least one process must succeed and at least one must
+// see a lock/gate-busy outcome; unexpected errors still fail the test.
 func TestEmbeddedInitConcurrent(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt init tests")
@@ -1963,5 +1978,46 @@ func TestEmbeddedInitConcurrent(t *testing.T) {
 		if !strings.Contains(logOut, "schema: apply migrations") {
 			t.Errorf("missing 'schema: apply migrations' commit:\n%s", logOut)
 		}
+	}
+}
+
+// TestInitGateBusyClassifiedAsLockContention pins the fix for
+// TestEmbeddedInitConcurrent's regression: a losing concurrent `bd init`
+// that fails because another process holds the workspace gate EXCLUSIVELY
+// (rather than hitting the embedded Dolt flock, which the gate now
+// short-circuits before it is ever attempted) must still be classified as
+// lock contention by isEmbeddedLockOutput, not as an unexpected failure.
+// Deterministic and fast: it holds the gate in-process instead of racing
+// subprocesses against a wall-clock deadline, so unlike
+// TestEmbeddedInitConcurrent it does not depend on the winner's init being
+// slow enough to exhaust another process's wait budget.
+func TestInitGateBusyClassifiedAsLockContention(t *testing.T) {
+	resetGateTestEnv(t)
+	t.Cleanup(releaseWorkspaceGates)
+	beadsDir := newGateTestWorkspace(t)
+
+	oldWait := exclusiveGateWait
+	exclusiveGateWait = 10 * time.Millisecond
+	t.Cleanup(func() { exclusiveGateWait = oldWait })
+
+	// Simulate the winner: hold the workspace gate EXCLUSIVELY for the
+	// duration of its init, exactly as cmd/bd/init.go does.
+	winner, err := acquireExclusiveWorkspaceGates(context.Background(), beadsDir, "test winner init")
+	if err != nil {
+		t.Fatalf("winner acquisition: %v", err)
+	}
+	defer func() { _ = winner.Release() }()
+
+	// Simulate the loser: bd init's own acquisition call, and its own
+	// error-wrapping (cmd/bd/init.go: "bd init refuses to run over live bd
+	// activity on this workspace: %w").
+	_, gateErr := acquireExclusiveWorkspaceGates(context.Background(), beadsDir, "bd init")
+	if gateErr == nil {
+		t.Fatal("loser acquisition under a live exclusive holder must fail")
+	}
+	loserOutput := fmt.Errorf("bd init refuses to run over live bd activity on this workspace: %w", gateErr).Error()
+
+	if !isEmbeddedLockOutput(loserOutput) {
+		t.Fatalf("gate-busy loser output not classified as lock contention: %q", loserOutput)
 	}
 }

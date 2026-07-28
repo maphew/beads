@@ -155,6 +155,20 @@ func TestChokepointSharedExcludesMigrateExclusive(t *testing.T) {
 	t.Cleanup(releaseWorkspaceGates)
 	beadsDir := newGateTestWorkspace(t)
 
+	// rootCtx is a package global that production sets via
+	// setupGracefulShutdown() in PersistentPreRunE and cancels via
+	// rootCancel() in PersistentPostRunE WITHOUT resetting the var to nil —
+	// harmless in production (the process exits), but any earlier in-process
+	// test that exercises the full command path (Execute()) leaves rootCtx
+	// pointing at an already-canceled context for whatever test runs next in
+	// the same binary. acquireMigrateGates now threads rootCtx through to
+	// acquireExclusiveWorkspaceGates, so this test is sensitive to that
+	// leak: pin it to nil (the documented "no process signal context yet"
+	// case this test exercises) regardless of what ran before it.
+	oldRootCtx := rootCtx
+	rootCtx = nil
+	t.Cleanup(func() { rootCtx = oldRootCtx })
+
 	oldWait := exclusiveGateWait
 	exclusiveGateWait = 10 * time.Millisecond
 	t.Cleanup(func() { exclusiveGateWait = oldWait })

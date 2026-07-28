@@ -137,14 +137,20 @@ func commandNeedsExclusiveGate(cmd *cobra.Command) bool {
 // as the source's). Roots whose parent directory does not exist are skipped:
 // workspacegate needs the gate file's parent, and a root whose parent is
 // absent cannot be holding data anyone could clobber.
-func buildWorkspaceGateSet(beadsDir string, extraRoots ...string) ([]workspacegate.Gate, doltserver.PhysicalRoots, error) {
+//
+// The resolver's PhysicalRoots provenance is deliberately NOT returned: both
+// callers discard it today, and the code comments at each call site already
+// explain that provenance is intentionally not surfaced in user-facing
+// errors (it names which directory got gated, not who holds it — the gate's
+// own busy detail already names the holder).
+func buildWorkspaceGateSet(beadsDir string, extraRoots ...string) ([]workspacegate.Gate, error) {
 	pr, err := doltserver.ResolvePhysicalRoots(beadsDir)
 	if err != nil {
-		return nil, doltserver.PhysicalRoots{}, err
+		return nil, err
 	}
 	wsGate, err := workspacegate.ForWorkspace(pr.BeadsDir)
 	if err != nil {
-		return nil, pr, err
+		return nil, err
 	}
 	gates := []workspacegate.Gate{wsGate}
 	roots := append(append([]string{}, pr.Roots...), extraRoots...)
@@ -154,11 +160,11 @@ func buildWorkspaceGateSet(beadsDir string, extraRoots ...string) ([]workspacega
 		}
 		g, gerr := workspacegate.ForPhysicalRoot(root)
 		if gerr != nil {
-			return nil, pr, gerr
+			return nil, gerr
 		}
 		gates = append(gates, g)
 	}
-	return gates, pr, nil
+	return gates, nil
 }
 
 // acquireCommandWorkspaceGates is the chokepoint acquisition for
@@ -175,10 +181,7 @@ func acquireCommandWorkspaceGates(ctx context.Context, cmd *cobra.Command, beads
 		return nil
 	}
 
-	// The resolved PhysicalRoots provenance is deliberately NOT quoted in
-	// user-facing errors below: it explains which directory got gated, not
-	// who holds it, and the gate's own busy detail already names the holder.
-	gates, _, err := buildWorkspaceGateSet(beadsDir)
+	gates, err := buildWorkspaceGateSet(beadsDir)
 	if err != nil {
 		if exclusive {
 			return HandleErrorRespectJSON("workspace gate: %v", err)
@@ -257,7 +260,7 @@ func acquireExclusiveWorkspaceGates(ctx context.Context, beadsDir, reason string
 	var gates []workspacegate.Gate
 	if _, err := os.Stat(beadsDir); err == nil {
 		var gerr error
-		gates, _, gerr = buildWorkspaceGateSet(beadsDir, extraRoots...)
+		gates, gerr = buildWorkspaceGateSet(beadsDir, extraRoots...)
 		if gerr != nil {
 			return nil, gerr
 		}
