@@ -600,6 +600,44 @@ func TestCLI_DepAdd(t *testing.T) {
 	}
 }
 
+// TestCLI_DepAdd_TypeBlockedByAliasGates is the regression test for GH#5069:
+// `bd dep add A B --type blocked-by` used to store the literal custom type
+// "blocked-by" instead of normalizing it to the canonical "blocks" type, so
+// the dependency was displayed everywhere but silently never gated `bd
+// ready`/`bd blocked`. Assert the alias now gates exactly like the default
+// (canonical) type does.
+func TestCLI_DepAdd_TypeBlockedByAliasGates(t *testing.T) {
+	// Note: Not using t.Parallel() because inProcessMutex serializes execution anyway
+	tmpDir := setupCLITestDB(t)
+
+	out1 := runBDInProcess(t, tmpDir, "create", "Blocker", "-p", "1", "--json")
+	out2 := runBDInProcess(t, tmpDir, "create", "Blocked", "-p", "1", "--json")
+
+	var issue1, issue2 map[string]interface{}
+	json.Unmarshal([]byte(out1), &issue1)
+	json.Unmarshal([]byte(out2), &issue2)
+
+	blockerID := issue1["id"].(string)
+	blockedID := issue2["id"].(string)
+
+	// blockedID depends on (is blocked by) blockerID, using the --type
+	// blocked-by alias rather than the default "blocks" type.
+	out := runBDInProcess(t, tmpDir, "dep", "add", blockedID, blockerID, "--type", "blocked-by")
+	if !strings.Contains(out, "Added dependency") {
+		t.Fatalf("Expected 'Added dependency', got: %s", out)
+	}
+
+	blockedOut := runBDInProcess(t, tmpDir, "blocked")
+	if !strings.Contains(blockedOut, "Blocked") {
+		t.Errorf("Expected 'Blocked' issue in `bd blocked` output after --type blocked-by dep, got: %s", blockedOut)
+	}
+
+	readyOut := runBDInProcess(t, tmpDir, "ready")
+	if strings.Contains(readyOut, "Blocked") {
+		t.Errorf("Expected blocked issue to be excluded from `bd ready` after --type blocked-by dep, got: %s", readyOut)
+	}
+}
+
 func TestCLI_DepRemove(t *testing.T) {
 	// Note: Not using t.Parallel() because inProcessMutex serializes execution anyway
 	tmpDir := setupCLITestDB(t)

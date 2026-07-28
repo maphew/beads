@@ -40,26 +40,54 @@ func parseDepSpec(raw string) (domain.DependencySpec, error) {
 	rawType := types.DependencyType(strings.TrimSpace(parts[0]))
 	target := strings.TrimSpace(parts[1])
 
-	spec := domain.DependencySpec{TargetID: target}
-	switch rawType {
-	case "depends-on", "blocked-by":
-		spec.Type = types.DepBlocks
-	case types.DepBlocks:
-		spec.Type = types.DepBlocks
+	spec := domain.DependencySpec{TargetID: target, Type: canonicalDependencyType(rawType)}
+	if rawType == types.DepBlocks {
+		// Explicit "blocks:" (as opposed to the "depends-on"/"blocked-by"
+		// aliases, which keep direction) reverses direction: the target
+		// depends on the issue being created, not the other way around.
 		spec.SwapDirection = true
-	default:
-		spec.Type = rawType
 	}
 
-	if !spec.Type.IsValid() {
-		return domain.DependencySpec{}, fmt.Errorf("invalid dependency type %q (must be non-empty, max 50 chars); valid types: %s",
-			spec.Type, createDepsAcceptedTypeList())
-	}
-	if !spec.Type.IsWellKnown() {
-		return domain.DependencySpec{}, fmt.Errorf("unknown dependency type %q; valid types: %s",
-			spec.Type, createDepsAcceptedTypeList())
+	if err := validateDependencyType(spec.Type); err != nil {
+		return domain.DependencySpec{}, err
 	}
 	return spec, nil
+}
+
+// canonicalDependencyType maps the documented alias spellings "depends-on"
+// and "blocked-by" to the canonical "blocks" storage type that ready/blocked
+// gating checks (types.DependencyType.AffectsReadyWork). Both `bd create
+// --deps` and `bd dep add --type` share this mapping so an alias always
+// gates the same way as the canonical type — see GH#5069, where `bd dep add
+// --type blocked-by` stored the literal string "blocked-by" and silently
+// never gated `bd ready`/`bd blocked`, even though `--help` itself documents
+// "blocked-by" as the flag name. Any other value (including well-known types
+// like "parent-child" and custom types) passes through unchanged.
+func canonicalDependencyType(t types.DependencyType) types.DependencyType {
+	switch t {
+	case "depends-on", "blocked-by":
+		return types.DepBlocks
+	default:
+		return t
+	}
+}
+
+// validateDependencyType enforces that a (post-alias-normalization)
+// dependency type is both structurally valid and one of the well-known
+// built-in types. `bd create --deps` and `bd dep add --type` intentionally
+// reject custom/unknown dependency types (see the comment on
+// WellKnownDependencyTypes) — this is the single shared check so both
+// commands stay in lockstep.
+func validateDependencyType(t types.DependencyType) error {
+	if !t.IsValid() {
+		return fmt.Errorf("invalid dependency type %q (must be non-empty, max 50 chars); valid types: %s",
+			t, createDepsAcceptedTypeList())
+	}
+	if !t.IsWellKnown() {
+		return fmt.Errorf("unknown dependency type %q; valid types: %s",
+			t, createDepsAcceptedTypeList())
+	}
+	return nil
 }
 
 // buildWaitsFor validates and constructs a WaitsForSpec from the --waits-for
