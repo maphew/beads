@@ -1548,7 +1548,7 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	}
 
 	// Server mode: connect via MySQL protocol to dolt sql-server
-	db, connStr, err := openServerConnection(ctx, cfg)
+	db, connStr, createdDatabase, err := openServerConnection(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -1604,7 +1604,7 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	// ReadOnly for schema — the forward-drift guard above still protects a stale client
 	// binary.
 	if !cfg.ReadOnly && !cfg.Gateway {
-		if err := store.initSchema(ctx); err != nil {
+		if err := store.initSchema(ctx, createdDatabase); err != nil {
 			return nil, fmt.Errorf("failed to initialize schema: %w", err)
 		}
 	}
@@ -1894,13 +1894,17 @@ func applyPoolLimits(db *sql.DB, cfg *Config) {
 	db.SetConnMaxIdleTime(idle)
 }
 
-// openServerConnection opens a connection to a dolt sql-server via MySQL protocol
-func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, error) {
+// openServerConnection opens a connection to a dolt sql-server via MySQL
+// protocol. The returned bool reports whether THIS call created the target
+// database (see the bare-CREATE ownership arbitration below) — server-mode's
+// analog of the uow path's `created` signal (#5042), threaded through to
+// initSchema so only the proven creator arms schema.WithFreshBootstrapHeal.
+func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, bool, error) {
 	connStr := buildServerDSN(cfg, cfg.Database)
 
 	db, err := sql.Open("mysql", connStr)
 	if err != nil {
-		return nil, "", fmt.Errorf("failed to open Dolt server connection: %w", err)
+		return nil, "", false, fmt.Errorf("failed to open Dolt server connection: %w", err)
 	}
 
 	// Configure the pool. *sql.DB is safe for concurrent use and manages its
@@ -1925,11 +1929,11 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, er
 	// above would close the *sql.DB we just handed the caller.
 	if cfg.Gateway {
 		if err := db.PingContext(ctx); err != nil {
-			return nil, "", fmt.Errorf("failed to connect to gateway server %s:%d (database %q): %w",
+			return nil, "", false, fmt.Errorf("failed to connect to gateway server %s:%d (database %q): %w",
 				cfg.ServerHost, cfg.ServerPort, cfg.Database, err)
 		}
 		connReady = true
-		return db, connStr, nil
+		return db, connStr, false, nil
 	}
 
 	// Ensure database exists (may need to create it)
@@ -1937,13 +1941,13 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, er
 	initConnStr := buildServerDSN(cfg, "")
 	initDB, err := sql.Open("mysql", initConnStr)
 	if err != nil {
-		return nil, "", fmt.Errorf("failed to open init connection: %w", err)
+		return nil, "", false, fmt.Errorf("failed to open init connection: %w", err)
 	}
 	defer func() { _ = initDB.Close() }()
 
 	// Validate database name to prevent SQL injection via backtick escaping
 	if err := ValidateDatabaseName(cfg.Database); err != nil {
-		return nil, "", fmt.Errorf("invalid database name %q: %w", cfg.Database, err)
+		return nil, "", false, fmt.Errorf("invalid database name %q: %w", cfg.Database, err)
 	}
 
 	// FIREWALL: Never create test databases on the production server.
@@ -1952,7 +1956,7 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, er
 	// Production-port detection generalized via isProductionPort so non-3307
 	// production deployments are covered (AD-01).
 	if isTestDatabaseName(cfg.Database) && isProductionPort(cfg) {
-		return nil, "", fmt.Errorf(
+		return nil, "", false, fmt.Errorf(
 			"REFUSED: will not CREATE DATABASE %q on production port %d — "+
 				"this is a test database name on the production server (see DOLT-WAR-ROOM.md)",
 			cfg.Database, cfg.ServerPort)
@@ -1968,28 +1972,46 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, er
 	// match unrelated databases with LIKE.
 	dbExists, checkErr := databaseExistsOnServer(ctx, initDB, cfg.Database)
 	if checkErr != nil {
-		return nil, "", fmt.Errorf("failed to check if database %q exists on server %s:%d: %w",
+		return nil, "", false, fmt.Errorf("failed to check if database %q exists on server %s:%d: %w",
 			cfg.Database, cfg.ServerHost, cfg.ServerPort, checkErr)
 	}
 
+	// created reports whether THIS call's CREATE DATABASE won the race and
+	// actually created the database (the #5042 ownership-arbitration signal,
+	// ported from internal/storage/uow/dolt_sql_provider.go's initSchema).
+	// Only the proven creator may later arm schema.WithFreshBootstrapHeal:
+	// on a database this call created, dirty tables a retry sees can only be
+	// this same process's own half-applied migration step (a session that
+	// died between a step's SQL and its per-step Dolt commit), never
+	// pre-existing user data (gastownhall/beads#5012).
+	created := false
 	if !dbExists {
 		if !cfg.CreateIfMissing {
-			return nil, "", databaseNotFoundError(cfg)
+			return nil, "", false, databaseNotFoundError(cfg)
 		}
 
-		_, err = initDB.ExecContext(ctx, fmt.Sprintf("CREATE DATABASE IF NOT EXISTS `%s`", cfg.Database)) //nolint:gosec // G201: cfg.Database validated by ValidateDatabaseName above
-		if err != nil {
-			// Dolt may return error 1007 even with IF NOT EXISTS - ignore if database already exists
+		// Bare CREATE DATABASE (no IF NOT EXISTS): the server arbitrates
+		// creation atomically, so a nil error here proves THIS call created
+		// the database. A concurrent initializer that loses the race gets
+		// the same "database exists" (1007) refusal the old IF NOT EXISTS
+		// form absorbed silently — still tolerated below, just no longer
+		// ambiguous about who created it.
+		_, err = initDB.ExecContext(ctx, fmt.Sprintf("CREATE DATABASE `%s`", cfg.Database)) //nolint:gosec // G201: cfg.Database validated by ValidateDatabaseName above
+		switch {
+		case err == nil:
+			created = true
+		default:
 			errLower := strings.ToLower(err.Error())
 			if !strings.Contains(errLower, "database exists") && !strings.Contains(errLower, "1007") {
 				// Check for connection refused - server likely not running
 				if strings.Contains(errLower, "connection refused") || strings.Contains(errLower, "connect: connection refused") {
-					return nil, "", fmt.Errorf("failed to connect to Dolt server at %s:%d: %w\n\nThe Dolt server may not be running. Try:\n  bd dolt start    # Start a local server\n  gt dolt start    # If using an orchestrator",
+					return nil, "", false, fmt.Errorf("failed to connect to Dolt server at %s:%d: %w\n\nThe Dolt server may not be running. Try:\n  bd dolt start    # Start a local server\n  gt dolt start    # If using an orchestrator",
 						cfg.ServerHost, cfg.ServerPort, err)
 				}
-				return nil, "", fmt.Errorf("failed to create database: %w", err)
+				return nil, "", false, fmt.Errorf("failed to create database: %w", err)
 			}
-			// Database already exists - that's fine, continue
+			// Lost the create race (or a benign TOCTOU with the dbExists
+			// check above): not ours, heal stays off.
 		}
 	}
 
@@ -2011,11 +2033,11 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, er
 		}
 		return nil
 	}, backoff.WithContext(bo, ctx)); err != nil {
-		return nil, "", fmt.Errorf("database %q not available after CREATE DATABASE: %w", cfg.Database, err)
+		return nil, "", false, fmt.Errorf("database %q not available after CREATE DATABASE: %w", cfg.Database, err)
 	}
 
 	connReady = true
-	return db, connStr, nil
+	return db, connStr, created, nil
 }
 
 // databaseExistsOnServer checks if a database with the exact given name exists
@@ -2044,6 +2066,20 @@ func databaseExistsOnServer(ctx context.Context, db *sql.DB, name string) (bool,
 // applied versions in schema_migrations and backfills legacy config-driven
 // tables. Returns the number of migrations applied.
 func initSchemaOnDB(ctx context.Context, db *sql.DB) (int, error) {
+	return initSchemaOnDBOwnership(ctx, db, false)
+}
+
+// initSchemaOnDBOwnership is initSchemaOnDB with the fresh-bootstrap
+// ownership signal for the #4566 dirty-table guard self-heal
+// (gastownhall/beads#5012), ported from the uow path's initSchema (#5042):
+// createdDatabase must be true only when the caller proved — via the
+// bare-CREATE-DATABASE ownership arbitration in openServerConnection — that
+// THIS process's open created the target database. On a database this init
+// created, dirty tables a retry finds can only be this same process's own
+// half-applied migration step (a session that died between a step's SQL and
+// its per-step Dolt commit), never pre-existing user data, so
+// schema.WithFreshBootstrapHeal is safe to arm.
+func initSchemaOnDBOwnership(ctx context.Context, db *sql.DB, createdDatabase bool) (int, error) {
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("schema: pin connection: %w", err)
@@ -2055,7 +2091,11 @@ func initSchemaOnDB(ctx context.Context, db *sql.DB) (int, error) {
 		return 0, fmt.Errorf("schema: read database name: %w", err)
 	}
 
-	applied, err := schema.MigrateUpWithLock(ctx, conn, dbName)
+	var opts []schema.MigrateLockOption
+	if createdDatabase {
+		opts = append(opts, schema.WithFreshBootstrapHeal())
+	}
+	applied, err := schema.MigrateUpWithLock(ctx, conn, dbName, opts...)
 	if err != nil {
 		return applied, fmt.Errorf("schema migration: %w", err)
 	}
@@ -2073,6 +2113,17 @@ func initSchemaOnDBWithRetry(ctx context.Context, db *sql.DB) (int, error) {
 // retried with them instead of failing the open fast (bd-6dnrw.30); a
 // *schema.RemoteMigrateGateError refusal stays permanent.
 func initSchemaOnDBWithRetryAndGate(ctx context.Context, db *sql.DB, gate func(context.Context, *sql.DB) error) (int, error) {
+	return initSchemaOnDBWithRetryAndGateOwnership(ctx, db, gate, false)
+}
+
+// initSchemaOnDBWithRetryAndGateOwnership is initSchemaOnDBWithRetryAndGate
+// with the fresh-bootstrap ownership signal (see initSchemaOnDBOwnership)
+// threaded to every retry attempt. createdDatabase is fixed for the whole
+// retry loop: unlike the uow path, where database creation is retried inside
+// the same loop that runs the migration, server mode creates the database
+// exactly once in openServerConnection, before this loop starts — so there is
+// no "re-assert on retry" case to port here.
+func initSchemaOnDBWithRetryAndGateOwnership(ctx context.Context, db *sql.DB, gate func(context.Context, *sql.DB) error, createdDatabase bool) (int, error) {
 	// Schema initialization for server mode is idempotent. Retry transient
 	// Dolt startup/catalog races and contended migration-lock attempts so
 	// concurrent bd processes converge instead of failing one unlucky waiter.
@@ -2092,7 +2143,7 @@ func initSchemaOnDBWithRetryAndGate(ctx context.Context, db *sql.DB, gate func(c
 			}
 		}
 		var schemaErr error
-		applied, schemaErr = initSchemaOnDB(ctx, db)
+		applied, schemaErr = initSchemaOnDBOwnership(ctx, db, createdDatabase)
 		if schemaErr != nil && isRetryableError(schemaErr) {
 			return schemaErr
 		}
@@ -2104,7 +2155,12 @@ func initSchemaOnDBWithRetryAndGate(ctx context.Context, db *sql.DB, gate func(c
 	return applied, err
 }
 
-func (s *DoltStore) initSchema(ctx context.Context) error {
+// initSchema runs pending schema migrations for a freshly opened store.
+// createdDatabase must be true only when this open's openServerConnection
+// call proved (via bare-CREATE ownership arbitration) that it created the
+// target database — see initSchemaOnDBOwnership for why that arms
+// schema.WithFreshBootstrapHeal (gastownhall/beads#5012, #5042).
+func (s *DoltStore) initSchema(ctx context.Context, createdDatabase bool) error {
 	// Schema migrations can run arbitrarily long (e.g. full-table recomputes
 	// such as the is_blocked backfill in migration 0047). The main connection
 	// pool sets a 10s ReadTimeout (see buildServerDSN); a slow migration over
@@ -2155,7 +2211,7 @@ func (s *DoltStore) initSchema(ctx context.Context) error {
 	gate := func(ctx context.Context, db *sql.DB) error {
 		return schema.CheckRemoteMigrateGateForRemoteWithRemoteCheckAndAdopt(ctx, db, s.remote, s.hasPersistedCLIRemote, adopt)
 	}
-	_, err = initSchemaOnDBWithRetryAndGate(ctx, migDB, gate)
+	_, err = initSchemaOnDBWithRetryAndGateOwnership(ctx, migDB, gate, createdDatabase)
 	return err
 }
 
