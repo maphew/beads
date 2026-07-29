@@ -1149,6 +1149,16 @@ var procedureCallRe = regexp.MustCompile(`(?i)(?:^|;|\n)\s*CALL\s`)
 // replay-safe by pre-migration repairs keyed to their version, not by editing
 // their shipped SQL — see preMigrationRepair and migration_repairs.go.
 func drainCall(ctx context.Context, db DBConn, query string, args ...any) error {
+	return DrainCall(ctx, db, query, args...)
+}
+
+// DrainCall is the exported form of drainCall. Any caller holding a
+// connection where the same error-path asymmetry applies — most notably a
+// transaction-pinned *sql.Tx driving repeated `CALL DOLT_ADD`/`CALL
+// DOLT_COMMIT` pairs in internal/storage/dolt, which cannot fall back on
+// pool discard the way a pooled *sql.DB connection can — should route
+// through here rather than ExecContext. See drainCall's doc comment for why.
+func DrainCall(ctx context.Context, db DBConn, query string, args ...any) error {
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return err
