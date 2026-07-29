@@ -4,6 +4,7 @@ package fix
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -88,8 +89,8 @@ func newIdentityTestStore(t *testing.T, dir, prefix string) (store *dolt.DoltSto
 // have: the connection openDoltDB opens belongs to a database whose stored
 // _project_id does not match the local metadata.json project_id it was
 // diagnosed against. verifyFixTargetIdentity must catch that and abort
-// before any DELETE runs, regardless of *how* the mismatched connection was
-// reached.
+// before any DELETE/UPDATE runs, regardless of *how* the mismatched
+// connection was reached.
 func TestDestructiveFix_AbortsOnProjectIdentityMismatch(t *testing.T) {
 	dir := t.TempDir()
 	store, _, _ := newIdentityTestStore(t, dir, "tst")
@@ -144,11 +145,15 @@ func TestDestructiveFix_AbortsOnProjectIdentityMismatch(t *testing.T) {
 	}
 
 	// Same guard must apply to the other destructive fix entrypoints that
-	// share openDoltDB/openFixDB.
+	// share openDoltDB/openFixDB, including RecomputeBlocked — which
+	// orderDoctorFixes (cmd/bd/doctor_fix.go) runs LAST in a `bd doctor
+	// --fix` pass, after every graph-mutating fix, and which would otherwise
+	// still land a DOLT_COMMIT into the wrong project's history.
 	for name, fn := range map[string]func(string) error{
 		"CrossTableDuplicates":    func(p string) error { return CrossTableDuplicates(p, false) },
 		"OrphanedDependencies":    func(p string) error { return OrphanedDependencies(p, false) },
 		"ChildParentDependencies": func(p string) error { return ChildParentDependencies(p, false) },
+		"RecomputeBlocked":        RecomputeBlocked,
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := fn(dir); err == nil {
@@ -160,48 +165,112 @@ func TestDestructiveFix_AbortsOnProjectIdentityMismatch(t *testing.T) {
 	}
 }
 
-// TestVerifyFixTargetIdentity covers verifyFixTargetIdentity directly:
-// match passes, mismatch and unverifiable targets (missing project_id on
-// either side) abort.
-func TestVerifyFixTargetIdentity(t *testing.T) {
+// TestDestructiveFix_SkipsOnUnverifiableTarget covers the non-fatal-skip
+// half of the guard: a workspace whose local metadata.json has no
+// project_id (pre-project_id projects, shared-server-mode workspaces that
+// never got backfilled, or a user who declined the interactive "Project
+// Identity" fix) must not be permanently locked out of every other
+// doctor fix — the destructive statements still must not run, but the
+// caller gets nil back, not an error, matching the existing "database
+// unreachable" skip convention at each call site.
+func TestDestructiveFix_SkipsOnUnverifiableTarget(t *testing.T) {
 	dir := t.TempDir()
-	store, beadsDir, _ := newIdentityTestStore(t, dir, "vfi")
+	store, beadsDir, _ := newIdentityTestStore(t, dir, "skp")
 	ctx := context.Background()
-	db := store.UnderlyingDB()
 
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil || cfg == nil {
+		t.Fatalf("load config: %v", err)
+	}
+	cfg.ProjectID = ""
+	if err := cfg.Save(beadsDir); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	const randomID = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff"
+	for _, id := range []string{"skp-1", "skp-2"} {
+		issue := &types.Issue{
+			ID:        id,
+			Title:     "skip guard test " + id,
+			Priority:  2,
+			Status:    types.StatusOpen,
+			IssueType: types.TypeTask,
+		}
+		if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatalf("CreateIssue(%s): %v", id, err)
+		}
+	}
+	db := store.UnderlyingDB()
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO dependencies (id, issue_id, depends_on_issue_id, type, created_at, created_by)
+		VALUES (?, 'skp-1', 'skp-2', 'blocks', NOW(), 'test')`, randomID); err != nil {
+		t.Fatalf("insert randomly-keyed dependency: %v", err)
+	}
+
+	if err := DependencyKeys(dir, false); err != nil {
+		t.Fatalf("DependencyKeys should skip (nil error) on an unverifiable target, got: %v", err)
+	}
+
+	// Still not touched — the skip must be as safe as the abort.
+	var count int
+	if scanErr := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM dependencies WHERE id = ?`, randomID).Scan(&count); scanErr != nil {
+		t.Fatalf("count dependency row: %v", scanErr)
+	}
+	if count != 1 {
+		t.Errorf("expected the mis-keyed row to survive the skipped fix, found %d matching rows", count)
+	}
+}
+
+// TestVerifyFixTargetIdentity covers verifyFixTargetIdentity directly: match
+// passes; mismatch aborts with a plain (non-errUnverifiableFixTarget) error;
+// unverifiable targets (missing project_id on either side) return an error
+// wrapping errUnverifiableFixTarget. Each case gets its own store so the
+// subtests don't depend on run order.
+func TestVerifyFixTargetIdentity(t *testing.T) {
 	t.Run("matching project ids pass", func(t *testing.T) {
-		if err := verifyFixTargetIdentity(db, beadsDir); err != nil {
+		store, beadsDir, _ := newIdentityTestStore(t, t.TempDir(), "vfi1")
+		if err := verifyFixTargetIdentity(store.UnderlyingDB(), beadsDir, nil); err != nil {
 			t.Errorf("expected no error for matching project ids, got: %v", err)
 		}
 	})
 
-	t.Run("mismatched project ids abort", func(t *testing.T) {
+	t.Run("mismatched project ids abort with a plain error", func(t *testing.T) {
+		store, beadsDir, _ := newIdentityTestStore(t, t.TempDir(), "vfi2")
+		ctx := context.Background()
 		if err := store.SetMetadata(ctx, "_project_id", "some-other-project"); err != nil {
 			t.Fatalf("SetMetadata: %v", err)
 		}
-		err := verifyFixTargetIdentity(db, beadsDir)
+		err := verifyFixTargetIdentity(store.UnderlyingDB(), beadsDir, nil)
 		if err == nil {
 			t.Fatal("expected mismatch error, got nil")
 		}
 		if !strings.Contains(err.Error(), "PROJECT IDENTITY MISMATCH") {
 			t.Errorf("expected PROJECT IDENTITY MISMATCH, got: %v", err)
 		}
+		if errors.Is(err, errUnverifiableFixTarget) {
+			t.Errorf("a confirmed mismatch must not be classified as unverifiable: %v", err)
+		}
 	})
 
-	t.Run("missing database project_id is unverifiable and aborts", func(t *testing.T) {
+	t.Run("missing database project_id is unverifiable", func(t *testing.T) {
+		store, beadsDir, _ := newIdentityTestStore(t, t.TempDir(), "vfi3")
+		ctx := context.Background()
+		db := store.UnderlyingDB()
 		if _, err := db.ExecContext(ctx, "DELETE FROM metadata WHERE `key` = '_project_id'"); err != nil {
 			t.Fatalf("clear _project_id: %v", err)
 		}
-		err := verifyFixTargetIdentity(db, beadsDir)
+		err := verifyFixTargetIdentity(db, beadsDir, nil)
 		if err == nil {
 			t.Fatal("expected unverifiable-target error, got nil")
 		}
-		if !strings.Contains(err.Error(), "no project_id") {
-			t.Errorf("expected an unverifiable-target error, got: %v", err)
+		if !errors.Is(err, errUnverifiableFixTarget) {
+			t.Errorf("expected an errUnverifiableFixTarget error, got: %v", err)
 		}
 	})
 
-	t.Run("missing local project_id is unverifiable and aborts", func(t *testing.T) {
+	t.Run("missing local project_id is unverifiable", func(t *testing.T) {
+		store, beadsDir, _ := newIdentityTestStore(t, t.TempDir(), "vfi4")
 		cfg, err := configfile.Load(beadsDir)
 		if err != nil || cfg == nil {
 			t.Fatalf("load config: %v", err)
@@ -210,8 +279,32 @@ func TestVerifyFixTargetIdentity(t *testing.T) {
 		if err := cfg.Save(beadsDir); err != nil {
 			t.Fatalf("save config: %v", err)
 		}
-		if err := verifyFixTargetIdentity(db, beadsDir); err == nil {
+		verr := verifyFixTargetIdentity(store.UnderlyingDB(), beadsDir, nil)
+		if verr == nil {
 			t.Fatal("expected unverifiable-target error for missing local project_id, got nil")
+		}
+		if !errors.Is(verr, errUnverifiableFixTarget) {
+			t.Errorf("expected an errUnverifiableFixTarget error, got: %v", verr)
+		}
+	})
+
+	t.Run("passed-in cfg is used instead of reloading", func(t *testing.T) {
+		store, beadsDir, projectID := newIdentityTestStore(t, t.TempDir(), "vfi5")
+		// A cfg with a different (wrong) project_id than what's on disk —
+		// if verifyFixTargetIdentity ignored the passed-in cfg and reloaded
+		// from beadsDir instead, this would incorrectly pass.
+		staleCfg := &configfile.Config{ProjectID: "stale-in-memory-id"}
+		err := verifyFixTargetIdentity(store.UnderlyingDB(), beadsDir, staleCfg)
+		if err == nil {
+			t.Fatal("expected mismatch using the passed-in (stale) cfg, got nil")
+		}
+		if !strings.Contains(err.Error(), "PROJECT IDENTITY MISMATCH") {
+			t.Errorf("expected PROJECT IDENTITY MISMATCH, got: %v", err)
+		}
+		// Sanity: the real on-disk project_id still matches the database.
+		onDisk, loadErr := configfile.Load(beadsDir)
+		if loadErr != nil || onDisk == nil || onDisk.ProjectID != projectID {
+			t.Fatalf("on-disk project_id drifted unexpectedly: %+v, err=%v", onDisk, loadErr)
 		}
 	})
 }
