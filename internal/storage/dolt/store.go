@@ -1548,7 +1548,7 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	}
 
 	// Server mode: connect via MySQL protocol to dolt sql-server
-	db, connStr, createdDatabase, err := openServerConnection(ctx, cfg)
+	db, connStr, dbFacts, err := openServerConnection(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -1599,17 +1599,38 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	if err := schema.CheckForwardDrift(ctx, db); err != nil {
 		return nil, err
 	}
-	// A gateway server owns the schema: it provisions each project at its deployed bd
-	// version, so a client must never run migrations (DDL) against it. Treat it like
-	// ReadOnly for schema — the forward-drift guard above still protects a stale client
-	// binary.
-	if !cfg.ReadOnly && !cfg.Gateway {
-		if err := store.initSchema(ctx, createdDatabase); err != nil {
-			return nil, fmt.Errorf("failed to initialize schema: %w", err)
-		}
-	}
 
-	if !cfg.CreateIfMissing {
+	// Identity verification runs whenever we did not just create the database
+	// ourselves: the classic !CreateIfMissing "connect to an existing DB" path,
+	// and — critically — the CreateIfMissing:true "init" path when the target
+	// database turns out to already exist on the server. Without the latter,
+	// `bd init` against a shared server silently adopts a foreign project's
+	// existing database instead of failing, because CreateIfMissing:true used
+	// to skip the check unconditionally regardless of whether anything was
+	// actually created (GH#4637). A genuinely new database (dbAlreadyExisted
+	// == false) still skips verification: there is nothing to compare against
+	// yet, and the per-field soft-skips below already make this a no-op for a
+	// brand-new database in the !CreateIfMissing case too.
+	//
+	// This must run BEFORE store.initSchema below: initSchema runs migrations
+	// and Dolt commits against the database, so verifying first means a
+	// foreign existing database is rejected before bd writes anything into
+	// it, not after. On a database with no bd schema yet, GetMetadata errors
+	// and the verifier soft-skips, so this ordering does not change behavior
+	// for a genuinely fresh database.
+	//
+	// Gateway is effectively excluded from the alreadyExisted branch because
+	// openServerConnection never probes existence for it (see the Gateway
+	// branch below) and always returns alreadyExisted == false: gateway
+	// identity is not enforced here at all. That is deliberate, not an
+	// oversight — a hosted database's identity is server-authoritative, and
+	// cmd/bd/init.go already implements the correct reconciliation for it via
+	// resolveInitProjectID, adopting the server's _project_id onto a stale or
+	// missing local one on every init, including re-init, which relies on
+	// this open not hard-failing first. This gap is specific to Part A's
+	// server-existence check; it does not reopen the separate "foreign
+	// server, no bd database at all" gap tracked as Part B (mybd-y18b).
+	if !cfg.CreateIfMissing || dbFacts.alreadyExisted {
 		var verifyErr error
 		if cfg.Database == doltserver.GlobalDatabaseName {
 			verifyErr = store.verifyGlobalProjectIdentity(ctx, cfg.BeadsDir)
@@ -1618,6 +1639,16 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		}
 		if verifyErr != nil {
 			return nil, verifyErr
+		}
+	}
+
+	// A gateway server owns the schema: it provisions each project at its deployed bd
+	// version, so a client must never run migrations (DDL) against it. Treat it like
+	// ReadOnly for schema — the forward-drift guard above still protects a stale client
+	// binary.
+	if !cfg.ReadOnly && !cfg.Gateway {
+		if err := store.initSchema(ctx, dbFacts.created); err != nil {
+			return nil, fmt.Errorf("failed to initialize schema: %w", err)
 		}
 	}
 
@@ -1894,17 +1925,36 @@ func applyPoolLimits(db *sql.DB, cfg *Config) {
 	db.SetConnMaxIdleTime(idle)
 }
 
-// openServerConnection opens a connection to a dolt sql-server via MySQL
-// protocol. The returned bool reports whether THIS call created the target
-// database (see the bare-CREATE ownership arbitration below) — server-mode's
-// analog of the uow path's `created` signal (#5042), threaded through to
-// initSchema so only the proven creator arms schema.WithFreshBootstrapHeal.
-func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, bool, error) {
+// serverConnFacts reports what openServerConnection established about the
+// target database while connecting. The two fields are deliberately NOT
+// inverses of each other: for a gateway database, existence is never probed,
+// so both are false — neither "we created it" nor "it was already there" is
+// proven, and each caller's gate must fail closed on its own terms.
+type serverConnFacts struct {
+	// created reports whether THIS call's bare CREATE DATABASE won the
+	// ownership arbitration and actually created the database — server-mode's
+	// analog of the uow path's `created` signal (#5042). Threaded through to
+	// initSchema so only the proven creator arms schema.WithFreshBootstrapHeal.
+	created bool
+
+	// alreadyExisted reports whether the database was proven to exist on the
+	// server before this call: either the SHOW DATABASES probe found it, or
+	// our CREATE DATABASE was refused with "database exists" (1007). Callers
+	// use it to decide whether project-identity verification applies even
+	// when CreateIfMissing is true (see the newServerMode gate around
+	// verifyProjectIdentity, GH#4637).
+	alreadyExisted bool
+}
+
+// openServerConnection connects to (and if needed creates) the target database
+// on a dolt sql-server via MySQL protocol. See serverConnFacts for what the
+// returned facts mean and why they are not a single bool.
+func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, serverConnFacts, error) {
 	connStr := buildServerDSN(cfg, cfg.Database)
 
 	db, err := sql.Open("mysql", connStr)
 	if err != nil {
-		return nil, "", false, fmt.Errorf("failed to open Dolt server connection: %w", err)
+		return nil, "", serverConnFacts{}, fmt.Errorf("failed to open Dolt server connection: %w", err)
 	}
 
 	// Configure the pool. *sql.DB is safe for concurrent use and manages its
@@ -1929,11 +1979,21 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, bo
 	// above would close the *sql.DB we just handed the caller.
 	if cfg.Gateway {
 		if err := db.PingContext(ctx); err != nil {
-			return nil, "", false, fmt.Errorf("failed to connect to gateway server %s:%d (database %q): %w",
+			return nil, "", serverConnFacts{}, fmt.Errorf("failed to connect to gateway server %s:%d (database %q): %w",
 				cfg.ServerHost, cfg.ServerPort, cfg.Database, err)
 		}
 		connReady = true
-		return db, connStr, false, nil
+		// Neither fact is established for a gateway database: we did not
+		// create it, and existence was never probed, so we cannot honestly
+		// report alreadyExisted either. The zero value is what the
+		// newServerMode caller relies on to skip its alreadyExisted-forced
+		// identity check for Gateway. That is intentional, not a leftover
+		// gap: gateway identity is reconciled (not enforced at open) by
+		// cmd/bd/init.go's resolveInitProjectID, which adopts the
+		// server-authoritative _project_id onto a stale or missing local one
+		// on every init, including re-init. It is also correct for `created`:
+		// an unproven creator must never arm fresh-bootstrap heal.
+		return db, connStr, serverConnFacts{}, nil
 	}
 
 	// Ensure database exists (may need to create it)
@@ -1941,13 +2001,13 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, bo
 	initConnStr := buildServerDSN(cfg, "")
 	initDB, err := sql.Open("mysql", initConnStr)
 	if err != nil {
-		return nil, "", false, fmt.Errorf("failed to open init connection: %w", err)
+		return nil, "", serverConnFacts{}, fmt.Errorf("failed to open init connection: %w", err)
 	}
 	defer func() { _ = initDB.Close() }()
 
 	// Validate database name to prevent SQL injection via backtick escaping
 	if err := ValidateDatabaseName(cfg.Database); err != nil {
-		return nil, "", false, fmt.Errorf("invalid database name %q: %w", cfg.Database, err)
+		return nil, "", serverConnFacts{}, fmt.Errorf("invalid database name %q: %w", cfg.Database, err)
 	}
 
 	// FIREWALL: Never create test databases on the production server.
@@ -1956,7 +2016,7 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, bo
 	// Production-port detection generalized via isProductionPort so non-3307
 	// production deployments are covered (AD-01).
 	if isTestDatabaseName(cfg.Database) && isProductionPort(cfg) {
-		return nil, "", false, fmt.Errorf(
+		return nil, "", serverConnFacts{}, fmt.Errorf(
 			"REFUSED: will not CREATE DATABASE %q on production port %d — "+
 				"this is a test database name on the production server (see DOLT-WAR-ROOM.md)",
 			cfg.Database, cfg.ServerPort)
@@ -1965,6 +2025,10 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, bo
 	// Check if the database already exists before deciding whether to create it.
 	// This prevents the shadow database bug: without CreateIfMissing, connecting
 	// to a server that lacks the expected database is an error (not silent creation).
+	// The result also feeds the caller's identity-verification gate: a
+	// CreateIfMissing:true init that lands on an already-existing database
+	// must still verify project identity (GH#4637) — only a database this
+	// call creates from scratch is exempt.
 	//
 	// Uses SHOW DATABASES + iterate for exact match instead of SHOW DATABASES LIKE,
 	// because LIKE treats _ and % as wildcards and Dolt does not support backslash
@@ -1972,7 +2036,7 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, bo
 	// match unrelated databases with LIKE.
 	dbExists, checkErr := databaseExistsOnServer(ctx, initDB, cfg.Database)
 	if checkErr != nil {
-		return nil, "", false, fmt.Errorf("failed to check if database %q exists on server %s:%d: %w",
+		return nil, "", serverConnFacts{}, fmt.Errorf("failed to check if database %q exists on server %s:%d: %w",
 			cfg.Database, cfg.ServerHost, cfg.ServerPort, checkErr)
 	}
 
@@ -1987,7 +2051,7 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, bo
 	created := false
 	if !dbExists {
 		if !cfg.CreateIfMissing {
-			return nil, "", false, databaseNotFoundError(cfg)
+			return nil, "", serverConnFacts{}, databaseNotFoundError(cfg)
 		}
 
 		// Bare CREATE DATABASE (no IF NOT EXISTS): the server arbitrates
@@ -2005,13 +2069,19 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, bo
 			if !strings.Contains(errLower, "database exists") && !strings.Contains(errLower, "1007") {
 				// Check for connection refused - server likely not running
 				if strings.Contains(errLower, "connection refused") || strings.Contains(errLower, "connect: connection refused") {
-					return nil, "", false, fmt.Errorf("failed to connect to Dolt server at %s:%d: %w\n\nThe Dolt server may not be running. Try:\n  bd dolt start    # Start a local server\n  gt dolt start    # If using an orchestrator",
+					return nil, "", serverConnFacts{}, fmt.Errorf("failed to connect to Dolt server at %s:%d: %w\n\nThe Dolt server may not be running. Try:\n  bd dolt start    # Start a local server\n  gt dolt start    # If using an orchestrator",
 						cfg.ServerHost, cfg.ServerPort, err)
 				}
-				return nil, "", false, fmt.Errorf("failed to create database: %w", err)
+				return nil, "", serverConnFacts{}, fmt.Errorf("failed to create database: %w", err)
 			}
 			// Lost the create race (or a benign TOCTOU with the dbExists
-			// check above): not ours, heal stays off.
+			// check above): not ours, heal stays off. The refusal IS proof of
+			// existence, though — another process won the CREATE DATABASE
+			// race between our SHOW DATABASES probe and this call — so
+			// correct dbExists even though the probe reported false. The
+			// caller's identity-verification gate depends on this being
+			// accurate, not just on the initial probe.
+			dbExists = true
 		}
 	}
 
@@ -2033,11 +2103,11 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, bo
 		}
 		return nil
 	}, backoff.WithContext(bo, ctx)); err != nil {
-		return nil, "", false, fmt.Errorf("database %q not available after CREATE DATABASE: %w", cfg.Database, err)
+		return nil, "", serverConnFacts{}, fmt.Errorf("database %q not available after CREATE DATABASE: %w", cfg.Database, err)
 	}
 
 	connReady = true
-	return db, connStr, created, nil
+	return db, connStr, serverConnFacts{created: created, alreadyExisted: dbExists}, nil
 }
 
 // databaseExistsOnServer checks if a database with the exact given name exists

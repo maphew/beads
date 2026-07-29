@@ -113,12 +113,17 @@ func resolveInitIssuePrefix(gateway bool, existing, dbName, prefix string, readE
 // Gateway: the hosted database's identity is server-authoritative, so an adopted
 // server id always wins and is reconciled onto local even when localID is already
 // set. A re-init or orchestrator-preseeded workspace must not keep a stale local
-// id: init opens with CreateIfMissing, which skips the storage identity verifier
-// (store.go verifyProjectIdentity), so a stale id would be saved as success and
-// every later normal open would then hard-fail with PROJECT IDENTITY MISMATCH. A
-// missing server id is a provisioning-contract violation bd will not mint over —
-// even when a local id already exists — and a read error is surfaced as the
-// transient failure it is, so a flaky connection is not misdiagnosed as an
+// id: for Gateway specifically, init's CreateIfMissing:true open still skips the
+// storage identity verifier (store.go verifyProjectIdentity/newServerMode — see
+// its dbAlreadyExisted comment for why Gateway is exempt from the
+// otherwise-CreateIfMissing:true check), so a stale id would be saved as success
+// and every later normal open would then hard-fail with PROJECT IDENTITY
+// MISMATCH. This CreateIfMissing skip is Gateway-only: a non-gateway
+// CreateIfMissing:true init against an already-existing database now DOES run
+// the verifier (GH#4637 Part A) and fails before reaching this reconciliation.
+// A missing server id is a provisioning-contract violation bd will not mint
+// over — even when a local id already exists — and a read error is surfaced as
+// the transient failure it is, so a flaky connection is not misdiagnosed as an
 // unprovisioned database.
 //
 // Non-gateway (legacy, unchanged): a non-empty localID is kept as-is (readErr
@@ -1385,10 +1390,14 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			// at all (a missing identity is a provisioning-contract violation),
 			// and because the hosted server is authoritative it reconciles the
 			// identity on every init — even a re-init or preseeded workspace whose
-			// metadata.json already carries a stale project_id. Otherwise init
-			// (which opens with CreateIfMissing, skipping the storage identity
-			// verifier) would save the stale id as success and every later normal
-			// open would hard-fail with PROJECT IDENTITY MISMATCH.
+			// metadata.json already carries a stale project_id. This reconciliation
+			// depends on Gateway's CreateIfMissing:true open skipping the storage
+			// identity verifier (store.go newServerMode/verifyProjectIdentity) —
+			// Gateway-only, not init in general: a non-gateway CreateIfMissing:true
+			// init against an already-existing database now runs the verifier
+			// (GH#4637 Part A) and fails before this code runs at all. Without the
+			// Gateway skip, init would save the stale id as success and every later
+			// normal open would hard-fail with PROJECT IDENTITY MISMATCH.
 			adoptedFromDB := ""
 			var adoptReadErr error
 			if store != nil && shouldConsultInitProjectID(doltCfg.Gateway, cfg.ProjectID, database, bootstrappedFromRemote) {
