@@ -11,6 +11,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
 
@@ -443,7 +444,7 @@ func (s *DoltStore) filteredPushToPeer(ctx context.Context, peer string, exclude
 	defer conn.Close()
 
 	// Clean up any leftover staging branch from a previous failed run.
-	_, _ = conn.ExecContext(ctx, "CALL DOLT_BRANCH('-Df', ?)", federationStagingBranch)
+	_ = schema.DrainCall(ctx, conn, "CALL DOLT_BRANCH('-Df', ?)", federationStagingBranch)
 
 	// Create staging branch from the current branch.
 	if _, err := conn.ExecContext(ctx, "CALL DOLT_BRANCH(?, ?)", federationStagingBranch, s.branch); err != nil {
@@ -452,8 +453,8 @@ func (s *DoltStore) filteredPushToPeer(ctx context.Context, peer string, exclude
 
 	// Ensure cleanup: restore original branch and delete staging.
 	defer func() {
-		_, _ = conn.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", s.branch)
-		_, _ = conn.ExecContext(ctx, "CALL DOLT_BRANCH('-Df', ?)", federationStagingBranch)
+		_ = schema.DrainCall(ctx, conn, "CALL DOLT_CHECKOUT(?)", s.branch)
+		_ = schema.DrainCall(ctx, conn, "CALL DOLT_BRANCH('-Df', ?)", federationStagingBranch)
 	}()
 
 	// Checkout staging branch.

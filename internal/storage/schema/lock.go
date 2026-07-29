@@ -104,7 +104,7 @@ func MigrateUpWithLock(ctx context.Context, conn *sql.Conn, databaseName string,
 		// Drained, not Exec'd: the very next thing this path does is re-run the
 		// whole MigrateUp pass on this same pinned connection, so an
 		// undrained proc result set here would poison every statement of it.
-		if resetErr := drainCall(ctx, conn, "CALL DOLT_RESET('--hard')"); resetErr != nil {
+		if resetErr := DrainCall(ctx, conn, "CALL DOLT_RESET('--hard')"); resetErr != nil {
 			return applied, errors.Join(err, fmt.Errorf("schema: fresh-bootstrap reset: %w", resetErr))
 		}
 		applied, err = MigrateUp(ctx, conn)

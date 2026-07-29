@@ -77,10 +77,10 @@ const nonlocalFrozenRowsValues = "('wisps', 'main', 'immediate'), ('wisp_*', 'ma
 // as the pass expects to find it. --skip-empty keeps the commit a clean no-op
 // if the edit staged nothing.
 func commitNonlocalRepair(ctx context.Context, db DBConn, message string) error {
-	if err := drainCall(ctx, db, "CALL DOLT_ADD(?)", nonlocalTablesName); err != nil {
+	if err := DrainCall(ctx, db, "CALL DOLT_ADD(?)", nonlocalTablesName); err != nil {
 		return fmt.Errorf("staging %s: %w", nonlocalTablesName, err)
 	}
-	return drainCall(ctx, db, "CALL DOLT_COMMIT('-m', ?, '--skip-empty')", message)
+	return DrainCall(ctx, db, "CALL DOLT_COMMIT('-m', ?, '--skip-empty')", message)
 }
 
 // anyNonlocalFrozenRowPresent reports whether any of 0040's four

@@ -266,7 +266,7 @@ func expectOnePendingMigration(t *testing.T, mock sqlmock.Sqlmock) {
 	expectDoltStatusRows(mock)
 	mock.ExpectQuery("(?s)SELECT t\\.TABLE_NAME\\s+FROM INFORMATION_SCHEMA\\.TABLES t").
 		WillReturnRows(sqlmock.NewRows([]string{"TABLE_NAME"}).AddRow("schema_migrations"))
-	// DOLT_ADD and DOLT_COMMIT run through drainCall (QueryContext) so their
+	// DOLT_ADD and DOLT_COMMIT run through DrainCall (QueryContext) so their
 	// proc result sets are consumed on the pinned conn; mock them as queries.
 	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD('-f', ?)")).
 		WithArgs("schema_migrations").
