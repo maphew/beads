@@ -35,6 +35,10 @@ func OrphanedDependencies(path string, verbose bool) error {
 	}
 	defer db.Close()
 
+	if err := verifyFixTargetIdentity(db, beadsDir); err != nil {
+		return err
+	}
+
 	// Find orphaned dependencies (exclude external: cross-rig tracking refs, #1593)
 	//nolint:gosec // G202: fixDependencyUnionSQL returns a fixed internal SELECT fragment.
 	query := `
@@ -128,6 +132,10 @@ func ChildParentDependencies(path string, verbose bool) error {
 		return nil
 	}
 	defer db.Close()
+
+	if err := verifyFixTargetIdentity(db, beadsDir); err != nil {
+		return err
+	}
 
 	// Find child→parent BLOCKING dependencies where issue_id starts with depends_on_id + "."
 	// Only matches blocking types (blocks, conditional-blocks, waits-for) that cause deadlock.
@@ -223,6 +231,10 @@ func CrossTableDuplicates(path string, verbose bool) error {
 		return nil
 	}
 	defer db.Close()
+
+	if err := verifyFixTargetIdentity(db, beadsDir); err != nil {
+		return err
+	}
 
 	// Find IDs present in both tables — the wisp copy is canonical.
 	rows, err := db.Query(`SELECT id FROM issues WHERE id IN (SELECT id FROM wisps)`)

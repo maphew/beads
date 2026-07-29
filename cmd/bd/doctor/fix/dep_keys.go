@@ -89,6 +89,10 @@ func DependencyKeys(path string, verbose bool) error {
 	}
 	defer db.Close()
 
+	if err := verifyFixTargetIdentity(db, beadsDir); err != nil {
+		return err
+	}
+
 	return repairDependencyKeys(context.Background(), db, verbose)
 }
 
