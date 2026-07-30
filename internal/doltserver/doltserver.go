@@ -311,6 +311,14 @@ type Config struct {
 	Port     int        // MySQL protocol port (0 = allocate ephemeral port on Start)
 	Host     string     // Bind address (default: 127.0.0.1)
 	Mode     ServerMode // Server ownership mode (Owned, External, Embedded)
+
+	// PortSource records which step of the precedence chain (see
+	// portSources) resolved Port. PortSourceUnset when Port == 0. Callers
+	// that auto-start a replacement server use this to decide whether
+	// silently retargeting to a different port is safe (GH#4052): safe for
+	// bd's own port-file bookkeeping, not safe for a source where the user
+	// (or config on the user's behalf) explicitly asserted the port.
+	PortSource PortSource
 }
 
 // State holds runtime information about a managed server.
@@ -509,11 +517,56 @@ func configYamlPort(beadsDir string) int {
 	return cfg.Port()
 }
 
+// PortSource identifies which step of the port-resolution precedence chain
+// (see portSources) produced a Config's Port. Callers use it to distinguish
+// a port the user explicitly asserted (authoritative) from bd's own
+// bookkeeping (the gitignored port file), which auto-start is free to
+// replace without confirmation (GH#4052).
+type PortSource string
+
+const (
+	// PortSourceUnset means no source resolved a port (Port == 0); Start()
+	// will allocate an ephemeral port.
+	PortSourceUnset PortSource = ""
+	// PortSourceEnv is the BEADS_DOLT_SERVER_PORT environment variable.
+	PortSourceEnv PortSource = "env"
+	// PortSourcePortFile is the gitignored .beads/dolt-server.port file that
+	// bd itself writes and rewrites as part of normal server bookkeeping.
+	PortSourcePortFile PortSource = "port_file"
+	// PortSourceDoltConfigYaml is the Dolt server's own config.yaml
+	// (listener.port) in the dolt data directory.
+	PortSourceDoltConfigYaml PortSource = "dolt_config_yaml"
+	// PortSourceConfigYaml is Beads' project/global config.yaml (dolt.port).
+	PortSourceConfigYaml PortSource = "config_yaml"
+	// PortSourceGlobalConfig is retained as an alias of PortSourceConfigYaml
+	// for callers that think of it as "global config" (~/.config/bd/config.yaml
+	// resolves through the same config.GetYamlConfig("dolt.port") lookup).
+	PortSourceGlobalConfig = PortSourceConfigYaml
+	// PortSourceMetadataJSON is the deprecated metadata.json dolt_server_port
+	// fallback. Still an explicit user/tooling assertion, not bd bookkeeping.
+	PortSourceMetadataJSON PortSource = "metadata_json"
+)
+
+// IsAuthoritative reports whether this source represents a user (or
+// tooling-on-the-user's-behalf) assertion of where the Dolt server lives, as
+// opposed to bd's own bookkeeping (the port file). Auto-start may freely
+// replace a non-authoritative port; it must not silently replace an
+// authoritative one (GH#4052).
+func (s PortSource) IsAuthoritative() bool {
+	switch s {
+	case PortSourceEnv, PortSourceDoltConfigYaml, PortSourceConfigYaml, PortSourceMetadataJSON:
+		return true
+	default:
+		return false
+	}
+}
+
 // portSource is one step in the port-resolution precedence chain that
 // DefaultConfig walks. resolve reports (port, true) when this source has a
 // usable value; DefaultConfig stops at the first true.
 type portSource struct {
 	label   string
+	source  PortSource
 	resolve func(beadsDir string) (int, bool)
 }
 
@@ -523,7 +576,8 @@ type portSource struct {
 // chain instead of hand-copying it out of sync (GH#4511).
 var portSources = []portSource{
 	{
-		label: "Environment variable (BEADS_DOLT_SERVER_PORT)",
+		label:  "Environment variable (BEADS_DOLT_SERVER_PORT)",
+		source: PortSourceEnv,
 		resolve: func(beadsDir string) (int, bool) {
 			p := os.Getenv("BEADS_DOLT_SERVER_PORT")
 			if p == "" {
@@ -536,14 +590,16 @@ var portSources = []portSource{
 	{
 		// Gitignored, local-only. Elevated above the YAML sources to prevent
 		// git-tracked values from causing cross-project data leakage (GH#2372).
-		label: "Port file (.beads/dolt-server.port; shared-server dir in shared mode)",
+		label:  "Port file (.beads/dolt-server.port; shared-server dir in shared mode)",
+		source: PortSourcePortFile,
 		resolve: func(beadsDir string) (int, bool) {
 			p := readPortFile(beadsDir)
 			return p, p > 0
 		},
 	},
 	{
-		label: "Dolt server config.yaml (listener.port, in the dolt data directory)",
+		label:  "Dolt server config.yaml (listener.port, in the dolt data directory)",
+		source: PortSourceDoltConfigYaml,
 		resolve: func(beadsDir string) (int, bool) {
 			p := configYamlPort(beadsDir)
 			return p, p > 0
@@ -552,7 +608,8 @@ var portSources = []portSource{
 	{
 		// ~/.config/bd/config.yaml or project config.yaml (GH#2073). Git-tracked,
 		// so it ranks below the port file above.
-		label: "Beads config.yaml / global config (dolt.port)",
+		label:  "Beads config.yaml / global config (dolt.port)",
+		source: PortSourceConfigYaml,
 		resolve: func(beadsDir string) (int, bool) {
 			p := config.GetYamlConfig("dolt.port")
 			if p == "" {
@@ -566,7 +623,8 @@ var portSources = []portSource{
 		// Deprecated: git-tracked, propagates to all contributors, causing
 		// cross-project data leakage (GH#2372). Kept as a fallback so existing
 		// setups don't break silently.
-		label: "metadata.json dolt_server_port (deprecated fallback)",
+		label:  "metadata.json dolt_server_port (deprecated fallback)",
+		source: PortSourceMetadataJSON,
 		resolve: func(beadsDir string) (int, bool) {
 			metaCfg, err := configfile.Load(beadsDir)
 			if err != nil || metaCfg == nil || metaCfg.DoltServerPort <= 0 {
@@ -614,6 +672,7 @@ func DefaultConfig(beadsDir string) *Config {
 	for _, src := range portSources {
 		if port, ok := src.resolve(beadsDir); ok {
 			cfg.Port = port
+			cfg.PortSource = src.source
 			break
 		}
 	}

@@ -72,6 +72,85 @@ func TestDefaultConfigPrecedenceChain(t *testing.T) {
 	}
 }
 
+// TestDefaultConfigPortSource asserts that DefaultConfig records which step
+// of the precedence chain resolved Port, layering sources the same way
+// TestDefaultConfigPrecedenceChain does. Auto-start (GH#4052) uses PortSource
+// to decide whether silently retargeting a stale port is safe (bd's own
+// port-file bookkeeping) or not (a source where the user, or config on the
+// user's behalf, explicitly asserted the port).
+func TestDefaultConfigPortSource(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+
+	beadsDir := t.TempDir()
+
+	// 1. Nothing configured: unset source, port 0.
+	cfg := DefaultConfig(beadsDir)
+	if cfg.Port != 0 || cfg.PortSource != PortSourceUnset {
+		t.Fatalf("no source configured: port=%d source=%q, want 0/%q", cfg.Port, cfg.PortSource, PortSourceUnset)
+	}
+
+	// 2. metadata.json dolt_server_port (deprecated fallback).
+	writeMetadataPort(t, beadsDir, 5001)
+	cfg = DefaultConfig(beadsDir)
+	if cfg.Port != 5001 || cfg.PortSource != PortSourceMetadataJSON {
+		t.Fatalf("metadata.json only: port=%d source=%q, want 5001/%q", cfg.Port, cfg.PortSource, PortSourceMetadataJSON)
+	}
+
+	// 3. Beads config.yaml (dolt.port) — global/project config source.
+	configDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte("dolt.port: 5002\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DIR", configDir)
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+	t.Cleanup(config.ResetForTesting)
+	cfg = DefaultConfig(beadsDir)
+	if cfg.Port != 5002 || cfg.PortSource != PortSourceConfigYaml {
+		t.Fatalf("beads config.yaml: port=%d source=%q, want 5002/%q", cfg.Port, cfg.PortSource, PortSourceConfigYaml)
+	}
+	if cfg.PortSource != PortSourceGlobalConfig {
+		t.Fatalf("PortSourceGlobalConfig alias diverged from PortSourceConfigYaml: %q vs %q", PortSourceGlobalConfig, PortSourceConfigYaml)
+	}
+
+	// 4. Dolt server's own config.yaml (listener.port).
+	doltDir := filepath.Join(beadsDir, "dolt")
+	if err := os.MkdirAll(doltDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(doltDir, "config.yaml"), []byte("listener:\n  host: 127.0.0.1\n  port: 5003\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg = DefaultConfig(beadsDir)
+	if cfg.Port != 5003 || cfg.PortSource != PortSourceDoltConfigYaml {
+		t.Fatalf("dolt server config.yaml: port=%d source=%q, want 5003/%q", cfg.Port, cfg.PortSource, PortSourceDoltConfigYaml)
+	}
+
+	// 5. Port file — bd's own bookkeeping, not authoritative.
+	if err := writePortFile(beadsDir, 5004); err != nil {
+		t.Fatal(err)
+	}
+	cfg = DefaultConfig(beadsDir)
+	if cfg.Port != 5004 || cfg.PortSource != PortSourcePortFile {
+		t.Fatalf("port file: port=%d source=%q, want 5004/%q", cfg.Port, cfg.PortSource, PortSourcePortFile)
+	}
+	if cfg.PortSource.IsAuthoritative() {
+		t.Fatalf("port file source must not be authoritative (bd's own bookkeeping)")
+	}
+
+	// 6. Env var — highest precedence, authoritative.
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "5005")
+	cfg = DefaultConfig(beadsDir)
+	if cfg.Port != 5005 || cfg.PortSource != PortSourceEnv {
+		t.Fatalf("env var: port=%d source=%q, want 5005/%q", cfg.Port, cfg.PortSource, PortSourceEnv)
+	}
+	if !cfg.PortSource.IsAuthoritative() {
+		t.Fatalf("env var source must be authoritative")
+	}
+}
+
 func writeMetadataPort(t *testing.T, beadsDir string, port int) {
 	t.Helper()
 	data, err := json.Marshal(map[string]any{"dolt_server_port": port})

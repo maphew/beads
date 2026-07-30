@@ -328,6 +328,15 @@ type Config struct {
 	ServerPassword string // MySQL password (default: empty, can be set via BEADS_DOLT_PASSWORD)
 	ServerTLS      bool   // Enable TLS for server connections (required for Hosted Dolt)
 
+	// ServerPortSource records which step of doltserver's port-resolution
+	// chain (or the env-var read in applyConfigDefaults) produced ServerPort.
+	// Zero value (doltserver.PortSourceUnset) when ServerPort was never
+	// resolved from a source (e.g. left 0, or set directly by a caller that
+	// bypassed applyConfigDefaults). Consulted by newServerMode's auto-start
+	// path to decide whether silently retargeting to a different port is
+	// safe (GH#4052).
+	ServerPortSource doltserver.PortSource
+
 	// Remote auth for Hosted Dolt push/pull (optional)
 	// When set, Push/Pull use the --user flag and set DOLT_REMOTE_PASSWORD env var.
 	RemoteUser     string // Hosted Dolt remote user (set via DOLT_REMOTE_USER env var)
@@ -1222,6 +1231,11 @@ func applyConfigDefaults(cfg *Config) {
 	if envPort != "" {
 		if p, err := strconv.Atoi(envPort); err == nil && p > 0 {
 			cfg.ServerPort = p
+			// This env read happens before doltserver.DefaultConfig is
+			// consulted below, but it is the same authoritative source
+			// (BEADS_DOLT_SERVER_PORT / legacy BEADS_DOLT_PORT) — record it
+			// so the auto-start fail-closed check in newServerMode sees it.
+			cfg.ServerPortSource = doltserver.PortSourceEnv
 		}
 	}
 	// If env var didn't provide a port, consult the full resolution chain:
@@ -1237,6 +1251,7 @@ func applyConfigDefaults(cfg *Config) {
 		if resolveDir != "" {
 			if resolved := doltserver.DefaultConfig(resolveDir); resolved.Port > 0 {
 				cfg.ServerPort = resolved.Port
+				cfg.ServerPortSource = resolved.PortSource
 			}
 		}
 	}
@@ -1428,6 +1443,12 @@ func resolveSocketTransport(socket, host string, port int, timeout time.Duration
 	return socket // both down (or no TCP port) — keep socket for the error path
 }
 
+// ensureRunningDetailed starts (or reuses) the repo-local auto-started dolt
+// sql-server. Declared as a var (not a plain call) so unit tests can stub
+// auto-start outcomes — including a retargeted port — without spawning a
+// real dolt sql-server process.
+var ensureRunningDetailed = doltserver.EnsureRunningDetailed
+
 // newServerMode creates a DoltStore connected to a running dolt sql-server.
 // This path is pure Go and does not require CGO.
 func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
@@ -1474,7 +1495,7 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		// to manage their own server lifecycle.
 		canAutoStart := serverOpenCanAutoStart(cfg)
 		if canAutoStart {
-			port, startedByUs, startErr := doltserver.EnsureRunningDetailed(resolvedBeadsDir)
+			port, startedByUs, startErr := ensureRunningDetailed(resolvedBeadsDir)
 			if startErr != nil {
 				return nil, fmt.Errorf("Dolt server unreachable at %s and auto-start failed: %w\n\n"+
 					"To start manually: bd dolt start\n"+
@@ -1491,6 +1512,34 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 			// Update port — EnsureRunning allocates an ephemeral port
 			if port != cfg.ServerPort {
 				if cfg.ServerPort > 0 {
+					// A configured port is either an authoritative user
+					// assertion (env var, project/global config.yaml,
+					// metadata.json) or bd's own port-file bookkeeping
+					// (GH#4052). Silently retargeting an authoritative port
+					// can land the write on the wrong project's database
+					// (e.g. a shared-server host serving multiple repos);
+					// only bd's own bookkeeping is safe to replace without
+					// confirmation.
+					if cfg.ServerPortSource.IsAuthoritative() {
+						if autoStartedDir != "" {
+							_ = autoStartRelease(autoStartedDir)
+						}
+						if breaker != nil {
+							breaker.RecordFailure()
+						}
+						return nil, fmt.Errorf(
+							"Dolt server configured at port %d (source: %s) is unreachable; "+
+								"auto-start started a new server on port %d, but bd will not "+
+								"silently use a different port than the one you configured\n\n"+
+								"The configured port may be pointing at a shared-server host "+
+								"serving a different project's database; using port %d instead "+
+								"could silently write to the wrong database.\n\n"+
+								"To proceed:\n"+
+								"  - Start the configured server manually: bd dolt start\n"+
+								"  - Or remove/change the pinned port (env var, .beads/config.yaml "+
+								"dolt.port, or global config) if port %d is stale",
+							cfg.ServerPort, cfg.ServerPortSource, port, port, cfg.ServerPort)
+					}
 					fmt.Fprintf(os.Stderr, "Warning: Dolt server endpoint changed: port %d → %d (auto-start)\n", cfg.ServerPort, port)
 					fmt.Fprintf(os.Stderr, "  Previous port was unreachable. If other tools expect port %d, they may see stale data.\n", cfg.ServerPort)
 					fmt.Fprintf(os.Stderr, "  To pin a port: set dolt.port in .beads/config.yaml\n")
