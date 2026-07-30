@@ -230,6 +230,56 @@ func autoStartRelease(serverDir string) error {
 	return nil
 }
 
+// undoRejectedAutoStart cleans up the side effects of a speculative
+// auto-start that newServerMode's fail-closed checks (GH#4052) decided not
+// to use.
+//
+// It restores the port file to the pre-call snapshot: EnsureRunningDetailed
+// writes serverDir's port file with the new server's actual port before
+// either fail-closed check runs (Start()'s writePortFile, or the
+// adopt-existing-server path's EnsurePortFile), and that port file is the
+// second-highest-precedence port source. Left in place, it would let a
+// second, identical invocation resolve the port file instead of the
+// authoritative source that just failed, adopt the server we declined to
+// use, and silently succeed — permanently disarming the guard after exactly
+// one invocation.
+//
+// When we spawned the server ourselves (startedByUs), it also stops it: we
+// have decided not to use it, so leaving a stray dolt process running is an
+// unrequested side effect. When autoStartedDir is set, the server is
+// refcount-tracked (the test/test-database path via autoStartAcquire); that
+// path already stops the server once the refcount reaches zero, so
+// autoStartRelease is used instead of a direct Stop to avoid pulling the rug
+// out from under another store instance sharing the same auto-started
+// server. An adopted pre-existing server (startedByUs == false) is left
+// running — we didn't start it, so we don't stop it, but its port file
+// write must still be undone.
+//
+// Best-effort throughout: cleanup failures are reported on stderr but never
+// returned, so they cannot mask the caller's fail-closed error, which is the
+// one that matters.
+func undoRejectedAutoStart(serverDir string, startedByUs bool, autoStartedDir string, snap doltserver.PortFileSnapshot, snapErr error) {
+	if startedByUs {
+		if autoStartedDir != "" {
+			if err := autoStartRelease(autoStartedDir); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to stop rejected auto-started dolt server: %v\n", err)
+			}
+		} else if err := doltserver.IgnoreNotRunning(stopRejectedAutoStartedServer(serverDir)); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to stop rejected auto-started dolt server: %v\n", err)
+		}
+	}
+	if snapErr != nil {
+		// The pre-call snapshot itself failed (e.g. a permissions error
+		// reading an existing file) — restoring a zero-value snapshot here
+		// could wrongly delete a port file we never actually read. Leave the
+		// port file alone rather than guess.
+		return
+	}
+	if err := doltserver.RestorePortFile(serverDir, snap); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to restore port file after rejected auto-start: %v\n", err)
+	}
+}
+
 // shouldStopAutoStartedServerOnClose reports whether an auto-started server
 // should be treated as test-owned cleanup state instead of a normal repo-local
 // server. In real repos, auto-start should behave like a persistent helper
@@ -1460,6 +1510,13 @@ func resolveSocketTransport(socket, host string, port int, timeout time.Duration
 // real dolt sql-server process.
 var ensureRunningDetailed = doltserver.EnsureRunningDetailed
 
+// stopRejectedAutoStartedServer stops a repo-local dolt sql-server that
+// newServerMode's fail-closed checks (GH#4052) decided not to use. Declared
+// as a var (matching ensureRunningDetailed above) so unit tests can stub it
+// and assert whether it was invoked, without spawning or killing a real
+// dolt sql-server process.
+var stopRejectedAutoStartedServer = doltserver.Stop
+
 // newServerMode creates a DoltStore connected to a running dolt sql-server.
 // This path is pure Go and does not require CGO.
 func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
@@ -1506,6 +1563,23 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		// to manage their own server lifecycle.
 		canAutoStart := serverOpenCanAutoStart(cfg)
 		if canAutoStart {
+			// Snapshot the port file's exact pre-call state before letting
+			// EnsureRunningDetailed write to it. Start() (and the
+			// adopt-existing-server path) write serverDir's port file with
+			// the actual listening port *inside* EnsureRunningDetailed —
+			// before either fail-closed check below runs. Left in place, a
+			// fail-closed return here still leaves that new port findable
+			// via the port-file source (PortSourcePortFile, non-authoritative),
+			// so a second, identical invocation would resolve the port file
+			// instead of the authoritative source, adopt the server we just
+			// declined to use, and silently succeed — permanently disarming
+			// the guard after exactly one invocation (GH#4052 round 3). The
+			// fail-closed branches below restore this snapshot before
+			// returning so a retry re-triggers the same check.
+			portFileSnap, snapErr := doltserver.SnapshotPortFile(serverDir)
+			if snapErr != nil {
+				fmt.Fprintf(os.Stderr, "Warning: could not snapshot port file before auto-start: %v\n", snapErr)
+			}
 			port, startedByUs, startErr := ensureRunningDetailed(resolvedBeadsDir)
 			if startErr != nil {
 				return nil, fmt.Errorf("Dolt server unreachable at %s and auto-start failed: %w\n\n"+
@@ -1544,9 +1618,7 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 					// write commands report success when Dolt is
 					// unreachable").
 					if cfg.ServerPortSharedServer {
-						if autoStartedDir != "" {
-							_ = autoStartRelease(autoStartedDir)
-						}
+						undoRejectedAutoStart(serverDir, startedByUs, autoStartedDir, portFileSnap, snapErr)
 						if breaker != nil {
 							breaker.RecordFailure()
 						}
@@ -1562,9 +1634,7 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 							cfg.ServerPort, cfg.ServerPortSource, port, port, cfg.ServerPort)
 					}
 					if cfg.ServerPortSource.IsAuthoritative() {
-						if autoStartedDir != "" {
-							_ = autoStartRelease(autoStartedDir)
-						}
+						undoRejectedAutoStart(serverDir, startedByUs, autoStartedDir, portFileSnap, snapErr)
 						if breaker != nil {
 							breaker.RecordFailure()
 						}

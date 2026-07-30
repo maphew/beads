@@ -517,6 +517,68 @@ func ReadPortFile(beadsDir string) int {
 	return readPortFile(beadsDir)
 }
 
+// PortFileSnapshot captures the exact prior contents of a project's port
+// file, so a caller that speculatively lets EnsureRunningDetailed write a
+// new one can restore the pre-call state exactly if it later decides not to
+// use the new server (GH#4052 fail-closed paths). Existed is false when the
+// file did not exist before the snapshot; in that case Data is nil and
+// RestorePortFile removes the file rather than rewriting it.
+type PortFileSnapshot struct {
+	Data    []byte
+	Existed bool
+}
+
+// SnapshotPortFile captures the current on-disk state of beadsDir's port
+// file (see PortFileSnapshot). Read-only; does not mutate anything.
+func SnapshotPortFile(beadsDir string) (PortFileSnapshot, error) {
+	data, err := os.ReadFile(portPath(beadsDir))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return PortFileSnapshot{}, nil
+		}
+		return PortFileSnapshot{}, err
+	}
+	// Copy: os.ReadFile's backing array should not be retained/mutated by
+	// later callers of the same path.
+	cp := make([]byte, len(data))
+	copy(cp, data)
+	return PortFileSnapshot{Data: cp, Existed: true}, nil
+}
+
+// RestorePortFile restores beadsDir's port file to the state captured by
+// snap: removes the file if it did not exist before, or rewrites it with the
+// exact prior bytes (write-temp-then-rename, matching writePortFile, so a
+// concurrent reader never observes a partially written file). Used on
+// fail-closed auto-start paths (GH#4052) that must leave no port-file trace
+// of a server they decided not to use.
+func RestorePortFile(beadsDir string, snap PortFileSnapshot) error {
+	path := portPath(beadsDir)
+	if !snap.Existed {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	}
+	tmp, err := os.CreateTemp(beadsDir, PortFileName+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) //nolint:errcheck // no-op after successful rename
+	if _, err := tmp.Write(snap.Data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
+}
+
 func configYamlPort(beadsDir string) int {
 	path := filepath.Join(ResolveDoltDir(beadsDir), "config.yaml")
 	if _, err := os.Stat(path); err != nil {
