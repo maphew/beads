@@ -337,6 +337,16 @@ type Config struct {
 	// safe (GH#4052).
 	ServerPortSource doltserver.PortSource
 
+	// ServerPortSharedServer mirrors doltserver.Config.PortSharedServer:
+	// true when ServerPort was resolved via shared-server mode
+	// (BEADS_DOLT_SHARED_SERVER=1). In shared-server mode, auto-start's
+	// EnsureRunningDetailed(resolvedBeadsDir) always spins up a repo-local
+	// server (a different database than the shared one), so a port change
+	// here is never a benign refresh regardless of ServerPortSource —
+	// consulted by newServerMode's auto-start path alongside
+	// ServerPortSource.IsAuthoritative() (GH#4052).
+	ServerPortSharedServer bool
+
 	// Remote auth for Hosted Dolt push/pull (optional)
 	// When set, Push/Pull use the --user flag and set DOLT_REMOTE_PASSWORD env var.
 	RemoteUser     string // Hosted Dolt remote user (set via DOLT_REMOTE_USER env var)
@@ -1252,6 +1262,7 @@ func applyConfigDefaults(cfg *Config) {
 			if resolved := doltserver.DefaultConfig(resolveDir); resolved.Port > 0 {
 				cfg.ServerPort = resolved.Port
 				cfg.ServerPortSource = resolved.PortSource
+				cfg.ServerPortSharedServer = resolved.PortSharedServer
 			}
 		}
 	}
@@ -1520,6 +1531,36 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 					// (e.g. a shared-server host serving multiple repos);
 					// only bd's own bookkeeping is safe to replace without
 					// confirmation.
+					//
+					// Shared-server mode is a second, orthogonal reason to
+					// fail closed regardless of ServerPortSource: the
+					// configured port resolved from the *shared* server
+					// directory, but EnsureRunningDetailed(resolvedBeadsDir)
+					// above always auto-starts a *repo-local* server — a
+					// different database than the shared one. Retargeting
+					// there is never a benign port refresh; it means the
+					// shared server is down and bd just silently wrote
+					// somewhere else instead (GH#4052, "Shared-server mode:
+					// write commands report success when Dolt is
+					// unreachable").
+					if cfg.ServerPortSharedServer {
+						if autoStartedDir != "" {
+							_ = autoStartRelease(autoStartedDir)
+						}
+						if breaker != nil {
+							breaker.RecordFailure()
+						}
+						return nil, fmt.Errorf(
+							"Shared Dolt server configured at port %d (source: %s) is unreachable; "+
+								"auto-start started a repo-local server on port %d instead, but bd will "+
+								"not silently write to it\n\n"+
+								"A repo-local server is a different database than the shared one, so "+
+								"using port %d here would silently write to the wrong database.\n\n"+
+								"To proceed:\n"+
+								"  - Restart the shared Dolt server: bd dolt start\n"+
+								"  - Or check why it stopped responding on port %d before retrying",
+							cfg.ServerPort, cfg.ServerPortSource, port, port, cfg.ServerPort)
+					}
 					if cfg.ServerPortSource.IsAuthoritative() {
 						if autoStartedDir != "" {
 							_ = autoStartRelease(autoStartedDir)

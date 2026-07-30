@@ -151,6 +151,60 @@ func TestDefaultConfigPortSource(t *testing.T) {
 	}
 }
 
+// TestDefaultConfigPortSharedServer asserts that DefaultConfig sets
+// PortSharedServer whenever port resolution happened in shared-server mode
+// (BEADS_DOLT_SHARED_SERVER=1) — both when a source resolves a port from the
+// shared server directory, and when no source resolves one and the fixed
+// DefaultSharedServerPort fallback applies — and that it stays false
+// otherwise. newServerMode's auto-start fail-closed check (GH#4052) relies
+// on this: in shared-server mode, retargeting always means auto-start spun
+// up a repo-local server distinct from the shared one, regardless of
+// PortSource.IsAuthoritative().
+func TestDefaultConfigPortSharedServer(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+
+	// Per-project mode: never shared, regardless of source.
+	beadsDir := t.TempDir()
+	if cfg := DefaultConfig(beadsDir); cfg.PortSharedServer {
+		t.Fatalf("per-project mode, no port configured: PortSharedServer = true, want false")
+	}
+	writeMetadataPort(t, beadsDir, 6001)
+	if cfg := DefaultConfig(beadsDir); cfg.PortSharedServer {
+		t.Fatalf("per-project mode, metadata.json port: PortSharedServer = true, want false")
+	}
+
+	// Shared-server mode, isolated to a temp shared-server dir so this test
+	// doesn't touch the real ~/.beads/shared-server.
+	sharedDir := t.TempDir()
+	t.Setenv("BEADS_SHARED_SERVER_DIR", sharedDir)
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+
+	// No port source resolves in the shared dir: falls back to the fixed
+	// shared server port.
+	cfg := DefaultConfig(t.TempDir())
+	if cfg.Port != DefaultSharedServerPort {
+		t.Fatalf("shared mode fallback: port = %d, want %d", cfg.Port, DefaultSharedServerPort)
+	}
+	if cfg.PortSource != PortSourceUnset {
+		t.Fatalf("shared mode fallback: source = %q, want %q", cfg.PortSource, PortSourceUnset)
+	}
+	if !cfg.PortSharedServer {
+		t.Fatalf("shared mode fallback: PortSharedServer = false, want true")
+	}
+
+	// A source resolves within the shared dir (metadata.json in this case):
+	// still shared, and PortSource still reports the resolving source.
+	writeMetadataPort(t, sharedDir, 6002)
+	cfg = DefaultConfig(t.TempDir())
+	if cfg.Port != 6002 || cfg.PortSource != PortSourceMetadataJSON {
+		t.Fatalf("shared mode, source resolved: port=%d source=%q, want 6002/%q", cfg.Port, cfg.PortSource, PortSourceMetadataJSON)
+	}
+	if !cfg.PortSharedServer {
+		t.Fatalf("shared mode, source resolved: PortSharedServer = false, want true")
+	}
+}
+
 func writeMetadataPort(t *testing.T, beadsDir string, port int) {
 	t.Helper()
 	data, err := json.Marshal(map[string]any{"dolt_server_port": port})

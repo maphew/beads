@@ -174,3 +174,80 @@ func TestNewServerMode_ZeroServerPort_Unaffected(t *testing.T) {
 		t.Errorf("cfg.ServerPort = %d, want adopted ephemeral port %d", cfg.ServerPort, newPort)
 	}
 }
+
+// --- Shared-server mode (GH#4052 primary scenario) ---
+//
+// In shared-server mode, DefaultConfig resolves the port from the *shared*
+// server directory's port sources (or falls back to DefaultSharedServerPort
+// when none resolve one), but EnsureRunningDetailed(resolvedBeadsDir) in
+// newServerMode's auto-start branch always starts a *repo-local* server.
+// That is a different database than the shared one, so a port change here
+// must fail closed regardless of ServerPortSource — including
+// PortSourcePortFile, which is authoritative-false and would otherwise
+// silently retarget (this is exactly the scenario the title of GH#4052
+// describes: "write commands report success when Dolt is unreachable").
+
+// baseAutoStartCfgShared is baseAutoStartCfg plus ServerPortSharedServer set,
+// modeling a Config built by applyConfigDefaults in shared-server mode.
+func baseAutoStartCfgShared(t *testing.T, database string, serverPort int, source doltserver.PortSource) *Config {
+	t.Helper()
+	cfg := baseAutoStartCfg(t, database, serverPort, source)
+	cfg.ServerPortSharedServer = true
+	return cfg
+}
+
+// TestNewServerMode_SharedServerResolvedPort_PortFileSource_FailsClosed is
+// the regression test for the gap identified in review: a shared-server-mode
+// port sourced from the (shared) port file — non-authoritative by
+// PortSource.IsAuthoritative() alone — must still fail closed, because
+// auto-start would create a repo-local server, not reconnect to the shared
+// one. Reverting the ServerPortSharedServer half of the condition in
+// newServerMode makes this test fail (confirmed; see session report).
+func TestNewServerMode_SharedServerResolvedPort_PortFileSource_FailsClosed(t *testing.T) {
+	const configuredPort = 1
+	const newPort = 54326
+	cfg := baseAutoStartCfgShared(t, "test_port_provenance_shared_portfile", configuredPort, doltserver.PortSourcePortFile)
+	stubEnsureRunningDetailed(t, newPort, false, nil)
+
+	_, err := newServerMode(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("expected fail-closed error when a shared-server-resolved port disagrees with auto-start's port")
+	}
+	msg := err.Error()
+	for _, want := range []string{
+		strconv.Itoa(configuredPort),
+		strconv.Itoa(newPort),
+		"Shared Dolt server",
+		"different database",
+		"bd dolt start",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error message missing %q: %s", want, msg)
+		}
+	}
+	if cfg.ServerPort != configuredPort {
+		t.Errorf("cfg.ServerPort mutated to %d on fail-closed path, want unchanged %d", cfg.ServerPort, configuredPort)
+	}
+}
+
+// TestNewServerMode_SharedServerFixedPortFallback_FailsClosed covers the
+// second shared-mode branch in doltserver.DefaultConfig: no port source
+// resolved a value, so it fell back to DefaultSharedServerPort
+// (PortSourceUnset, ServerPortSharedServer true). That must also fail closed.
+func TestNewServerMode_SharedServerFixedPortFallback_FailsClosed(t *testing.T) {
+	const configuredPort = 1
+	const newPort = 54327
+	cfg := baseAutoStartCfgShared(t, "test_port_provenance_shared_fallback", configuredPort, doltserver.PortSourceUnset)
+	stubEnsureRunningDetailed(t, newPort, false, nil)
+
+	_, err := newServerMode(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("expected fail-closed error for the shared-mode fixed-port fallback case")
+	}
+	if !strings.Contains(err.Error(), "Shared Dolt server") {
+		t.Errorf("expected shared-server fail-closed message, got: %v", err)
+	}
+	if cfg.ServerPort != configuredPort {
+		t.Errorf("cfg.ServerPort mutated to %d on fail-closed path, want unchanged %d", cfg.ServerPort, configuredPort)
+	}
+}

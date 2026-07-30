@@ -319,6 +319,18 @@ type Config struct {
 	// bd's own port-file bookkeeping, not safe for a source where the user
 	// (or config on the user's behalf) explicitly asserted the port.
 	PortSource PortSource
+
+	// PortSharedServer records whether Port was resolved in shared-server
+	// mode (BEADS_DOLT_SHARED_SERVER=1): either because port resolution
+	// consulted the shared server directory's sources, or because no source
+	// resolved a port and DefaultConfig fell back to DefaultSharedServerPort.
+	// Orthogonal to PortSource — a shared-mode port can come from any source
+	// (env, port file, config.yaml, ...). Callers use this together with
+	// PortSource.IsAuthoritative() to decide whether auto-starting a
+	// repo-local server on a different port is safe: it never is here,
+	// because the shared server is a different database than whatever
+	// auto-start would create locally (GH#4052).
+	PortSharedServer bool
 }
 
 // State holds runtime information about a managed server.
@@ -657,9 +669,11 @@ func PortSourceLabels() []string {
 // listening port, so already-running-server connections use the right port.
 func DefaultConfig(beadsDir string) *Config {
 	// In shared mode, use the shared server directory for port resolution
+	sharedMode := false
 	if IsSharedServerMode() {
 		if sharedDir, err := SharedServerDir(); err == nil {
 			beadsDir = sharedDir
+			sharedMode = true
 		}
 	}
 
@@ -673,6 +687,7 @@ func DefaultConfig(beadsDir string) *Config {
 		if port, ok := src.resolve(beadsDir); ok {
 			cfg.Port = port
 			cfg.PortSource = src.source
+			cfg.PortSharedServer = sharedMode
 			break
 		}
 	}
@@ -682,6 +697,7 @@ func DefaultConfig(beadsDir string) *Config {
 	// ephemeral port from the OS (GH#2098, GH#2372).
 	if cfg.Port == 0 && IsSharedServerMode() {
 		cfg.Port = DefaultSharedServerPort // 3308 - avoids orchestrator conflict on 3307
+		cfg.PortSharedServer = true
 	}
 
 	return cfg
