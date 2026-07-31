@@ -28,6 +28,13 @@ type fakeFallbackStore struct {
 	getStatistics       func(context.Context) (*types.Statistics, error)
 }
 
+// The import pre-validation reads the custom vocabulary before partitioning
+// records (GH#4492). The embedded DoltStorage is nil, so these must be real
+// methods or every auto-import test panics.
+func (f *fakeFallbackStore) GetCustomStatuses(context.Context) ([]string, error) { return nil, nil }
+
+func (f *fakeFallbackStore) GetCustomTypes(context.Context) ([]string, error) { return nil, nil }
+
 func (f *fakeFallbackStore) GetStatistics(ctx context.Context) (*types.Statistics, error) {
 	if f.getStatistics != nil {
 		return f.getStatistics(ctx)
@@ -387,7 +394,8 @@ func TestMaybeAutoImportJSONL_ChangedJSONLBypassesSuccessStamp(t *testing.T) {
 // captureOptsStore is a storage.DoltStorage that records the
 // BatchCreateOptions handed to CreateIssuesWithFullOptions. Every other
 // method panics (embedded nil interface); the import plumbing under test
-// only touches CreateIssuesWithFullOptions, GetConfig and SetConfig.
+// only touches CreateIssuesWithFullOptions, GetConfig, SetConfig and the
+// custom-vocabulary reads the import pre-validation makes (GH#4492).
 type captureOptsStore struct {
 	storage.DoltStorage // nil — panics on any non-overridden method
 	prefix              string
@@ -398,6 +406,10 @@ func (c *captureOptsStore) CreateIssuesWithFullOptions(_ context.Context, _ []*t
 	c.gotOpts = opts
 	return nil
 }
+
+func (c *captureOptsStore) GetCustomStatuses(context.Context) ([]string, error) { return nil, nil }
+
+func (c *captureOptsStore) GetCustomTypes(context.Context) ([]string, error) { return nil, nil }
 
 func (c *captureOptsStore) GetConfig(_ context.Context, _ string) (string, error) {
 	return c.prefix, nil
