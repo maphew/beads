@@ -793,7 +793,15 @@ var rootCmd = &cobra.Command{
 		// Set up signal-aware context with batch commit flush on shutdown.
 		// Unlike signal.NotifyContext, this also handles SIGHUP and flushes
 		// pending batch commits before canceling the context.
-		rootCtx, rootCancel = setupGracefulShutdown()
+		//
+		// Publish through setRootContext, not a bare assignment to the
+		// globals: cmdCtx exists by now (initCommandContext above), so
+		// getRootContext() reads cmdCtx.RootCtx, and the commands that
+		// return early from this hook -- every skipsStoreInit command,
+		// migrate among them -- never reach syncCommandContext to have it
+		// backfilled. A bare assignment leaves those commands reading a nil
+		// per-command context and losing Ctrl-C entirely.
+		setRootContext(setupGracefulShutdown())
 
 		// Initialize OTel (no-op unless BD_OTEL_METRICS_URL or BD_OTEL_STDOUT=true).
 		// Must run before any DB access so SQL spans nest under command spans.
@@ -1552,6 +1560,27 @@ var rootCmd = &cobra.Command{
 		return nil
 	},
 	PersistentPostRunE: func(cmd *cobra.Command, args []string) error {
+		// Registered FIRST so it runs LAST: the signal context must outlive
+		// the store/gate cleanup below, which passes rootCtx to
+		// uowProvider.Close. Canceling in the function body (as this used
+		// to) handed those closers a dead context on the way out.
+		//
+		// Clearing matters as much as canceling. Leaving rootCtx pointing at
+		// the context we just canceled is harmless when a real bd process
+		// exits here, but every in-process caller that runs Execute() more
+		// than once -- the cmd/bd test binary, library embedders -- would
+		// hand that dead context to the next command, and anything reading
+		// it refuses work nobody canceled. nil is the documented "no process
+		// signal context yet" state and normalizes back to Background().
+		//
+		// Deferred rather than inline so the early error returns below clear
+		// the globals too.
+		defer func() {
+			if rootCancel != nil {
+				rootCancel()
+			}
+			setRootContext(nil, nil)
+		}()
 		defer restoreChangeDirSelection()
 		// Release the workspace/physical-root gates on EVERY exit from
 		// PostRunE — deferred so the early error returns below cannot leak
@@ -1684,10 +1713,9 @@ var rootCmd = &cobra.Command{
 			}
 		}
 
-		// Cancel the signal context to clean up resources
-		if rootCancel != nil {
-			rootCancel()
-		}
+		// The signal context is canceled and cleared by the deferred hook
+		// registered at the top of this function, so that it also covers the
+		// early error returns above.
 		return nil
 	},
 }
