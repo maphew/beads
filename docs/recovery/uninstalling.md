@@ -89,9 +89,21 @@ If beads-specific git config remains, remove it:
 
 ```bash
 git config --unset beads.role 2>/dev/null || true
+git config --unset core.hooksPath 2>/dev/null || true
 git config --unset merge.beads.driver 2>/dev/null || true
 git config --unset merge.beads.name 2>/dev/null || true
 ```
+
+Do not skip `core.hooksPath`: if it is left set, git keeps looking for a
+hooks directory that no longer exists, and beads' post-checkout import can
+recreate a `.beads/` workspace under the old prefix.
+
+Check the value first, though — `core.hooksPath` is not beads-only. If
+`git config --get core.hooksPath` reports a directory that belongs to another
+hook manager (husky's `.husky/_`, for example) rather than `.beads/hooks` or
+`.beads-hooks`, leave it alone; unsetting it would disable that tool's hooks
+too. `bd doctor` applies the same rule and will not touch a hooks path it did
+not set.
 
 ## Remove the `bd` Binary
 
