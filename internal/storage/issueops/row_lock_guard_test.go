@@ -6,8 +6,13 @@ package issueops
 // in lease.go and types.Issue.RowVersion). The PR's substring stamp check
 // (strings.Contains(body, "revision")) was false-negative-prone — any comment
 // or identifier mentioning the column name counted as a stamp — so this port
-// tightens it to the actual mint forms: a freshRowLock()/FreshRowLock()/
-// RowLockClause() call in the enclosing function.
+// tightens it to the actual mint forms: a write's own literal must show a
+// genuine row_lock rewrite (literalStampsRowLock), and only the routed
+// funnels whose SET clause is itself assembled elsewhere (a %s placeholder)
+// fall back to an AST-based scan of the enclosing function for a
+// freshRowLock()/FreshRowLock()/RowLockClause() call (containsStampCall) —
+// never a text/regex scan, so a stamp mentioned only in a comment does not
+// count (comments are never part of the expression tree).
 
 import (
 	"go/ast"
@@ -25,13 +30,21 @@ import (
 // issues/wisps funnels build the table name with WispTableRouting/pickIssueTable
 // and interpolate it as %s). Auxiliary tables reached through the same %s
 // templating are filtered out by their distinguishing columns (auxOrExemptMarkers).
+//
+// This alone over-matches: fmt.Errorf("db: Update %s: %w", id, err) and
+// similar error-format strings echo the verb+%s shape without being SQL at
+// all. sqlWriteKeywordRe below requires a real clause keyword before a match
+// is counted.
 var issueTableWriteRe = regexp.MustCompile(`(?i)\b(?:UPDATE|INSERT\s+INTO)\s+(?:issues|wisps|%s)\b`)
 
-// rowLockStampRe matches the forms that actually mint a fresh token: a direct
-// freshRowLock()/FreshRowLock() call (close, reopen, unclaim, reclaim, insert)
-// or RowLockClause() (claim and the proxied domain/db paths, which interpolate
-// the returned "row_lock = ?" fragment into their SET clause).
-var rowLockStampRe = regexp.MustCompile(`\b(?:freshRowLock|FreshRowLock|RowLockClause)\s*\(`)
+// sqlWriteKeywordRe requires a genuine SQL clause keyword in the same
+// enclosing literal as an issueTableWriteRe match, so an error-format string
+// that merely names the verb for a message — "db: Update %s: %w", "db:
+// insert into %s: %w" (internal/storage/domain/db/issue.go) — is not counted
+// as a table write. Every real UPDATE has a SET; every real INSERT has
+// VALUES; the one aux-table copy that uses neither verb's usual keyword
+// (persistence.go's `INSERT INTO %s (%s) SELECT %s FROM %s ...`) has SELECT.
+var sqlWriteKeywordRe = regexp.MustCompile(`(?i)\b(?:SET|VALUES|SELECT)\b`)
 
 // auxOrExemptMarkers identify a matched write that legitimately does NOT stamp
 // row_lock. The exemption set is main's freshRowLock invariant (lease.go):
@@ -67,6 +80,14 @@ var rowLockStampRe = regexp.MustCompile(`\b(?:freshRowLock|FreshRowLock|RowLockC
 // RowLockClause()) when it is a real issues/wisps content write; add the
 // distinguishing column/marker here — with the WHY — when it is a new
 // auxiliary-table or deliberately-orthogonal write.
+//
+// A marker match is refused outright, regardless of which marker fired, when
+// the write's own SET clause assigns status, assignee, or started_at — the
+// three columns the freshRowLock invariant exists to guard (lease.go). Those
+// markers are legitimate only because is_blocked/compaction/rename writes
+// never touch that trio; a hypothetical future write that assigned e.g.
+// status in the same statement as an is_blocked-marked WHERE predicate must
+// still stamp. See setClauseAssignsLifecycleField.
 var auxOrExemptMarkers = []string{
 	"is_blocked",          // is_blocked recompute (exempt by design)
 	"compaction_level = ", // compaction bookkeeping/restore (exempt by design)
@@ -83,8 +104,18 @@ var auxOrExemptMarkers = []string{
 // the freshRowLock invariant: it proves, at build time, that EVERY issues/wisps
 // row write across both whole-row write stacks (issueops and the proxied
 // internal/storage/domain/db) either stamps a fresh row_lock or matches a
-// documented exemption. A forgotten write path is a test failure, not a silent
-// reintroduction of the zombie-merge bug or a stale-CAS hole in RowVersion.
+// documented exemption. A forgotten write path is a test failure, catching an
+// accidental reintroduction of the zombie-merge bug before it ships.
+//
+// This does not mean every documented exemption is itself free of a stale-CAS
+// hole in RowVersion — two of them knowingly are one: compaction rewrites
+// bookkeeping and compacted body text while deliberately preserving row_lock
+// (documented at storage.go:319-325, the same "lifecycle/ownership only"
+// contract this guard enforces), and a rename (updateIssueIDInTx) changes the
+// primary key without reminting the old row's token — but that is safe by
+// construction: the CAS predicate is keyed on id, so a stale ExpectedVersion
+// read against the pre-rename id matches no row at all rather than winning
+// against renamed content.
 func TestAllIssueRowWritesStampRowLock(t *testing.T) {
 	dirs := []string{".", filepath.Join("..", "domain", "db")}
 	checked := 0
@@ -135,20 +166,47 @@ func scanIssueWriteRowLockStamps(t *testing.T, path string, src []byte) (checked
 		start := fset.Position(fn.Body.Pos()).Offset
 		end := fset.Position(fn.Body.End()).Offset
 		body := string(src[start:end])
-		// The routed funnels (update.go, domain/db) assemble the SET clause
-		// separately from the UPDATE literal, so verify the mint against the
-		// whole function body, not just the write literal.
-		stampsRowLock := rowLockStampRe.MatchString(body)
+
+		// Computed lazily, and only once per function: the AST-based
+		// whole-function scan is needed only for the funnel fallback below,
+		// and most functions never reach it.
+		checkedStampCall, hasStampCall := false, false
+		funcStampsRowLock := func() bool {
+			if !checkedStampCall {
+				hasStampCall = containsStampCall(fn.Body)
+				checkedStampCall = true
+			}
+			return hasStampCall
+		}
 
 		for _, loc := range issueTableWriteRe.FindAllStringIndex(body, -1) {
+			matchText := body[loc[0]:loc[1]]
+			isInsert := strings.HasPrefix(strings.ToUpper(strings.TrimSpace(matchText)), "INSERT")
+
 			// Classify by the tight enclosing SQL literal so an adjacent
 			// statement's columns can't bleed into this write's markers.
 			stmt := enclosingSQLLiteral(body, loc[0])
-			if hasAnyMarker(stmt, auxOrExemptMarkers) {
+
+			if !sqlWriteKeywordRe.MatchString(stmt) {
+				// Matched the UPDATE/INSERT-INTO verb shape but names no SET/
+				// VALUES/SELECT: an error-format string, not SQL.
+				continue
+			}
+
+			if hasAnyMarker(stmt, auxOrExemptMarkers) && !setClauseAssignsLifecycleField(stmt) {
 				continue // auxiliary table or documented exemption: no stamp
 			}
 			checked++
-			if !stampsRowLock {
+
+			stamped := literalStampsRowLock(stmt, isInsert)
+			if !stamped && !isInsert && setClauseHasPercentSPlaceholder(stmt) {
+				// The write's own literal doesn't show the mint (its SET
+				// clause is itself a %s placeholder assembled elsewhere —
+				// update.go / domain-db's Update and Claim funnels), so fall
+				// back to the enclosing function as a whole.
+				stamped = funcStampsRowLock()
+			}
+			if !stamped {
 				violations = append(violations, path+": "+funcDisplayName(fn)+
 					" performs an issues/wisps row write that does not stamp row_lock:\n\t"+
 					firstSQLLine(stmt)+
@@ -160,9 +218,144 @@ func scanIssueWriteRowLockStamps(t *testing.T, path string, src []byte) (checked
 	return checked, violations
 }
 
+// setKeywordRe and whereKeywordRe bound an UPDATE statement's SET clause
+// (setClause below), scoping the finding-2 lifecycle-field refusal and the
+// finding-3 %s-placeholder funnel signal to the columns actually being
+// assigned — not the WHERE predicate, which can legitimately reuse the same
+// column names for an unrelated condition (blocked_state.go's mark/unmark
+// templates test `i.status <> 'closed'` in WHERE while only ever assigning
+// is_blocked/updated_at in SET).
+var (
+	setKeywordRe   = regexp.MustCompile(`(?i)\bSET\b`)
+	whereKeywordRe = regexp.MustCompile(`(?i)\bWHERE\b`)
+)
+
+// setClause extracts stmt's SET-to-WHERE fragment, or "" for a statement with
+// no SET keyword (an INSERT's column list, or a malformed match).
+func setClause(stmt string) string {
+	idx := setKeywordRe.FindStringIndex(stmt)
+	if idx == nil {
+		return ""
+	}
+	clause := stmt[idx[1]:]
+	if w := whereKeywordRe.FindStringIndex(clause); w != nil {
+		clause = clause[:w[0]]
+	}
+	return clause
+}
+
+// lifecycleFieldAssignRe matches an assignment to one of the three columns
+// the freshRowLock invariant (lease.go) exists to guard: status, assignee,
+// started_at (see storage.go's ExpectedVersion doc). A write assigning any of
+// these must stamp row_lock regardless of an aux/exempt marker matched
+// elsewhere in the statement.
+var lifecycleFieldAssignRe = regexp.MustCompile(`(?i)\b(?:status|assignee|started_at)\s*=`)
+
+// setClauseAssignsLifecycleField reports whether stmt's SET clause (not its
+// WHERE predicate) assigns status, assignee, or started_at. Used to refuse an
+// aux/exempt marker match outright when the write is really a lifecycle
+// write that merely happens to share a marker word — e.g. a hypothetical
+// `UPDATE issues SET status = ?, assignee = NULL WHERE is_blocked = 0` must
+// not be waved through by the is_blocked marker just because that word
+// appears in WHERE.
+func setClauseAssignsLifecycleField(stmt string) bool {
+	return lifecycleFieldAssignRe.MatchString(setClause(stmt))
+}
+
+// setClauseHasPercentSPlaceholder reports whether stmt's SET clause itself
+// contains a %s token — the signal that the clause (or part of it, e.g.
+// Claim's trailing row_lock fragment) is assembled elsewhere and interpolated
+// in, rather than written out in this literal. Used to gate the finding-3
+// function-wide fallback to only the funnel shape it is meant for.
+func setClauseHasPercentSPlaceholder(stmt string) bool {
+	return strings.Contains(setClause(stmt), "%s")
+}
+
+// rowLockAssignRe matches a genuine row_lock rewrite in an UPDATE's SET
+// clause: a bind-parameter assignment ("row_lock = ?", close/reopen/
+// unclaim/reclaim/update's generic path/persistence's storage-class move) or
+// the upsert refresh ("row_lock = VALUES(row_lock)", insertIssueRow's ON
+// DUPLICATE KEY branch). It deliberately does NOT match the token-preserving
+// self-assignment "row_lock = row_lock" — TestRowLockGuardHasTeeth's
+// mention-only case: that shape names the column without minting a fresh
+// value, exactly the false-positive shape this guard exists to catch.
+var rowLockAssignRe = regexp.MustCompile(`(?i)\brow_lock\s*=\s*(?:\?|VALUES\s*\(\s*row_lock\s*\))`)
+
+// insertRowLockColumnRe matches row_lock named in an INSERT's column list
+// (helpers.go's classic insertIssueIntoTable, domain/db's insertIssueRow):
+// every create path pairs it with FreshRowLock() in the same ExecContext
+// call's argument list.
+var insertRowLockColumnRe = regexp.MustCompile(`(?i)\brow_lock\b`)
+
+// literalStampsRowLock reports whether a write's OWN SQL literal demonstrates
+// a fresh row_lock rewrite, without needing to look at the surrounding Go
+// code at all. insert selects which literal shape to check: an INSERT names
+// row_lock in its column list, an UPDATE rewrites it in its SET clause — the
+// same text ("row_lock") means something different in each.
+func literalStampsRowLock(stmt string, insert bool) bool {
+	if insert {
+		return insertRowLockColumnRe.MatchString(stmt)
+	}
+	return rowLockAssignRe.MatchString(setClause(stmt))
+}
+
+// stampCallNames are the forms that actually mint a fresh token: a direct
+// freshRowLock()/FreshRowLock() call (close, reopen, unclaim, reclaim,
+// insert) or RowLockClause() (claim and the proxied domain/db paths, which
+// interpolate the returned "row_lock = ?" fragment into their SET clause).
+var stampCallNames = map[string]bool{
+	"freshRowLock":  true,
+	"FreshRowLock":  true,
+	"RowLockClause": true,
+}
+
+// containsStampCall walks node looking for a CallExpr naming one of
+// stampCallNames. It is AST-based, not a text/regex scan over source bytes,
+// so a stamp name that appears only in a comment — or in a string literal,
+// or as part of an unrelated identifier — does not count: comments are never
+// part of an expression tree, and the match below requires the name to be
+// the callee of an actual call, not merely mentioned. Used only for the
+// finding-3 fallback (a %s-templated SET clause whose mint call lives
+// elsewhere in the same function), never as the primary per-write check.
+func containsStampCall(node ast.Node) bool {
+	found := false
+	ast.Inspect(node, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		ce, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if name, ok := stampCallName(ce.Fun); ok && stampCallNames[name] {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
+}
+
+// stampCallName extracts the callee name from a plain call (freshRowLock())
+// or a package/method-qualified call (issueops.RowLockClause()).
+func stampCallName(expr ast.Expr) (string, bool) {
+	switch f := expr.(type) {
+	case *ast.Ident:
+		return f.Name, true
+	case *ast.SelectorExpr:
+		return f.Sel.Name, true
+	}
+	return "", false
+}
+
 // TestRowLockGuardHasTeeth proves the guard actually flags an unstamped
 // issues/wisps write and passes a correctly-stamped one — so a green
-// TestAllIssueRowWritesStampRowLock means something.
+// TestAllIssueRowWritesStampRowLock means something. The cases below also
+// cover the false positives closed by the adversarial review of ea1256462:
+// a noise match on an error-format string (finding 1), a lifecycle write
+// hiding behind an aux marker matched only in WHERE (finding 2), a direct
+// write riding an unrelated sibling write's stamp in the same function
+// (finding 3), and a stamp name that appears only in a comment (finding 4).
 func TestRowLockGuardHasTeeth(t *testing.T) {
 	stamped := []byte(`package p
 func w(tx T, id, s string) {
@@ -200,6 +393,60 @@ func w(tx T, id, s string) {
 }`)
 	if n, v := scanIssueWriteRowLockStamps(t, "aux.go", aux); n != 0 || len(v) != 0 {
 		t.Errorf("aux write: got checked=%d violations=%v; want checked=0 violations=none", n, v)
+	}
+
+	// An error-format string that echoes the verb+%s shape — like domain/db's
+	// issue.go fmt.Errorf("db: Update %s: %w", id, err) — must not be counted
+	// as a table write at all (finding 1 of the adversarial review of
+	// ea1256462): it names no SET/VALUES/SELECT.
+	errorFormatString := []byte(`package p
+func w(id string, err error) error {
+	return fmt.Errorf("db: Update %s: %w", id, err)
+}`)
+	if n, v := scanIssueWriteRowLockStamps(t, "errfmt.go", errorFormatString); n != 0 || len(v) != 0 {
+		t.Errorf("error-format string: got checked=%d violations=%v; want checked=0 violations=none", n, v)
+	}
+
+	// A lifecycle write (assigns status/assignee) must not escape via an
+	// aux/exempt marker matched only in its WHERE predicate (finding 2): a
+	// hypothetical `... WHERE is_blocked = 0` must not wave through a status
+	// change the way the real is_blocked-recompute exemption (which never
+	// assigns status/assignee/started_at) legitimately does.
+	lifecycleEscapeAttempt := []byte(`package p
+func w(tx T, id, s string) {
+	tx.ExecContext(ctx, "UPDATE issues SET status = ?, assignee = NULL WHERE is_blocked = 0", s, id)
+}`)
+	if n, v := scanIssueWriteRowLockStamps(t, "lifecycle.go", lifecycleEscapeAttempt); n != 1 || len(v) != 1 {
+		t.Errorf("lifecycle write behind an is_blocked WHERE marker: got checked=%d violations=%d; want checked=1 violations=1 (a marker in WHERE must not exempt a SET that assigns status/assignee/started_at)", n, len(v))
+	}
+
+	// finding 3: the stamp check used to be computed once per FUNCTION, so an
+	// unrelated funnel write's stamp call covered a sibling DIRECT write that
+	// never stamps at all. The two writes below share one function; the
+	// first is a real funnel (RowLockClause() interpolated via %s, stamped)
+	// and the second is a plain literal SET with no row_lock anywhere.
+	mixedFuncDirectUnstamped := []byte(`package p
+func w(tx T, id, s, table string) {
+	rowLockClause, rowLockArgs := RowLockClause()
+	tx.ExecContext(ctx, fmt.Sprintf("UPDATE %s SET status = ?, %s WHERE id = ?", table, rowLockClause), append([]interface{}{s}, rowLockArgs...)...)
+	tx.ExecContext(ctx, "UPDATE issues SET status = ? WHERE id = ?", s, id)
+}`)
+	if n, v := scanIssueWriteRowLockStamps(t, "mixeddirect.go", mixedFuncDirectUnstamped); n != 2 || len(v) != 1 {
+		t.Errorf("mixed function (one funnel write stamped, one direct write not): got checked=%d violations=%d; want checked=2 violations=1 (the direct write must not ride the funnel write's stamp)", n, len(v))
+	}
+
+	// finding 4: the funnel fallback itself must be AST-based, not a text
+	// scan over the function body — a stamp name mentioned only in a comment
+	// must not count. The write below has a %s-templated SET clause (so it
+	// is eligible for the fallback) and no real freshRowLock/RowLockClause
+	// call anywhere in the function, only a comment naming one.
+	commentOnlyStampCall := []byte(`package p
+func w(tx T, id, s, table string) {
+	// freshRowLock() is minted elsewhere (WRONG: no such call exists here).
+	tx.ExecContext(ctx, fmt.Sprintf("UPDATE %s SET status = ?, %s WHERE id = ?", table, "row_lock = ?"), s, id)
+}`)
+	if n, v := scanIssueWriteRowLockStamps(t, "commentonly.go", commentOnlyStampCall); n != 1 || len(v) != 1 {
+		t.Errorf("comment-only stamp mention: got checked=%d violations=%d; want checked=1 violations=1 (a stamp name mentioned only in a comment must not satisfy the funnel fallback)", n, len(v))
 	}
 }
 

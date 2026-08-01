@@ -476,7 +476,30 @@ func mergeIssuesConflictRow(row rawConflictRow) (issuesRowMerge, bool) {
 		// byte, so our token still vouches for exactly the content a CAS
 		// holder read and it is correct — and convergence-critical (see the
 		// exclusion comment above) — to leave it alone.
-		merge.setColumn("row_lock", freshRowLockDistinctFrom(ourLock, theirLock))
+		//
+		// This reminting on ANY settled write (not just a status/assignee/
+		// started_at change) is wider than RowVersion's documented contract
+		// (storage.go's CloseIssueOptions.ExpectedVersion doc, ~319-325):
+		// RowVersion is meant to track lifecycle/ownership writes only, and a
+		// merge that only touched e.g. title or description is not one of
+		// those. The widening is accepted as fail-safe rather than tightened
+		// to the lifecycle columns: the failure mode is a spurious
+		// ExpectedVersion mismatch on a non-lifecycle-only merge, and a caller
+		// that hits it simply re-reads and retries (types.Issue.RowVersion),
+		// never a missed conflict. Narrowing this to match the documented
+		// contract exactly is a separate, deliberate change, not implied by
+		// this fix.
+		//
+		// Gated on the column actually existing in the conflict table: a
+		// pre-0054 schema (before row_lock was added) has no
+		// our_row_lock/their_row_lock column, and unconditionally naming
+		// "row_lock" in the write-back plan there would turn a clean
+		// auto-merge into a hard "unknown column" pull failure. Degrade to
+		// the pre-row_lock behavior (no row_lock write) when the column is
+		// absent.
+		if _, hasRowLock := row.value("our", "row_lock"); hasRowLock {
+			merge.setColumn("row_lock", freshRowLockDistinctFrom(ourLock, theirLock))
+		}
 	}
 	return merge, true
 }

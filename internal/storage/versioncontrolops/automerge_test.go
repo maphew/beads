@@ -824,6 +824,32 @@ func TestMergeIssuesConflictRow_RowLockOnlyDivergenceIsNotAConflict(t *testing.T
 	}
 }
 
+// TestMergeIssuesConflictRow_NoRowLockColumnDegradesGracefully pins the
+// defensive gate added in the adversarial review of ea1256462 (finding 5): a
+// pre-0054 schema has no our_row_lock/their_row_lock column at all, and the
+// settle must still merge and write its other columns without naming
+// "row_lock" in the write-back plan -- naming a column the conflict table
+// doesn't have would turn a clean auto-merge into a hard pull failure.
+func TestMergeIssuesConflictRow_NoRowLockColumnDegradesGracefully(t *testing.T) {
+	row := conflictRowFor(t, map[string][3]any{
+		"id":         {"bd-22", "bd-22", "bd-22"},
+		"status":     {"open", "in_progress", "open"}, // only we changed it
+		"assignee":   {"", "", "alice"},               // only they changed it
+		"updated_at": {tsBase, tsOurs, tsTheirs},
+		// deliberately no "row_lock" key: simulates a pre-0054 schema.
+	})
+	m, ok := mergeIssuesConflictRow(row)
+	if !ok {
+		t.Fatal("expected disjoint-field conflict to merge even without a row_lock column")
+	}
+	if _, written := m.merged("row_lock"); written {
+		t.Error("must not write row_lock when the conflict table has no our_row_lock/their_row_lock column")
+	}
+	if _, written := m.merged("assignee"); !written {
+		t.Error("the settle's other columns must still be written")
+	}
+}
+
 // TestFreshRowLockDistinctFrom pins the reroll contract across the value shapes
 // a driver can hand back for the parents' tokens.
 func TestFreshRowLockDistinctFrom(t *testing.T) {
