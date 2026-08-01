@@ -653,12 +653,15 @@ func TestValidateVars(t *testing.T) {
 }
 
 func TestValidateProvidedVars(t *testing.T) {
+	fallback := "fallback"
 	formula := &Formula{
 		Formula: "mol-vars-provided",
 		Vars: map[string]*VarDef{
-			"required_var": {Required: true},
-			"enum_var":     {Enum: []string{"a", "b", "c"}},
-			"pattern_var":  {Pattern: `^[a-z]+$`},
+			"required_var":  {Required: true},
+			"enum_var":      {Enum: []string{"a", "b", "c"}},
+			"pattern_var":   {Pattern: `^[a-z]+$`},
+			"no_default":    {},
+			"defaulted_var": {Default: &fallback},
 		},
 	}
 
@@ -700,6 +703,21 @@ func TestValidateProvidedVars(t *testing.T) {
 		{
 			name:    "all provided and valid",
 			values:  map[string]string{"required_var": "x", "enum_var": "a", "pattern_var": "abc"},
+			wantErr: false,
+		},
+		{
+			// No default means the command paths treat the var as required, so
+			// a provided-empty value is the same unset-shell-variable trap.
+			name:    "no-default var provided empty is flagged",
+			values:  map[string]string{"no_default": ""},
+			wantErr: true,
+		},
+		{
+			// A defaulted, unconstrained var provided explicitly empty is a
+			// deliberate choice the formula tolerates; only enum/pattern
+			// constraints could reject it.
+			name:    "defaulted var provided empty is tolerated",
+			values:  map[string]string{"defaulted_var": ""},
 			wantErr: false,
 		},
 	}

@@ -495,7 +495,10 @@ func ValidateProvidedVars(formula *Formula, values map[string]string) error {
 func validateVarValue(name string, def *VarDef, val string, provided bool) []string {
 	var errs []string
 
-	if def.Required && provided && val == "" {
+	// A variable with no default is effectively required: the command paths
+	// (extractRequiredVariables) demand a value for it, so a provided-but-empty
+	// value is the same unset-shell-variable trap as for required=true.
+	if (def.Required || def.Default == nil) && provided && val == "" {
 		errs = append(errs, fmt.Sprintf("variable %q is required and cannot be empty", name))
 		return errs
 	}
