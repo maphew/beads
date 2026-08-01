@@ -309,7 +309,7 @@ neutralize_sql_clauses() {
 prepared_has_dml() {
   local scan
   scan="$(neutralize_sql_clauses "$1")"
-  printf '%s' "$scan" | grep -qE "(^|[^a-z0-9_])(insert|update|delete)([^a-z0-9_]|$)"
+  printf '%s' "$scan" | grep -qE "(^|[^a-z0-9_])(insert|update|delete|replace)([^a-z0-9_]|$)"
 }
 
 prepared_target_is_standin() {
@@ -318,7 +318,7 @@ prepared_target_is_standin() {
 
   scan="$(neutralize_sql_clauses "$scan")"
 
-  # UPDATE and DELETE are never exempted, even when the first table after the
+  # UPDATE, DELETE and REPLACE are never exempted, even when the first table after the
   # verb is a stand-in. Their multi-table forms put the modified table after a
   # JOIN — `UPDATE __stage s JOIN issues i ... SET i.priority = 0` writes to
   # issues, not to __stage — so the write target cannot be identified reliably
@@ -326,7 +326,7 @@ prepared_target_is_standin() {
   # conclusion is that the exemption belongs only on a form whose target is
   # unambiguous. An author who genuinely needs a conditional UPDATE should
   # restructure it the way 0059 does rather than have this check guess.
-  if printf '%s' "$scan" | grep -qE "(^|[^a-z0-9_])(update|delete)[[:space:]]"; then
+  if printf '%s' "$scan" | grep -qE "(^|[^a-z0-9_])(update|delete|replace)[[:space:]]"; then
     return 1
   fi
 
@@ -400,7 +400,7 @@ else
         if [ "${dml_flagged[$pvar]:-0}" = "1" ]; then
           hits="${hits}${lineno}: ${line}"$'\n'
         fi
-      elif [[ "$line" =~ prepare[[:space:]]+[a-z0-9_]+[[:space:]]+from[[:space:]]+\' ]]; then
+      elif [[ "$line" =~ prepare[[:space:]]+[a-z0-9_]+[[:space:]]+from[[:space:]]+[\'\"] ]]; then
         # `PREPARE stmt FROM 'UPDATE issues ...'` — the literal form, with no
         # user variable in play at all. This is the most direct spelling of the
         # hazard, not an exotic one, so it is checked in place rather than
