@@ -189,9 +189,33 @@ func (p *proxyServer) ListenAndServe(parentCtx context.Context) error {
 		return fmt.Errorf("start database server: %w", err)
 	}
 
-	if err := waitForServerReady(ctx, p.server, serverReadyTimeout); err != nil {
+	// Re-check the stop epoch on every readiness probe, not only after the
+	// wait. A concurrent `bd dolt stop` waits at most shutdownConfirmDeadline
+	// (5s) for proxy.lock — 6x shorter than serverReadyTimeout — and this
+	// process holds the lock with neither a spawn marker nor a pidfile
+	// published, so a stop that lands mid-startup would otherwise time out
+	// against a lock we keep holding for up to 30s. Checking inside the retry
+	// loop bounds the abort latency to about one backoff interval
+	// (readyMaxBackoff). A transient epoch-file read error must not kill an
+	// otherwise healthy startup, so it is treated as "no change" here; the
+	// post-wait fence below re-reads the epoch and surfaces a persistent read
+	// error before anything is published.
+	epochInterrupted := func() error {
+		changed, err := stopEpochChanged(p.rootDir, p.stopEpoch)
+		if err != nil || !changed {
+			return nil
+		}
+		return fmt.Errorf("%w for %s: stop epoch advanced during startup", errStartInterrupted, p.rootDir)
+	}
+	if err := waitForServerReady(ctx, p.server, serverReadyTimeout, epochInterrupted); err != nil {
 		p.stats.IncBackendStop()
 		_ = stopBackendBounded(p.server)
+		if errors.Is(err, errStartInterrupted) {
+			// Not a readiness failure: keep the same wording as the
+			// post-wait fence so logs and errors.Is callers see one shape
+			// for "a concurrent stop won".
+			return err
+		}
 		return fmt.Errorf("database server not ready: %w", err)
 	}
 	birth, err := procid.Capture(os.Getpid())
@@ -401,13 +425,23 @@ func (p *proxyServer) handleConn(ctx context.Context, client net.Conn) error {
 	return g.Wait()
 }
 
-func waitForServerReady(ctx context.Context, s server.DatabaseServer, timeout time.Duration) error {
+// waitForServerReady polls s until a dial succeeds or timeout elapses.
+// interrupted, when non-nil, is consulted before every probe: a non-nil
+// return aborts the wait immediately (no further retries) with that error.
+// ListenAndServe uses it to notice a concurrent stop mid-wait, whose 5s
+// lock deadline is far shorter than this wait's 30s budget.
+func waitForServerReady(ctx context.Context, s server.DatabaseServer, timeout time.Duration, interrupted func() error) error {
 	bo := backoff.NewExponentialBackOff()
 	bo.InitialInterval = readyInitialBackoff
 	bo.MaxInterval = readyMaxBackoff
 	bo.MaxElapsedTime = timeout
 
 	return backoff.Retry(func() error {
+		if interrupted != nil {
+			if err := interrupted(); err != nil {
+				return backoff.Permanent(err)
+			}
+		}
 		if !s.Running(ctx) {
 			return errors.New("database server not running")
 		}
