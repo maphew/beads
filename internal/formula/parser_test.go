@@ -652,6 +652,68 @@ func TestValidateVars(t *testing.T) {
 	}
 }
 
+func TestValidateProvidedVars(t *testing.T) {
+	formula := &Formula{
+		Formula: "mol-vars-provided",
+		Vars: map[string]*VarDef{
+			"required_var": {Required: true},
+			"enum_var":     {Enum: []string{"a", "b", "c"}},
+			"pattern_var":  {Pattern: `^[a-z]+$`},
+		},
+	}
+
+	tests := []struct {
+		name    string
+		values  map[string]string
+		wantErr bool
+	}{
+		{
+			name:    "required var entirely absent is not flagged",
+			values:  map[string]string{},
+			wantErr: false,
+		},
+		{
+			name:    "required var provided empty is flagged",
+			values:  map[string]string{"required_var": ""},
+			wantErr: true,
+		},
+		{
+			name:    "enum var absent is not flagged",
+			values:  map[string]string{},
+			wantErr: false,
+		},
+		{
+			name:    "enum var provided invalid is flagged",
+			values:  map[string]string{"enum_var": "invalid"},
+			wantErr: true,
+		},
+		{
+			name:    "enum var provided empty is flagged",
+			values:  map[string]string{"enum_var": ""},
+			wantErr: true,
+		},
+		{
+			name:    "pattern var provided invalid is flagged",
+			values:  map[string]string{"pattern_var": "123"},
+			wantErr: true,
+		},
+		{
+			name:    "all provided and valid",
+			values:  map[string]string{"required_var": "x", "enum_var": "a", "pattern_var": "abc"},
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateProvidedVars(formula, tt.values)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ValidateProvidedVars() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestApplyDefaults(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-defaults",
