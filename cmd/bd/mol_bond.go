@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -662,6 +663,12 @@ func resolveOrCookToSubgraph(ctx context.Context, s molReader, operand string, v
 	// condition filtering (bd-7zka.1).
 	subgraph, err := resolveAndCookFormulaWithVars(operand, nil, vars)
 	if err != nil {
+		if errors.Is(err, formula.ErrVarValidation) {
+			// Don't double-wrap: operand IS a formula, and the --var values
+			// it was given fail enum/pattern/required-empty constraints,
+			// which is a distinct condition from "not found".
+			return nil, false, err
+		}
 		return nil, false, fmt.Errorf("'%s' not found as issue or formula: %w", operand, err)
 	}
 

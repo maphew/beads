@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"time"
 
+	"github.com/steveyegge/beads/internal/formula"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
@@ -39,6 +41,12 @@ func runPourProxiedServer(ctx context.Context, in pourInput) error {
 		if sg.Phase == "vapor" {
 			warnPourVaporFormula(in.protoArg, in.varFlags)
 		}
+	} else if errors.Is(err, formula.ErrVarValidation) {
+		// in.protoArg IS a formula; the --var values it was given fail
+		// enum/pattern/required-empty constraints. Report that directly
+		// instead of falling through to the proto-ID lookup below, which
+		// would otherwise mask this as "not found as formula or proto ID".
+		return HandleError("%v", err)
 	}
 
 	res, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (pourProxiedResult, string, error) {

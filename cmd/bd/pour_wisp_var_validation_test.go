@@ -133,6 +133,29 @@ func TestPourMissingVarHintUnchanged(t *testing.T) {
 	}
 }
 
+// TestPourRejectsExplicitlyEmptyRequiredVar covers the bead's headline repro:
+// an unset shell variable interpolated into --var (e.g. --var
+// policy=$UNSET_SHELL_VAR) arrives as an explicitly-*provided*, empty-string
+// value rather than an absent flag, so it must hit ValidateProvidedVars'
+// required-and-empty check rather than the missing-var hint path.
+func TestPourRejectsExplicitlyEmptyRequiredVar(t *testing.T) {
+	writeVarValidationFormula(t)
+	s := newTestStoreWithPrefix(t, filepath.Join(t.TempDir(), "test.db"), "test")
+	withWispTestGlobals(t, s, context.Background())
+
+	var runErr error
+	stderr := captureStderr(t, func() {
+		runErr = runPour(makePourVarTestCmd([]string{"policy=", "slug=abc"}), []string{"pour-wisp-var-validation-test"})
+	})
+
+	if runErr == nil {
+		t.Fatal("runPour accepted an explicitly-empty value for a required variable")
+	}
+	if !strings.Contains(stderr, "is required and cannot be empty") {
+		t.Fatalf("runPour stderr = %q, want the required-and-empty message", stderr)
+	}
+}
+
 func TestWispRejectsEnumViolatingVar(t *testing.T) {
 	writeVarValidationFormula(t)
 	s := newTestStoreWithPrefix(t, filepath.Join(t.TempDir(), "test.db"), "test")

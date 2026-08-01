@@ -703,9 +703,10 @@ func resolveAndCookFormulaWithVars(formulaName string, searchPaths []string, con
 	// a var missing entirely is left to the caller's own UX (e.g. bd mol
 	// pour/wisp's missing-var hint), but a var explicitly provided with a
 	// value that violates its constraints must error here so it reaches
-	// every caller of this shared path (cook, pour, wisp, mol bond, mol
-	// seed) — previously only `bd cook --mode=runtime` enforced these
-	// (mybd-u2r6).
+	// every caller of this shared path (pour, wisp, mol bond, mol seed) —
+	// runCook does not go through this helper; it validates separately via
+	// its own formula.ValidateVars call under --mode=runtime. Previously
+	// only that `bd cook --mode=runtime` path enforced these (mybd-u2r6).
 	if conditionVars != nil {
 		if err := formula.ValidateProvidedVars(resolved, conditionVars); err != nil {
 			return nil, fmt.Errorf("formula %q: %w", formulaName, err)
