@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -14,6 +15,9 @@ import (
 	"github.com/spf13/pflag"
 
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/workapi"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // newReadyFlagsCommand clones readyCmd's flag definitions onto a fresh command
@@ -376,5 +380,36 @@ func TestGatherReadyInputDirectoryLabelDefaultsOnlyWhenNoLabelsGiven(t *testing.
 				}
 			}
 		})
+	}
+}
+
+// TestReadyExplainFilterDerivesTheReadyDefault pins the third copy of the ready
+// default out of existence (bd-3fs.3). Both --explain routes used to inline
+// WorkFilter{Status: StatusOpen, SortPolicy: SortPolicyPriority} beside the two
+// builders bd-ehi had already collapsed into workapi.BuildReadyFilter, so a
+// change to what "ready" means would have moved the listing and left the
+// diagnostic explaining a different set.
+//
+// The limit is the one field --explain sets for itself, and it is asserted
+// rather than derived: the listing takes workapi.DefaultReadyLimit, and an
+// --explain that inherited it would explain the first 100 ready issues of a
+// larger graph while reading as though it had explained the whole thing.
+func TestReadyExplainFilterDerivesTheReadyDefault(t *testing.T) {
+	got, err := readyExplainFilter()
+	if err != nil {
+		t.Fatalf("readyExplainFilter: %v", err)
+	}
+
+	want, err := workapi.BuildReadyFilter(issueops.ReadyRequest{Sort: string(types.SortPolicyPriority)})
+	if err != nil {
+		t.Fatalf("BuildReadyFilter: %v", err)
+	}
+	if want.Limit != workapi.DefaultReadyLimit {
+		t.Fatalf("listing default limit = %d, want workapi.DefaultReadyLimit (%d): this test is measuring against the wrong baseline", want.Limit, workapi.DefaultReadyLimit)
+	}
+	want.Limit = 0
+
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("explain filter = %+v\nwant the listing default, unlimited = %+v", got, want)
 	}
 }

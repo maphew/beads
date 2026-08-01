@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -135,15 +136,11 @@ func TestResolveServerModeUOWTopology_FallsBackToTCPWhenTheSocketIsDead(t *testi
 	assert.Equal(t, "127.0.0.1", topology.external.Host)
 }
 
-// A live socket still wins: the fallback is a fallback, not a preference for
-// TCP. Without this the previous test could be satisfied by deleting socket
-// support outright.
-func TestResolveServerModeUOWTopology_KeepsALiveSocket(t *testing.T) {
-	socket := filepath.Join(t.TempDir(), "dolt.sock")
-	ln, err := net.Listen("unix", socket)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = ln.Close() })
-
+// Socket selection belongs to the Dolt transport policy. The UOW topology
+// must preserve the policy's answer, even when that answer is a socket that
+// cannot be probed by this test.
+func TestResolveServerModeUOWTopology_KeepsSocketSelectedByTransportPolicy(t *testing.T) {
+	socket := filepath.Join(t.TempDir(), "not-a-live-socket.sock")
 	beadsDir := serverModeBeadsDir(t, &configfile.Config{
 		DoltServerHost:   "127.0.0.1",
 		DoltServerPort:   3521,
@@ -151,10 +148,21 @@ func TestResolveServerModeUOWTopology_KeepsALiveSocket(t *testing.T) {
 		DoltDatabase:     "beads_serve",
 	})
 
-	topology, err := resolveServerModeUOWTopology(context.Background(), beadsDir)
+	resolverCalls := 0
+	topology, err := resolveServerModeUOWTopologyWithTransportResolver(context.Background(), beadsDir,
+		func(gotSocket, gotHost string, gotPort int, gotTimeout time.Duration) string {
+			resolverCalls++
+			assert.Equal(t, socket, gotSocket)
+			assert.Equal(t, "127.0.0.1", gotHost)
+			assert.Equal(t, 3521, gotPort)
+			assert.Equal(t, serverModeSocketProbeTimeout, gotTimeout)
+			return socket
+		})
 	require.NoError(t, err)
+	require.Equal(t, 1, resolverCalls, "transport policy must be invoked exactly once")
 	assert.Equal(t, socket, topology.external.Socket)
-	assert.Zero(t, topology.external.Port, "a live socket is the transport; host/port must stay unset")
+	assert.Zero(t, topology.external.Host, "a selected socket is the transport; host must stay unset")
+	assert.Zero(t, topology.external.Port, "a selected socket is the transport; port must stay unset")
 }
 
 // The gateway refusal must be decided from the CONFIGURATION, never from the

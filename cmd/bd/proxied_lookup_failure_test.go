@@ -69,12 +69,15 @@ func (p lookupOnlyProvider) Close(context.Context) error { return nil }
 // otherwise with the domain seam's wrapped sql.ErrNoRows.
 func withStubbedProxiedLookup(t *testing.T, hardErr error) {
 	t.Helper()
-	oldProvider, oldJSON := uowProvider, jsonOutput
+	oldProvider, oldJSON, oldWrote := uowProvider, jsonOutput, commandDidWrite.Load()
 	uowProvider = lookupOnlyProvider{issues: stubLookupIssueUC{hardErr: hardErr}}
 	jsonOutput = false
 	t.Cleanup(func() {
 		uowProvider = oldProvider
 		jsonOutput = oldJSON
+		// The mutating commands set commandDidWrite before they know whether
+		// anything resolved, and it drives the deferred Dolt commit in main.
+		commandDidWrite.Store(oldWrote)
 	})
 }
 
@@ -93,6 +96,27 @@ func showViewCmd(view string) *cobra.Command {
 	return cmd
 }
 
+// cmdWithStringFlag registers one string flag so the command under test does
+// not fall back to an environment lookup for it - `bd comment add` shells out
+// to git for the author when --author is empty, which has nothing to do with
+// what is being tested here.
+func cmdWithStringFlag(name, value string) *cobra.Command {
+	cmd := &cobra.Command{}
+	cmd.Flags().String(name, value, "")
+	return cmd
+}
+
+// closeReasonCmd registers the reason flags `bd close` reads before it resolves
+// anything. collectCloseReasonFlags returns an error for an unregistered one,
+// which would abort the command ahead of the lookup under test.
+func closeReasonCmd() *cobra.Command {
+	cmd := &cobra.Command{}
+	for _, name := range []string{"resolution", "message", "comment"} {
+		cmd.Flags().String(name, "", "")
+	}
+	return cmd
+}
+
 // proxiedLookupCommands is every proxied-server call site that resolves an id
 // through workapi.GetIssueOrWisp, driven at its real entry point with an id
 // that cannot resolve. Each names the exact stderr line for the two ways that
@@ -106,12 +130,16 @@ var proxiedLookupCommands = []struct {
 	// rows in result set", except gate list, which said "not found" for every
 	// failure including a dead backend.
 	wantNotFound string
-	// wantHardErr is stderr when the lookup fails for any other reason.
+	// wantHardErr is stderr when the lookup fails for any other reason. This is
+	// the half that used to be unreachable: gate list and every mutating
+	// command below it said "not found" for a dropped connection, a stale
+	// schema, anything at all.
 	wantHardErr string
-	// exitsZero marks the views that report per id and keep going. --refs and
-	// --children print the failure and move to the next id, so one bad id out
-	// of one still leaves the command at exit 0. That predates this slice; the
-	// branch under test is what they print, not what they return.
+	// exitsZero marks the commands that report per id and keep going. --refs,
+	// --children, defer, undefer and todo done print the failure and move to
+	// the next id, so one bad id out of one still leaves the command at exit 0.
+	// That predates these slices; the branch under test is what they print, not
+	// what they return.
 	exitsZero bool
 }{
 	{
@@ -190,13 +218,111 @@ var proxiedLookupCommands = []struct {
 		wantNotFound: "Error: message bd-missing not found",
 		wantHardErr:  "Error: fetching message bd-missing: connection reset by peer",
 	},
+	// The mutating commands below reached the same seam through
+	// proxiedResolveIssueOrWisp, which returned a bare (nil, false) and so
+	// could only ever be read as "not found" (bd-3fs.2). Their wantNotFound
+	// lines are the ones they have always shipped; only wantHardErr is new.
+	{
+		name: "close",
+		run: func(ctx context.Context) error {
+			return runCloseProxiedServer(closeReasonCmd(), ctx, []string{stubMissingID})
+		},
+		wantNotFound: "Issue bd-missing not found",
+		wantHardErr:  "Error resolving bd-missing: connection reset by peer",
+	},
+	{
+		name: "reopen",
+		run: func(ctx context.Context) error {
+			return runReopenProxiedServer(&cobra.Command{}, ctx, []string{stubMissingID})
+		},
+		wantNotFound: "Issue bd-missing not found",
+		wantHardErr:  "Error resolving bd-missing: connection reset by peer",
+	},
+	{
+		name: "unclaim",
+		run: func(ctx context.Context) error {
+			return runUnclaimProxiedServer(ctx, []string{stubMissingID}, "", false)
+		},
+		wantNotFound: "Error resolving bd-missing: not found",
+		wantHardErr:  "Error resolving bd-missing: connection reset by peer",
+	},
+	{
+		name: "defer",
+		run: func(ctx context.Context) error {
+			return runDeferProxiedServer(ctx, []string{stubMissingID}, nil, "")
+		},
+		wantNotFound: "Error resolving bd-missing: not found",
+		wantHardErr:  "Error resolving bd-missing: connection reset by peer",
+		exitsZero:    true,
+	},
+	{
+		name: "undefer",
+		run: func(ctx context.Context) error {
+			return runUndeferProxiedServer(ctx, []string{stubMissingID})
+		},
+		wantNotFound: "Error getting bd-missing: not found",
+		wantHardErr:  "Error getting bd-missing: connection reset by peer",
+		exitsZero:    true,
+	},
+	{
+		name: "label add",
+		run: func(ctx context.Context) error {
+			return runLabelAddProxiedServer(ctx, []string{stubMissingID, "urgent"})
+		},
+		wantNotFound: `Error: label added: resolving issue ID "bd-missing": not found`,
+		wantHardErr:  `Error: label added: resolving issue ID "bd-missing": connection reset by peer`,
+	},
+	{
+		name: "label propagate",
+		run: func(ctx context.Context) error {
+			return runLabelPropagateProxiedServer(ctx, []string{stubMissingID, "urgent"})
+		},
+		wantNotFound: `Error: label propagate: resolving parent "bd-missing": not found`,
+		wantHardErr:  `Error: label propagate: resolving parent "bd-missing": connection reset by peer`,
+	},
+	{
+		name: "set state",
+		run: func(ctx context.Context) error {
+			return runSetStateProxiedServer(ctx, stubMissingID, "phase", "done", "")
+		},
+		wantNotFound: "Error: issue bd-missing not found",
+		wantHardErr:  "Error: resolving bd-missing: connection reset by peer",
+	},
+	{
+		name: "todo done",
+		run: func(ctx context.Context) error {
+			return runTodoDoneProxiedServer(&cobra.Command{}, ctx, []string{stubMissingID})
+		},
+		wantNotFound: "Error: failed to close bd-missing: issue bd-missing not found",
+		wantHardErr:  "Error: failed to close bd-missing: resolving bd-missing: connection reset by peer",
+		exitsZero:    true,
+	},
+	{
+		name: "assign",
+		run: func(ctx context.Context) error {
+			return runAssignProxiedServer(ctx, []string{stubMissingID, "someone"}, false)
+		},
+		wantNotFound: "Error: assign bd-missing: issue bd-missing not found",
+		wantHardErr:  "Error: assign bd-missing: resolving bd-missing: connection reset by peer",
+	},
+	{
+		name: "comment add",
+		run: func(ctx context.Context) error {
+			return runCommentsAddProxiedServer(cmdWithStringFlag("author", "tester"), ctx, []string{stubMissingID, "hello"})
+		},
+		wantNotFound: "Error: issue bd-missing not found",
+		wantHardErr:  "Error: resolving bd-missing: connection reset by peer",
+	},
 }
 
 // TestProxiedLookupReportsMissingIssue covers the errors.Is(storage.ErrNotFound)
-// branch bd-hc1 added at every proxied call site. All but one used to hand the
-// user db.issueSQLRepositoryImpl.Get's raw sql.ErrNoRows for a typo'd id; gate
-// list is the exception, and its own regression is in
-// TestProxiedLookupReportsBackendFailure.
+// branch at every proxied call site. Of the read commands bd-hc1 migrated, all
+// but one used to hand the user db.issueSQLRepositoryImpl.Get's raw
+// sql.ErrNoRows for a typo'd id. The exceptions are gate list and the mutating
+// commands, which already printed "not found" - for a miss and for a dead
+// backend alike, which is what TestProxiedLookupReportsBackendFailure guards.
+// Their lines here are unchanged, and that is the point: normalizing the
+// sentinel must not move the message a user sees for a typo.
 func TestProxiedLookupReportsMissingIssue(t *testing.T) {
 	for _, tc := range proxiedLookupCommands {
 		t.Run(tc.name, func(t *testing.T) {
@@ -220,8 +346,11 @@ func TestProxiedLookupReportsMissingIssue(t *testing.T) {
 
 // TestProxiedLookupReportsBackendFailure covers the other side of the same
 // branch: a lookup that failed for a reason other than absence must say so.
-// gate list is the regression this one guards - it answered "issue not found"
-// for a dropped connection, a stale schema, anything at all.
+// gate list is the regression bd-hc1 fixed here; every mutating command in the
+// table is bd-3fs.2's. Those went through proxiedResolveIssueOrWisp, which
+// returned a bare (nil, false) with the reason discarded, so "issue not found"
+// was the only thing a caller could print - for a dropped connection, a stale
+// schema, anything at all. Reverting any of those call sites fails this test.
 func TestProxiedLookupReportsBackendFailure(t *testing.T) {
 	for _, tc := range proxiedLookupCommands {
 		t.Run(tc.name, func(t *testing.T) {
@@ -261,6 +390,34 @@ func TestReportIssueLookupFailure(t *testing.T) {
 		})
 		if got, want := strings.TrimSpace(stderr), "Error resolving bd-gone: i/o timeout"; got != want {
 			t.Errorf("stderr = %q, want %q", got, want)
+		}
+	})
+}
+
+// TestUOWMolReaderLookupFailure covers the twelfth caller of the deleted
+// proxiedResolveIssueOrWisp. uowMolReader is a molReader adapter rather than a
+// command, so it is driven directly: the molecule commands wrap whatever it
+// returns, and what they must not be handed is "step not found" for a backend
+// that never answered.
+func TestUOWMolReaderLookupFailure(t *testing.T) {
+	newReader := func(hardErr error) uowMolReader {
+		return uowMolReader{uw: lookupOnlyUOW{issues: stubLookupIssueUC{hardErr: hardErr}}}
+	}
+
+	t.Run("absent id is not found", func(t *testing.T) {
+		_, err := newReader(nil).GetIssue(context.Background(), stubMissingID)
+		if got, want := fmt.Sprint(err), "issue bd-missing not found"; got != want {
+			t.Errorf("err = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("backend failure keeps the reason", func(t *testing.T) {
+		_, err := newReader(errors.New(stubBackendError)).GetIssue(context.Background(), stubMissingID)
+		if got, want := fmt.Sprint(err), "resolving bd-missing: "+stubBackendError; got != want {
+			t.Errorf("err = %q, want %q", got, want)
+		}
+		if strings.Contains(strings.ToLower(fmt.Sprint(err)), "not found") {
+			t.Errorf("backend failure reported as a missing issue: %v", err)
 		}
 	})
 }

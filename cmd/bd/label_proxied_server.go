@@ -45,9 +45,12 @@ func labelMutateProxied(ctx context.Context, args []string, operation string) er
 	err := uow.RunTx(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (string, error) {
 		resolvedIDs = resolvedIDs[:0]
 		for _, inputID := range issueIDs {
-			issue, isWisp := proxiedResolveIssueOrWisp(ctx, uw, inputID)
-			if issue == nil {
+			issue, isWisp, rerr := workapi.GetIssueOrWisp(ctx, workapi.NewUOWDetailSource(uw), inputID)
+			if errors.Is(rerr, storage.ErrNotFound) {
 				return "", fmt.Errorf("resolving issue ID %q: not found", inputID)
+			}
+			if rerr != nil {
+				return "", fmt.Errorf("resolving issue ID %q: %w", inputID, rerr)
 			}
 			for _, label := range labels {
 				var e error
@@ -247,9 +250,12 @@ func runLabelPropagateProxiedServer(ctx context.Context, args []string) error {
 		parentID string
 	)
 	err := uow.RunTx(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (string, error) {
-		parent, _ := proxiedResolveIssueOrWisp(ctx, uw, args[0])
-		if parent == nil {
+		parent, _, rerr := workapi.GetIssueOrWisp(ctx, workapi.NewUOWDetailSource(uw), args[0])
+		if errors.Is(rerr, storage.ErrNotFound) {
 			return "", fmt.Errorf("resolving parent %q: not found", args[0])
+		}
+		if rerr != nil {
+			return "", fmt.Errorf("resolving parent %q: %w", args[0], rerr)
 		}
 		parentID = parent.ID
 

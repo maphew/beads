@@ -164,9 +164,12 @@ func addCommentProxied(ctx context.Context, id, author, text string) (*types.Com
 		return nil, nil, HandleError("proxied-server UOW provider not initialized")
 	}
 	res, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (addCommentProxiedResult, string, error) {
-		issue, isWisp := proxiedResolveIssueOrWisp(ctx, uw, id)
-		if issue == nil {
+		issue, isWisp, rerr := workapi.GetIssueOrWisp(ctx, workapi.NewUOWDetailSource(uw), id)
+		if errors.Is(rerr, storage.ErrNotFound) {
 			return addCommentProxiedResult{}, "", fmt.Errorf("issue %s not found", id)
+		}
+		if rerr != nil {
+			return addCommentProxiedResult{}, "", fmt.Errorf("resolving %s: %w", id, rerr)
 		}
 		if err := validateIssueUpdatable(id, issue); err != nil {
 			return addCommentProxiedResult{}, "", err

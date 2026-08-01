@@ -732,6 +732,7 @@ For more options (--stdin, custom messages), see: bd vc commit`,
 		if msg == "" {
 			msg = fmt.Sprintf("bd: dolt commit (auto-commit) by %s", getActor())
 		}
+		beforeHash, beforeErr := st.GetCurrentCommit(ctx)
 		if err := st.Commit(ctx, msg); err != nil {
 			if isDoltNothingToCommit(err) {
 				fmt.Println("Nothing to commit.")
@@ -740,6 +741,16 @@ For more options (--stdin, custom messages), see: bd vc commit`,
 			return HandleError("%v", err)
 		}
 		commandDidExplicitDoltCommit = true
+
+		// A store whose Commit tolerates nothing-to-commit (e.g. the embedded
+		// store) returns a nil error even when HEAD did not move. Detect that
+		// case here instead of relying on the error, so both backends report
+		// the same "nothing to commit" outcome.
+		if afterHash, afterErr := st.GetCurrentCommit(ctx); beforeErr == nil && afterErr == nil && afterHash == beforeHash {
+			fmt.Println("Nothing to commit.")
+			return nil
+		}
+
 		fmt.Println("Committed.")
 		return nil
 	},
@@ -1561,9 +1572,10 @@ var doltRemoteCmd = &cobra.Command{
 	Long: `Manage Dolt remotes for push/pull replication.
 
 Subcommands:
-  add <name> <url>   Add a new remote
-  list               List all configured remotes
-  remove <name>      Remove a remote`,
+  add <name> <url>     Add a new remote
+  list                 List all configured remotes
+  remove <name>        Remove a remote
+  reset-data <name>    Replace a remote's data plane after a history squash`,
 }
 
 var doltRemoteAddCmd = &cobra.Command{
@@ -1777,9 +1789,11 @@ func init() {
 	doltCleanDatabasesCmd.Flags().Bool("dry-run", false, "Show what would be dropped without dropping")
 	doltCleanDatabasesCmd.Flags().Bool("purge-dropped", false, "After dropping, also run CALL DOLT_PURGE_DROPPED_DATABASES() — server-global and irreversible, see --help")
 	doltRemoteAddCmd.Flags().Bool("allow-git-origin", false, "Allow adding a Dolt remote whose URL matches the git origin (proceed with a warning instead of aborting)")
+	doltRemoteResetDataCmd.Flags().BoolVarP(&doltRemoteResetDataYes, "yes", "y", false, "Skip the confirmation prompt (required in non-interactive use)")
 	doltRemoteCmd.AddCommand(doltRemoteAddCmd)
 	doltRemoteCmd.AddCommand(doltRemoteListCmd)
 	doltRemoteCmd.AddCommand(doltRemoteRemoveCmd)
+	doltRemoteCmd.AddCommand(doltRemoteResetDataCmd)
 	doltCmd.AddCommand(doltShowCmd)
 	doltCmd.AddCommand(doltSetCmd)
 	doltCmd.AddCommand(doltTestCmd)

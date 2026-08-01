@@ -213,12 +213,20 @@ linters:
       - path: '^cmd/bd/list_show_filter_modes\.go$'
         linters:
           - forbidigo
-      # `bd ready` hands its filter to --claim, --gated, --explain and --mol,
-      # and readyInput carries it as a field for them. Routing only the plain
-      # listing through the role would fork the command in two, so the filter
-      # stays nameable here. `bd ready` is on the shared BUILDER and, on the
-      # proxied route, the shared EPILOGUE; it is not on the role, and this
-      # rule does not pretend otherwise.
+      # `bd ready` hands its filter to the plain listing and to --claim, and
+      # readyInput carries it as a field for them. Routing only the listing
+      # through the role would fork the command in two, so the filter stays
+      # nameable here. The other modes take no filter from readyInput: --gated
+      # and --mol answer a different question and short-circuit before the
+      # flags are gathered, and so does --explain, which is a whole-graph
+      # diagnostic and therefore builds its own fixed request through the same
+      # builder (readyExplainFilter, which names the type it returns) rather
+      # than inlining a third copy of the default - bd-3fs.3. The blocked-issue
+      # views in these files name the type directly for an empty filter or one
+      # carrying only a --parent id, which is the absence of a filter rather
+      # than one this command built. `bd ready` is on the shared BUILDER and,
+      # on the proxied route, the shared EPILOGUE; it is not on the role, and
+      # this rule does not pretend otherwise.
       - path: '^cmd/bd/ready(_input|_proxied_server)?\.go$'
         linters:
           - forbidigo
