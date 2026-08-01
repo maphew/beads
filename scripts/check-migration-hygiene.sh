@@ -30,8 +30,28 @@
 #      main-plane ALTER silently never reaches them (bd-hs7fa: 0060's
 #      wisps.storage_class missed every fresh clone; wy-pt82l before it:
 #      0054's wisps.row_lock, healed after the fact by ignored/0013).
+#   E. A new main-plane migration must not PREPARE/EXECUTE a DML statement
+#      (UPDATE/INSERT/DELETE built into a `SET @sql = '...'` string). The
+#      Dolt CLI batch path (`dolt sql -q`/`-f`, the AllMigrationsSQL()/
+#      fresh-bundle route) silently no-ops a prepared write there while
+#      EXECUTE reports success (dolthub/dolt#11345, mybd-p8i3). Prepared
+#      ALTER TABLE is the same underlying limitation but a separate, accepted
+#      idiom for idempotent DDL re-runs (see cli_migrations.go), so it is not
+#      flagged. Gate conditional writes on a stand-in table instead
+#      (precedent: 0059, gastownhall/beads#4877).
+#      This is a going-forward guard, and deliberately new-files-only: seven
+#      shipped main-plane migrations (0035, 0037, 0041, 0047, 0053, 0055,
+#      0058) already PREPARE writes to real tables. They are not a live bug
+#      and are not retrofits waiting to happen — a shipped migration is
+#      frozen, and on the one path this check is about (the fresh-schema
+#      bundle, i.e. an empty database) a data backfill is a no-op whether or
+#      not the prepared write lands. cliCompatibleMigrationSQL overrides only
+#      the subset whose prepared statements change the committed schema
+#      SHAPE, which is what the bundle's contract actually promises. The
+#      point of the check is that the idiom stops spreading into migrations
+#      where the write does matter.
 #
-# Checks C and D compare against $BASE_SHA if set (CI passes the PR base),
+# Checks C, D, and E compare against $BASE_SHA if set (CI passes the PR base),
 # else origin/main, else main; they are skipped with a warning when no base
 # is resolvable (e.g. shallow clone without the base commit).
 
@@ -204,6 +224,75 @@ else
   genuinely main-plane-only (e.g. the table is being flipped ONTO the
   ignored plane by this very migration), the twin is the migration that
   materializes the table for clones (precedent: 0062 + ignored/0019).
+EOF
+    fi
+  done
+fi
+
+# --- Check E: no PREPARE'd DML in new main-plane migrations -----------------
+# AllMigrationsSQL() (schema.go) only walks the main-plane migration series
+# to build the CLI fresh-bundle route, so this check is scoped to added_main
+# the same as check D; migrations/ignored/ never goes through `dolt sql -q/-f`
+# and is not scanned here.
+#
+# A PREPARE'd write is: `SET @var = '...'` (or `SET @var = IF(cond, '...',
+# '...')`) followed by `PREPARE <name> FROM @var; EXECUTE <name>`, where the
+# quoted text's first keyword is insert/update/delete. Statements are
+# correlated by variable name and buffered across lines so a multi-line
+# `SET @sql = IF(...)` (the common form here) is read as one statement; each
+# statement is expected to be self-contained between `=` and its terminating
+# `;` (true for every migration in this tree — none embed a literal `;`
+# inside the prepared-text string). Prepared ALTER TABLE uses the identical
+# @sql/PREPARE stmt/EXECUTE stmt shape and is deliberately not flagged: only
+# the leading keyword inside the quoted text decides.
+if [ -z "$base" ] || [ -z "${merge_base:-}" ]; then
+  echo "WARN (prepared DML) no usable base ref; skipping check E." >&2
+else
+  for f in $added_main; do
+    [ -f "$f" ] || continue
+    stripped=$(sed 's/--.*$//' "$f" | tr '[:upper:]' '[:lower:]')
+    declare -A dml_flagged=()
+    dml_var=""
+    stmt_buf=""
+    lineno=0
+    hits=""
+    while IFS= read -r line; do
+      lineno=$((lineno + 1))
+      if [ -n "$dml_var" ]; then
+        stmt_buf="$stmt_buf $line"
+      elif [[ "$line" =~ set[[:space:]]+@([a-z0-9_]+)[[:space:]]*= ]]; then
+        dml_var="${BASH_REMATCH[1]}"
+        stmt_buf="$line"
+      fi
+      if [ -n "$dml_var" ] && [[ "$stmt_buf" == *";"* ]]; then
+        if [[ "$stmt_buf" =~ \'[[:space:]]*(insert|update|delete)[[:space:]] ]]; then
+          dml_flagged["$dml_var"]=1
+        else
+          unset "dml_flagged[$dml_var]"
+        fi
+        dml_var=""
+        stmt_buf=""
+      fi
+      if [[ "$line" =~ prepare[[:space:]]+[a-z0-9_]+[[:space:]]+from[[:space:]]+@([a-z0-9_]+) ]]; then
+        pvar="${BASH_REMATCH[1]}"
+        if [ "${dml_flagged[$pvar]:-0}" = "1" ]; then
+          hits="${hits}${lineno}: ${line}"$'\n'
+        fi
+      fi
+    done <<<"$stripped"
+    unset dml_flagged
+    if [ -n "$hits" ]; then
+      fail=1
+      echo "FAIL (prepared DML) $f contains a PREPARE'd INSERT/UPDATE/DELETE:"
+      echo "$hits" | sed '/^$/d; s/^/  line /'
+      cat <<EOF
+  A PREPARE'd UPDATE/INSERT/DELETE silently no-ops under the Dolt CLI batch
+  path used to build the fresh-schema bundle (dolthub/dolt#11345): EXECUTE
+  reports success and changes nothing. Write the real-table mutation as
+  direct SQL; if it needs to be conditional, gate it on a stand-in table that
+  the direct statement reads instead of PREPARE'ing the write itself
+  (precedent: 0059, gastownhall/beads#4877). Prepared ALTER TABLE is a
+  separate, accepted idiom and is not what this check flags.
 EOF
     fi
   done
