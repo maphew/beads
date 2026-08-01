@@ -442,14 +442,21 @@ func ValidateVars(formula *Formula, values map[string]string) error {
 			errs = append(errs, fmt.Sprintf("variable %q is required", name))
 			continue
 		}
+		if def.Required && provided && val == "" {
+			errs = append(errs, fmt.Sprintf("variable %q is required and cannot be empty", name))
+			continue
+		}
 
 		// Use default if not provided
 		if !provided && def.Default != nil {
 			val = *def.Default
 		}
 
-		// Skip further validation if no value
-		if val == "" {
+		// Skip further validation only when the var was genuinely not
+		// provided (absent from the map). A value that was explicitly
+		// provided as "" must still be checked against enum/pattern
+		// constraints rather than silently passing.
+		if !provided && val == "" {
 			continue
 		}
 

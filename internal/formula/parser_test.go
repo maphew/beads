@@ -620,6 +620,26 @@ func TestValidateVars(t *testing.T) {
 			values:  map[string]string{"required_var": "x", "pattern_var": "123"},
 			wantErr: true,
 		},
+		{
+			name:    "required var provided empty",
+			values:  map[string]string{"required_var": ""},
+			wantErr: true,
+		},
+		{
+			name:    "enum var provided empty",
+			values:  map[string]string{"required_var": "x", "enum_var": ""},
+			wantErr: true,
+		},
+		{
+			name:    "pattern var provided empty",
+			values:  map[string]string{"required_var": "x", "pattern_var": ""},
+			wantErr: true,
+		},
+		{
+			name:    "optional var genuinely absent still ok",
+			values:  map[string]string{"required_var": "x"},
+			wantErr: false,
+		},
 	}
 
 	for _, tt := range tests {
