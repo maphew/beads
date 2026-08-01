@@ -194,15 +194,21 @@ func (p *proxyServer) ListenAndServe(parentCtx context.Context) error {
 	// (5s) for proxy.lock — 6x shorter than serverReadyTimeout — and this
 	// process holds the lock with neither a spawn marker nor a pidfile
 	// published, so a stop that lands mid-startup would otherwise time out
-	// against a lock we keep holding for up to 30s. Checking inside the retry
-	// loop bounds the abort latency to about one backoff interval
-	// (readyMaxBackoff). A transient epoch-file read error must not kill an
-	// otherwise healthy startup, so it is treated as "no change" here; the
-	// post-wait fence below re-reads the epoch and surfaces a persistent read
-	// error before anything is published.
+	// against a lock we keep holding for up to 30s. The check runs before
+	// each probe, so an epoch advance landing just after a check is not
+	// observed until the in-flight dial finishes (up to readyDialTimeout,
+	// 2s) plus the next backoff (up to readyMaxBackoff, 1s): worst case
+	// about 3s, still well inside the stop side's 5s deadline. A transient
+	// epoch-file read error must not kill an otherwise healthy startup, so
+	// it is treated as "no change" here; the post-wait fence below re-reads
+	// the epoch and surfaces a persistent read error before anything is
+	// published.
 	epochInterrupted := func() error {
-		changed, err := stopEpochChanged(p.rootDir, p.stopEpoch)
-		if err != nil || !changed {
+		changed, _ := stopEpochChanged(p.rootDir, p.stopEpoch)
+		if !changed {
+			// stopEpochChanged returns (false, err) on a read failure, so
+			// this also covers the error case: treat it as "no change" and
+			// let the post-wait fence surface a persistent read error.
 			return nil
 		}
 		return fmt.Errorf("%w for %s: stop epoch advanced during startup", errStartInterrupted, p.rootDir)

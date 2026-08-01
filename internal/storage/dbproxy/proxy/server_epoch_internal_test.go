@@ -100,11 +100,14 @@ func TestWaitForServerReady_InterruptAbortsWait(t *testing.T) {
 
 	require.Error(t, err)
 	assert.ErrorIs(t, err, errStartInterrupted)
-	// Three probes are separated by at most two max-length backoff intervals
-	// (2 * readyMaxBackoff = 2s); 10s leaves slack for slow CI while still
-	// proving the wait did not run out its 30s budget.
+	// This fake Dial fails instantly, so the three probes here are separated
+	// only by backoff, not an in-flight dial (production also has up to
+	// readyDialTimeout, 2s, on top — see the epochInterrupted comment in
+	// server.go for the real worst case, ~3s). Two max-length backoff
+	// intervals (2 * readyMaxBackoff = 2s); 10s leaves slack for slow CI
+	// while still proving the wait did not run out its 30s budget.
 	assert.Less(t, elapsed, 10*time.Second,
-		"readiness wait must abort within ~one backoff interval of the interrupt, not run out serverReadyTimeout")
+		"readiness wait must abort within a couple of backoff intervals of the interrupt, not run out serverReadyTimeout")
 	assert.GreaterOrEqual(t, calls.Load(), int64(3))
 }
 
@@ -120,7 +123,16 @@ type epochAdvanceOnDialServer struct {
 }
 
 func (s *epochAdvanceOnDialServer) Dial(_ context.Context) (net.Conn, error) {
-	s.once.Do(func() { require.NoError(s.t, advanceStopEpoch(s.rootDir)) })
+	// Dial runs on the same goroutine as the test today (via ListenAndServe's
+	// synchronous retry loop), but that is an implementation detail of the
+	// call path, not a guarantee. require.NoError's FailNow/Goexit is only
+	// legal on the test goroutine, so use t.Errorf here instead — it is
+	// documented safe to call from any goroutine.
+	s.once.Do(func() {
+		if err := advanceStopEpoch(s.rootDir); err != nil {
+			s.t.Errorf("advance stop epoch: %v", err)
+		}
+	})
 	return nil, errors.New("backend still starting")
 }
 
@@ -155,10 +167,20 @@ func TestListenAndServe_StopEpochAdvanceDuringReadinessWaitAbortsPromptly(t *tes
 
 	require.Error(t, err)
 	assert.ErrorIs(t, err, errStartInterrupted)
+	// The interrupted branch in ListenAndServe returns the raw errStartInterrupted-
+	// wrapped error, not the "database server not ready: %w" wrapper used for
+	// ordinary readiness failures — assert that distinction has teeth so a
+	// mutation dropping the errors.Is(err, errStartInterrupted) branch fails
+	// this test instead of leaving the package green.
+	assert.NotContains(t, err.Error(), "database server not ready:",
+		"an aborted-by-stop error must not carry the ordinary readiness-failure prefix")
 	// Without the in-loop check this scenario burns the full 30s readiness
-	// budget and then fails as "database server not ready" instead.
+	// budget and then fails as "database server not ready" instead. The
+	// real worst case here is bounded by the in-flight dial (this fake Dial
+	// returns immediately, so it doesn't apply) plus one backoff interval —
+	// see the epochInterrupted comment in server.go for the ~3s general bound.
 	assert.Less(t, elapsed, 15*time.Second,
-		"stop during readiness wait must abort within ~one backoff interval, not exhaust serverReadyTimeout")
+		"stop during readiness wait must abort promptly, not exhaust serverReadyTimeout")
 
 	pf, readErr := pidfile.Read(root, PIDFileName)
 	require.NoError(t, readErr)
