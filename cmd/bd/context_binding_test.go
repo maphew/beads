@@ -53,22 +53,6 @@ func resetRepoContextCachesForTest(t *testing.T) {
 	})
 }
 
-func safeTempDirForContextTest(t *testing.T) string {
-	t.Helper()
-	dir, err := os.MkdirTemp(".", ".tmp-context-*")
-	if err != nil {
-		t.Fatalf("mkdir safe temp dir: %v", err)
-	}
-	absDir, err := filepath.Abs(dir)
-	if err != nil {
-		t.Fatalf("abs safe temp dir: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = os.RemoveAll(absDir)
-	})
-	return absDir
-}
-
 type flagSnapshot struct {
 	value   string
 	changed bool
@@ -232,10 +216,17 @@ func TestDetectUserRoleForActiveRepoUsesSelectedBeadsDir(t *testing.T) {
 func TestActiveRepoPathForRoutingFallsBackToBeadsDirParent(t *testing.T) {
 	resetRepoContextCachesForTest(t)
 
-	targetDir := safeTempDirForContextTest(t)
+	// targetDir must sit outside any git repo, or beads.GetRepoContext()
+	// succeeds against it and the FindBeadsDir fallback under test is never
+	// reached. t.TempDir() resolves under os.TempDir(), which
+	// internal/beads/context.go's isPathInSafeBoundary explicitly admits.
+	targetDir := t.TempDir()
 	targetBeadsDir := filepath.Join(targetDir, ".beads")
 	writeTestConfigYAML(t, targetBeadsDir, "")
 
+	// The caller's CWD must also be outside any git repo, so
+	// beads.GetRepoContext() can't resolve via CWD either.
+	t.Chdir(t.TempDir())
 	t.Setenv("BEADS_DIR", targetBeadsDir)
 
 	if got := activeRepoPathForRouting(); got != targetDir {
