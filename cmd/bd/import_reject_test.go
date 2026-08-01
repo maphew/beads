@@ -13,10 +13,11 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// GH#4492: a JSONL import used to abort in its entirety on the first record the
-// writer refused. These tests pin the replacement contract: bad records are
-// dropped and reported, good records survive, and --strict can still get the
-// old all-or-nothing behaviour.
+// GH#4492: a JSONL import aborts in its entirety on the first record the writer
+// refused, and reported nothing useful about which record or why. These tests
+// pin the replacement contract: the abort stays the default, but it names the
+// offending line and the way past it, and --skip-invalid drops the bad records
+// while the good ones survive.
 
 func validImportIssue(id, title string) *types.Issue {
 	return &types.Issue{
@@ -261,7 +262,7 @@ func TestReportRejectedRecordsCapsPerRecordWarnings(t *testing.T) {
 		rejected = append(rejected, rejectedRecord{Line: i, Reason: "bad"})
 	}
 	var buf bytes.Buffer
-	reportRejectedRecords(&buf, "in.jsonl", rejected, "in.jsonl.rejected.jsonl", true)
+	reportRejectedRecords(&buf, "in.jsonl", rejected, "in.jsonl.rejected.jsonl")
 
 	out := buf.String()
 	if got := strings.Count(out, "skipped invalid record on line"); got != maxRejectWarnings {
@@ -270,7 +271,6 @@ func TestReportRejectedRecordsCapsPerRecordWarnings(t *testing.T) {
 	for _, want := range []string{
 		"and 5 more invalid record(s)",
 		"15 invalid record(s) skipped from in.jsonl",
-		"run with --strict to fail instead",
 		"written to in.jsonl.rejected.jsonl",
 	} {
 		if !strings.Contains(out, want) {
@@ -279,12 +279,17 @@ func TestReportRejectedRecordsCapsPerRecordWarnings(t *testing.T) {
 	}
 }
 
-// Paths with no --strict flag (auto-import, bootstrap) must not advertise one.
-func TestReportRejectedRecordsOmitsStrictHintWhenUnavailable(t *testing.T) {
+// Every caller of this report has already decided to skip — the CLI only
+// reaches it under --skip-invalid, and the recovery paths have no choice. So
+// there is nothing here to advertise, and a hint would be telling the user
+// about a mode they are already in.
+func TestReportRejectedRecordsAdvertisesNoAlternativeMode(t *testing.T) {
 	var buf bytes.Buffer
-	reportRejectedRecords(&buf, "in.jsonl", []rejectedRecord{{Line: 1, Reason: "bad"}}, "", false)
-	if strings.Contains(buf.String(), "--strict") {
-		t.Errorf("report advertises --strict on a path that has no such flag:\n%s", buf.String())
+	reportRejectedRecords(&buf, "in.jsonl", []rejectedRecord{{Line: 1, Reason: "bad"}}, "")
+	for _, unwanted := range []string{"--strict", "--skip-invalid"} {
+		if strings.Contains(buf.String(), unwanted) {
+			t.Errorf("report advertises %s to a caller that is already skipping:\n%s", unwanted, buf.String())
+		}
 	}
 	if strings.Contains(buf.String(), "written to") {
 		t.Errorf("report claims a quarantine file that was not written:\n%s", buf.String())
@@ -307,6 +312,29 @@ func TestFirstRejectErrorNamesFirstFaultAndCountsRest(t *testing.T) {
 	}
 	if firstRejectError(nil) != nil {
 		t.Error("firstRejectError(nil) should be nil")
+	}
+}
+
+// Strict-by-default keeps the reporter of GH#4492 in exactly the position they
+// started in: plain `bd import` on a file with one bad row still imports
+// nothing. The only thing that changes their outcome is the failure telling
+// them the escape hatch exists, so that hint is load-bearing, not decoration.
+func TestFirstRejectErrorNamesTheEscapeHatch(t *testing.T) {
+	err := firstRejectError([]rejectedRecord{{Line: 2, Reason: "invalid status: verify"}})
+	if err == nil {
+		t.Fatal("firstRejectError = nil, want an error")
+	}
+	msg := err.Error()
+	for _, want := range []string{"--skip-invalid", "--rejects"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error does not tell the user about %s; without it the default leaves\n"+
+				"the reporter of GH#4492 with the same empty import they filed about:\n%s", want, msg)
+		}
+	}
+	// Nothing partial landed, and the message has to say so: a user who thinks
+	// some rows imported will fix the file and re-import, double-applying it.
+	if !strings.Contains(msg, "nothing was imported") {
+		t.Errorf("error does not say the import was a no-op:\n%s", msg)
 	}
 }
 

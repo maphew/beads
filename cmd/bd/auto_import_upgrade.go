@@ -145,7 +145,7 @@ func maybeAutoImportJSONL(ctx context.Context, s storage.DoltStorage, beadsDir s
 		fmt.Fprintf(os.Stderr, "warning: auto-import: %v\n", werr)
 		quarantine = ""
 	}
-	reportRejectedRecords(os.Stderr, jsonlPath, rejected, quarantine, false)
+	reportRejectedRecords(os.Stderr, jsonlPath, rejected, quarantine)
 
 	if len(issues) == 0 {
 		if len(rejected) > 0 {

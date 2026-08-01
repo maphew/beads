@@ -20,11 +20,20 @@ import (
 // independent, so a per-record fault has no business discarding its neighbors.
 //
 // The reject path below runs the same validation the writer runs, one record at
-// a time, *before* the batch is handed to storage. Every rejection is reported
-// with its source line and reason, the surviving records still commit in a
-// single transaction, and the rejected lines are written out verbatim so
-// nothing is lost. `bd import --strict` restores the old abort-on-first-fault
-// behavior for callers that want it.
+// a time, *before* the batch is handed to storage. That makes the fault
+// reportable per record — with its source line and the validator's own reason —
+// instead of only as a rolled-back transaction.
+//
+// `bd import` still fails on the first invalid record. Skipping is opt-in via
+// `--skip-invalid`, because the default of a data-import command is not ours to
+// flip: a script that relies on a nonzero exit to catch a malformed file would
+// otherwise start succeeding quietly with fewer rows than its author thinks.
+// What the default gives up in convenience it gets back in the error, which
+// names the escape hatch (see firstRejectError).
+//
+// The recovery paths — `bd bootstrap`, `bd init --from-jsonl`, auto-import —
+// skip regardless, since there is no operator watching to re-run them, but they
+// still hard-fail on a line that is not JSON at all.
 
 // recordSource locates a parsed record in its JSONL source so a rejection can
 // name a line number and the raw text can be quarantined verbatim.
@@ -147,7 +156,7 @@ func orderRejects(rejected []rejectedRecord) []rejectedRecord {
 // reportRejectedRecords writes the per-record warnings and the summary count.
 // Output goes to stderr so it survives `bd import ... | jq` and never
 // contaminates --json stdout.
-func reportRejectedRecords(w io.Writer, source string, rejected []rejectedRecord, quarantinePath string, strictHint bool) {
+func reportRejectedRecords(w io.Writer, source string, rejected []rejectedRecord, quarantinePath string) {
 	if len(rejected) == 0 {
 		return
 	}
@@ -167,11 +176,7 @@ func reportRejectedRecords(w io.Writer, source string, rejected []rejectedRecord
 	if label == "" {
 		label = "input"
 	}
-	hint := ""
-	if strictHint {
-		hint = "; run with --strict to fail instead"
-	}
-	fmt.Fprintf(w, "warning: %d invalid record(s) skipped from %s%s\n", len(rejected), label, hint)
+	fmt.Fprintf(w, "warning: %d invalid record(s) skipped from %s\n", len(rejected), label)
 	if quarantinePath != "" {
 		fmt.Fprintf(w, "warning: skipped records written to %s\n", quarantinePath)
 	}
@@ -191,9 +196,16 @@ func formatRejectID(id string) string {
 	return fmt.Sprintf(" (%s)", id)
 }
 
-// firstRejectError renders the rejected batch as the error --strict returns.
-// It names the first fault in full and counts the rest, so the strict message
-// stays as specific as today's while admitting there may be more.
+// firstRejectError renders the rejected batch as the error a default `bd import`
+// returns. It names the first fault in full and counts the rest, so the message
+// stays as specific as the pre-1.1 one while admitting there may be more.
+//
+// The trailing hint is not decoration; it is the part that closes GH#4492. The
+// reporter there ran plain `bd import` on a file with one bad row and got
+// nothing, and keeping strict as the default means that exact command still
+// gets nothing. What changes their outcome is being told, at the moment it
+// fails, that the escape hatch exists — an option nobody finds by reading
+// `--help` after an import they thought had worked.
 func firstRejectError(rejected []rejectedRecord) error {
 	if len(rejected) == 0 {
 		return nil
@@ -204,6 +216,8 @@ func firstRejectError(rejected []rejectedRecord) error {
 	if len(rejected) > 1 {
 		msg += fmt.Sprintf(" (and %d more invalid record(s))", len(rejected)-1)
 	}
+	msg += "\nnothing was imported. To import the valid records and set the invalid ones aside," +
+		"\nre-run with --skip-invalid; add --rejects <file> to keep the skipped lines for repair."
 	return fmt.Errorf("%s", msg)
 }
 

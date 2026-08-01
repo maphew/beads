@@ -76,12 +76,15 @@ an import is visible. To deliberately restore an older snapshot, pass
 local state.
 
 A record that fails validation (an unknown status, a missing title, a line
-that is not valid JSON) is skipped rather than aborting the import: the
-remaining records still commit, and each rejection is reported on stderr with
-its line number and reason. Pass --rejects <file> to also write the skipped
-lines out verbatim, so they can be repaired and re-imported on their own.
-Pass --strict to fail on the first invalid record instead, which is how
-import behaved before this became a skip.
+that is not valid JSON) aborts the import and nothing is written, so a
+malformed file is never half-imported behind a zero exit status. The failure
+names the offending line and the validator's own reason instead of surfacing
+as a rolled-back transaction.
+
+Pass --skip-invalid to import the valid records and set the invalid ones
+aside: the survivors commit, and each rejection is reported on stderr with its
+line number and reason. Add --rejects <file> to write the skipped lines out
+verbatim, so they can be repaired and re-imported on their own.
 
 Large imports are written in bounded transactions (a few hundred issues
 each, with a short pause between commits) with progress on stderr, so
@@ -110,12 +113,12 @@ EXAMPLES:
 }
 
 var (
-	importDryRun     bool
-	importDedup      bool
-	importAllowStale bool
-	importStrict     bool
-	importRejects    string
-	importInput      string
+	importDryRun      bool
+	importDedup       bool
+	importAllowStale  bool
+	importSkipInvalid bool
+	importRejects     string
+	importInput       string
 )
 
 func init() {
@@ -123,7 +126,7 @@ func init() {
 	importCmd.Flags().BoolVar(&importDryRun, "dry-run", false, "Show what would be imported without importing")
 	importCmd.Flags().BoolVar(&importDedup, "dedup", false, "Skip lines whose title matches an existing open issue")
 	importCmd.Flags().BoolVar(&importAllowStale, "allow-stale", false, "Import rows even when older than the local issue (required to restore an older snapshot)")
-	importCmd.Flags().BoolVar(&importStrict, "strict", false, "Fail on the first invalid record instead of skipping it (pre-1.1 behavior)")
+	importCmd.Flags().BoolVar(&importSkipInvalid, "skip-invalid", false, "Skip records that fail validation and import the rest, instead of failing on the first one")
 	importCmd.Flags().StringVar(&importRejects, "rejects", "", "Write skipped invalid records to this file, verbatim, for repair and re-import")
 	rootCmd.AddCommand(importCmd)
 }
@@ -329,13 +332,13 @@ func runImportFromReader(ctx context.Context, r io.Reader, source string) error 
 		var invalid []rejectedRecord
 		issues, invalid = partitionImportRecords(issues, sources, customStatuses, customTypes)
 		rejected = append(rejected, invalid...)
-	} else if !importStrict {
+	} else if importSkipInvalid {
 		// Without the vocabulary a custom status is indistinguishable from a
 		// typo, so leave the batch alone and let the writer's error stand.
 		fmt.Fprintf(os.Stderr, "warning: skipping import pre-validation: %v\n", vocabErr)
 	}
 	rejected = orderRejects(rejected)
-	if importStrict && len(rejected) > 0 {
+	if !importSkipInvalid && len(rejected) > 0 {
 		return firstRejectError(rejected)
 	}
 	rejectPath := importRejects
@@ -344,7 +347,7 @@ func runImportFromReader(ctx context.Context, r io.Reader, source string) error 
 			return werr
 		}
 	}
-	reportRejectedRecords(os.Stderr, source, rejected, rejectPath, true)
+	reportRejectedRecords(os.Stderr, source, rejected, rejectPath)
 
 	// Dedup: skip issues whose title matches an existing open issue
 	dedupHits := 0

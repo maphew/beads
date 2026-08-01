@@ -1149,7 +1149,7 @@ func importFromLocalJSONLWithOpts(ctx context.Context, store storage.DoltStorage
 		fmt.Fprintf(os.Stderr, "warning: %v\n", err)
 		quarantine = ""
 	}
-	reportRejectedRecords(os.Stderr, localPath, rejected, quarantine, false)
+	reportRejectedRecords(os.Stderr, localPath, rejected, quarantine)
 
 	result := &importLocalResult{Rejected: len(rejected)}
 
