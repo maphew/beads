@@ -37,11 +37,15 @@
 #      EXECUTE reports success (dolthub/dolt#11345, mybd-p8i3). Prepared
 #      ALTER TABLE is the same underlying limitation but a separate, accepted
 #      idiom for idempotent DDL re-runs (see cli_migrations.go), so it is not
-#      flagged. Neither is a prepared write to a migration-local stand-in table
-#      (a __-prefixed name): that IS the recommended pattern (0059,
-#      gastownhall/beads#4877), where a silent no-op degrades gracefully
-#      instead of corrupting state. Only .up.sql is scanned, since only
-#      migrations/*.up.sql is embedded into the CLI fresh bundle.
+#      flagged. Neither is a prepared `INSERT INTO __<standin>`: that IS the
+#      recommended pattern (0059, gastownhall/beads#4877), where a silent
+#      no-op degrades gracefully instead of corrupting state. The exemption
+#      stops there on purpose -- a prepared UPDATE or DELETE is never
+#      exempted, because their multi-table forms put the modified table after
+#      a JOIN (`UPDATE __stage s JOIN issues i ... SET i.priority = 0` writes
+#      to issues) and the real target cannot be identified reliably by
+#      pattern-matching. INSERT INTO's target always is. Only .up.sql is
+#      scanned, since only migrations/*.up.sql is embedded into the bundle.
 #      This is a going-forward guard, and deliberately new-files-only: seven
 #      shipped main-plane migrations (0035, 0037, 0041, 0047, 0053, 0055,
 #      0058) already PREPARE writes to real tables. They are not a live bug
@@ -259,21 +263,36 @@ fi
 # __temp__* are the existing instances — and a real beads table never starts
 # with one. STMT is already lowercased by the caller.
 prepared_target_is_standin() {
-  local stmt="$1" targets t
-  # EVERY DML target must be a stand-in, not just the first one found. A single
-  # `SET @sql = IF(cond, '<stand-in write>', '<real write>')` carries two
-  # branches, and only one of them executes; exempting the statement because
-  # the stand-in branch happened to match first would wave through the real
-  # write sitting beside it. (Found by cross-vendor review, which probed
-  # exactly this shape.)
+  local stmt="$1" scan targets t
+  scan=$(printf '%s' "$stmt")
+
+  # `ON DUPLICATE KEY UPDATE col = ...` is part of an INSERT, not a second
+  # write. Neutralise it before looking for UPDATE verbs, or a perfectly safe
+  # stand-in upsert reads as an update to a column name.
+  scan=${scan//on duplicate key update/on duplicate key __upsert}
+
+  # UPDATE and DELETE are never exempted, even when the first table after the
+  # verb is a stand-in. Their multi-table forms put the modified table after a
+  # JOIN — `UPDATE __stage s JOIN issues i ... SET i.priority = 0` writes to
+  # issues, not to __stage — so the write target cannot be identified reliably
+  # by pattern-matching. Three review rounds were spent trying; the honest
+  # conclusion is that the exemption belongs only on a form whose target is
+  # unambiguous. An author who genuinely needs a conditional UPDATE should
+  # restructure it the way 0059 does rather than have this check guess.
+  if printf '%s' "$scan" | grep -qE "(^|[^a-z0-9_])(update|delete)[[:space:]]"; then
+    return 1
+  fi
+
+  # INSERT INTO <tbl> is unambiguous: the target is always the token after
+  # INTO, whatever the SELECT source does. Every one of them must be a
+  # stand-in. (A mixed `SET @sql = IF(cond, '<stand-in>', '<real>')` carries
+  # two branches and only one executes, so "the first match was a stand-in" is
+  # not good enough.)
   targets=$(
-    printf '%s\n' "$stmt" \
-      | grep -oE "(insert[[:space:]]+(ignore[[:space:]]+)?into[[:space:]]+|update[[:space:]]+|delete[[:space:]]+(from[[:space:]]+)?)\`?[a-z0-9_]+" \
+    printf '%s\n' "$scan" \
+      | grep -oE "insert[[:space:]]+(ignore[[:space:]]+)?into[[:space:]]+\`?[a-z0-9_]+" \
       | grep -oE "[a-z0-9_]+$"
   ) || true
-  # Extracted nothing we understand -> do not exempt. The multi-table delete
-  # form (`DELETE wd FROM wisp_dependencies`) lands here or yields the alias;
-  # either way it stays flagged, which is the conservative direction.
   [ -n "$targets" ] || return 1
   while IFS= read -r t; do
     [ -n "$t" ] || continue
@@ -337,9 +356,11 @@ else
   reports success and changes nothing. Write the real-table mutation as
   direct SQL; if it needs to be conditional, gate it on a stand-in table that
   the direct statement reads instead of PREPARE'ing the write itself
-  (precedent: 0059, gastownhall/beads#4877 -- a __-prefixed stand-in target is
-  recognised and not flagged). Prepared ALTER TABLE is a separate, accepted
-  idiom and is not what this check flags either.
+  (precedent: 0059, gastownhall/beads#4877 -- a prepared INSERT INTO a
+  __-prefixed stand-in is recognised and not flagged; a prepared UPDATE or
+  DELETE is never exempted, since a JOIN can move its real target out of
+  reach of this check). Prepared ALTER TABLE is a separate, accepted idiom
+  and is not what this check flags either.
 EOF
     fi
   done
