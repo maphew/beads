@@ -37,8 +37,11 @@
 #      EXECUTE reports success (dolthub/dolt#11345, mybd-p8i3). Prepared
 #      ALTER TABLE is the same underlying limitation but a separate, accepted
 #      idiom for idempotent DDL re-runs (see cli_migrations.go), so it is not
-#      flagged. Gate conditional writes on a stand-in table instead
-#      (precedent: 0059, gastownhall/beads#4877).
+#      flagged. Neither is a prepared write to a migration-local stand-in table
+#      (a __-prefixed name): that IS the recommended pattern (0059,
+#      gastownhall/beads#4877), where a silent no-op degrades gracefully
+#      instead of corrupting state. Only .up.sql is scanned, since only
+#      migrations/*.up.sql is embedded into the CLI fresh bundle.
 #      This is a going-forward guard, and deliberately new-files-only: seven
 #      shipped main-plane migrations (0035, 0037, 0041, 0047, 0053, 0055,
 #      0058) already PREPARE writes to real tables. They are not a live bug
@@ -245,10 +248,38 @@ fi
 # inside the prepared-text string). Prepared ALTER TABLE uses the identical
 # @sql/PREPARE stmt/EXECUTE stmt shape and is deliberately not flagged: only
 # the leading keyword inside the quoted text decides.
+# prepared_target_is_standin STMT — true when the prepared DML writes to a
+# migration-local stand-in table rather than a real one. That is the pattern
+# this check RECOMMENDS (0059, gastownhall/beads#4877): copy into a throwaway
+# table with PREPARE, then have a direct statement read it, so a silent no-op
+# degrades gracefully instead of corrupting state. Flagging it would reject the
+# very remedy the failure message hands out.
+#
+# The convention in this tree is a double-underscore prefix — __bd_0059_* and
+# __temp__* are the existing instances — and a real beads table never starts
+# with one. STMT is already lowercased by the caller.
+prepared_target_is_standin() {
+  local stmt="$1" target=""
+  if [[ "$stmt" =~ insert[[:space:]]+(ignore[[:space:]]+)?into[[:space:]]+\`?([a-z0-9_]+) ]]; then
+    target="${BASH_REMATCH[2]}"
+  elif [[ "$stmt" =~ update[[:space:]]+\`?([a-z0-9_]+) ]]; then
+    target="${BASH_REMATCH[1]}"
+  elif [[ "$stmt" =~ delete[[:space:]]+(from[[:space:]]+)?\`?([a-z0-9_]+) ]]; then
+    # The multi-table form (`DELETE wd FROM wisp_dependencies`) yields the
+    # alias, which will not start with __, so it stays flagged. Conservative in
+    # the right direction.
+    target="${BASH_REMATCH[2]}"
+  fi
+  [[ "$target" == __* ]]
+}
+
 if [ -z "$base" ] || [ -z "${merge_base:-}" ]; then
   echo "WARN (prepared DML) no usable base ref; skipping check E." >&2
 else
-  for f in $added_main; do
+  # Only *.up.sql is embedded into the CLI fresh bundle (`//go:embed
+  # migrations/*.up.sql`, schema.go:218), so a .down.sql can never meet the bug
+  # this check is about. Scanning it would reject valid work for no reason.
+  for f in $(grep '\.up\.sql$' <<<"$added_main" || true); do
     [ -f "$f" ] || continue
     stripped=$(sed 's/--.*$//' "$f" | tr '[:upper:]' '[:lower:]')
     declare -A dml_flagged=()
@@ -265,7 +296,8 @@ else
         stmt_buf="$line"
       fi
       if [ -n "$dml_var" ] && [[ "$stmt_buf" == *";"* ]]; then
-        if [[ "$stmt_buf" =~ \'[[:space:]]*(insert|update|delete)[[:space:]] ]]; then
+        if [[ "$stmt_buf" =~ \'[[:space:]]*(insert|update|delete)[[:space:]] ]] \
+           && ! prepared_target_is_standin "$stmt_buf"; then
           dml_flagged["$dml_var"]=1
         else
           unset "dml_flagged[$dml_var]"
@@ -291,8 +323,9 @@ else
   reports success and changes nothing. Write the real-table mutation as
   direct SQL; if it needs to be conditional, gate it on a stand-in table that
   the direct statement reads instead of PREPARE'ing the write itself
-  (precedent: 0059, gastownhall/beads#4877). Prepared ALTER TABLE is a
-  separate, accepted idiom and is not what this check flags.
+  (precedent: 0059, gastownhall/beads#4877 -- a __-prefixed stand-in target is
+  recognised and not flagged). Prepared ALTER TABLE is a separate, accepted
+  idiom and is not what this check flags either.
 EOF
     fi
   done
