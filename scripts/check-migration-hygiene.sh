@@ -44,8 +44,13 @@
 #      exempted, because their multi-table forms put the modified table after
 #      a JOIN (`UPDATE __stage s JOIN issues i ... SET i.priority = 0` writes
 #      to issues) and the real target cannot be identified reliably by
-#      pattern-matching. INSERT INTO's target always is. Only .up.sql is
-#      scanned, since only migrations/*.up.sql is embedded into the bundle.
+#      pattern-matching. INSERT INTO's target always is. The write verb is
+#      matched as a token ANYWHERE in the prepared text, not just at its
+#      start, since '/* c */ UPDATE ...' and 'WITH t AS (...) UPDATE ...' are
+#      both valid; ON UPDATE / ON DUPLICATE KEY UPDATE are masked first so a
+#      column attribute is not read as a write. Both `=` and `:=` assignment
+#      forms are recognised. Only .up.sql is scanned, since only
+#      migrations/*.up.sql is embedded into the bundle.
 #      This is a going-forward guard, and deliberately new-files-only: seven
 #      shipped main-plane migrations (0035, 0037, 0041, 0047, 0053, 0055,
 #      0058) already PREPARE writes to real tables. They are not a live bug
@@ -262,14 +267,38 @@ fi
 # The convention in this tree is a double-underscore prefix — __bd_0059_* and
 # __temp__* are the existing instances — and a real beads table never starts
 # with one. STMT is already lowercased by the caller.
+# neutralize_sql_clauses TEXT — mask the UPDATE keywords that are column/insert
+# clauses rather than write verbs, so the scans below cannot mistake them for
+# one. `ON UPDATE CURRENT_TIMESTAMP` is a column attribute; `ON DUPLICATE KEY
+# UPDATE` belongs to an INSERT.
+neutralize_sql_clauses() {
+  local t="$1"
+  t=${t//on duplicate key update/on duplicate key __updclause}
+  t=${t//on update/on __updclause}
+  printf '%s' "$t"
+}
+
+# prepared_has_dml STMT — does the statement carry a write verb ANYWHERE?
+#
+# Deliberately not "does the quoted text START with one". A prepared string may
+# legitimately open with a comment or a CTE —
+#   '/* conditional */ UPDATE issues ...'      'WITH t AS (...) UPDATE issues ...'
+# — and a position-anchored test waves both through, which is the same mistake
+# as trying to locate a write target by position. Matching the verb as a whole
+# token anywhere is strictly more conservative: the cost is over-flagging a
+# statement that merely mentions one, and the exemption below is what rescues
+# the legitimate stand-in forms.
+prepared_has_dml() {
+  local scan
+  scan="$(neutralize_sql_clauses "$1")"
+  printf '%s' "$scan" | grep -qE "(^|[^a-z0-9_])(insert|update|delete)([^a-z0-9_]|$)"
+}
+
 prepared_target_is_standin() {
   local stmt="$1" scan targets t
   scan=$(printf '%s' "$stmt")
 
-  # `ON DUPLICATE KEY UPDATE col = ...` is part of an INSERT, not a second
-  # write. Neutralise it before looking for UPDATE verbs, or a perfectly safe
-  # stand-in upsert reads as an update to a column name.
-  scan=${scan//on duplicate key update/on duplicate key __upsert}
+  scan="$(neutralize_sql_clauses "$scan")"
 
   # UPDATE and DELETE are never exempted, even when the first table after the
   # verb is a stand-in. Their multi-table forms put the modified table after a
@@ -324,13 +353,12 @@ else
       lineno=$((lineno + 1))
       if [ -n "$dml_var" ]; then
         stmt_buf="$stmt_buf $line"
-      elif [[ "$line" =~ set[[:space:]]+@([a-z0-9_]+)[[:space:]]*= ]]; then
+      elif [[ "$line" =~ set[[:space:]]+@([a-z0-9_]+)[[:space:]]*:?= ]]; then
         dml_var="${BASH_REMATCH[1]}"
         stmt_buf="$line"
       fi
       if [ -n "$dml_var" ] && [[ "$stmt_buf" == *";"* ]]; then
-        if [[ "$stmt_buf" =~ \'[[:space:]]*(insert|update|delete)[[:space:]] ]] \
-           && ! prepared_target_is_standin "$stmt_buf"; then
+        if prepared_has_dml "$stmt_buf" && ! prepared_target_is_standin "$stmt_buf"; then
           dml_flagged["$dml_var"]=1
         else
           unset "dml_flagged[$dml_var]"
