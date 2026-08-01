@@ -98,9 +98,19 @@ func (s *EmbeddedDoltStore) withMutatingPinnedDBConn(ctx context.Context, fn fun
 	return s.withPinnedDBConn(ctx, fn)
 }
 
+// Commit stages and commits the full working set. A clean working set is not
+// an error here: the server store (DoltStore.Commit et al., via
+// isDoltNothingToCommit) has always tolerated Dolt's "nothing to commit"
+// response, but this embedded path wrapped it as a hard failure — so `bd
+// bootstrap`, which builds an embedded store unconditionally and calls
+// CommitWithConfig (below) right after SetConfig on a pristine, otherwise-clean
+// store, died on it (GH#3886). Tolerating it here brings embedded to parity.
 func (s *EmbeddedDoltStore) Commit(ctx context.Context, message string) error {
 	return s.withConn(ctx, true, func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', ?)", message); err != nil {
+			if issueops.IsNothingToCommitError(err) {
+				return nil
+			}
 			return fmt.Errorf("dolt commit: %w", err)
 		}
 		return nil
@@ -116,10 +126,32 @@ func (s *EmbeddedDoltStore) CommitWithConfig(ctx context.Context, message string
 // CommitMergeResolution concludes an operator --strategy merge resolution with
 // config included. Embedded Commit already stages everything via DOLT_COMMIT
 // ('-Am'), so config is never dropped here the way server-mode Commit drops it
-// (GH#2455); this alias satisfies the VersionControl interface so cmd/bd can
-// conclude bd vc merge --strategy uniformly across both stores.
+// (GH#2455).
+//
+// Unlike Commit/CommitWithConfig, this does NOT alias Commit and does NOT
+// tolerate a "nothing to commit" response: a merge resolution that leaves the
+// working set clean is the --ours case, where our values already stood and
+// resolving the conflict dirtied nothing — DoltStore.CommitMergeResolution
+// handles exactly this by explicitly concluding the open merge instead of
+// treating the empty diff as a no-op (concludeOpenMerge, wy-36ilm F12; see
+// versioncontrolops.mergeInProgress / GetMergeBlockers, whose doc comment notes
+// this same gap already surfaces as "a raw dolt error from
+// CommitMergeResolution" for embedded). Swallowing the error here without also
+// concluding the merge would leave dolt_merge_status.is_merging true while
+// reporting success, silently re-wedging the next pull/sync — worse than
+// today's explicit failure. Whether embedded DOLT_COMMIT('-Am') already
+// concludes an open merge on a clean working set (unlike the server-mode
+// stored-procedure path, which requires the explicit conclude step) was not
+// established here, so this keeps the pre-existing non-tolerant behavior
+// rather than guess (GH#3886 scope: fix bootstrap's plain-Commit path, not
+// merge conclusion semantics).
 func (s *EmbeddedDoltStore) CommitMergeResolution(ctx context.Context, message string) error {
-	return s.Commit(ctx, message)
+	return s.withConn(ctx, true, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', ?)", message); err != nil {
+			return fmt.Errorf("dolt commit: %w", err)
+		}
+		return nil
+	})
 }
 
 func (s *EmbeddedDoltStore) AddRemote(ctx context.Context, name, url string) error {

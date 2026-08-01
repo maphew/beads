@@ -781,15 +781,25 @@ func (s *EmbeddedDoltStore) ActiveDatabaseSize(ctx context.Context) (int64, erro
 // Branch, Checkout, CurrentBranch, DeleteBranch, ListBranches are
 // implemented in version_control.go via versioncontrolops.
 
+// CommitPending commits all working set changes and reports whether a commit
+// actually landed. It compares HEAD before and after rather than inspecting
+// Commit's error: as of GH#3886, Commit itself tolerates Dolt's "nothing to
+// commit" response (matching the server store) and returns nil for it, so an
+// error-based check here would report every clean-store call as "committed".
 func (s *EmbeddedDoltStore) CommitPending(ctx context.Context, actor string) (bool, error) {
+	before, err := s.GetCurrentCommit(ctx)
+	if err != nil {
+		return false, fmt.Errorf("commit pending: get current commit: %w", err)
+	}
 	msg := fmt.Sprintf("bd: commit pending changes by %s", actor)
 	if err := s.Commit(ctx, msg); err != nil {
-		if issueops.IsNothingToCommitError(err) {
-			return false, nil
-		}
 		return false, err
 	}
-	return true, nil
+	after, err := s.GetCurrentCommit(ctx)
+	if err != nil {
+		return false, fmt.Errorf("commit pending: get current commit: %w", err)
+	}
+	return before != after, nil
 }
 
 // CommitExists is implemented in version_control.go via versioncontrolops.
