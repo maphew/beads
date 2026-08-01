@@ -234,6 +234,47 @@ func TestActiveRepoPathForRoutingFallsBackToBeadsDirParent(t *testing.T) {
 	}
 }
 
+func TestActiveRepoPathForRoutingKeepsWorkspaceRepoAcrossRedirect(t *testing.T) {
+	resetRepoContextCachesForTest(t)
+
+	// A .beads/redirect relocates STORAGE, not the project: beads.role must
+	// still come from the workspace repo the user is operating in, not from
+	// wherever the redirect target lives (here: outside any git repo). Only
+	// an explicit BEADS_DIR selection (bd -C) may move role detection.
+	workspace := t.TempDir()
+	initGitRepoForContextTest(t, workspace)
+	storageDir := t.TempDir()
+	storageBeadsDir := filepath.Join(storageDir, ".beads")
+	writeTestConfigYAML(t, storageBeadsDir, "")
+
+	workspaceBeadsDir := filepath.Join(workspace, ".beads")
+	if err := os.MkdirAll(workspaceBeadsDir, 0o700); err != nil {
+		t.Fatalf("mkdir workspace beads dir: %v", err)
+	}
+	redirectFile := filepath.Join(workspaceBeadsDir, beads.RedirectFileName)
+	if err := os.WriteFile(redirectFile, []byte(storageBeadsDir+"\n"), 0o600); err != nil {
+		t.Fatalf("write redirect file: %v", err)
+	}
+
+	t.Chdir(workspace)
+	t.Setenv("BEADS_DIR", "")
+
+	got := activeRepoPathForRouting()
+	// Compare through EvalSymlinks: git resolves the physical path while
+	// t.TempDir may hand back a symlinked one.
+	gotResolved, err := filepath.EvalSymlinks(got)
+	if err != nil {
+		t.Fatalf("resolve got %q: %v", got, err)
+	}
+	wantResolved, err := filepath.EvalSymlinks(workspace)
+	if err != nil {
+		t.Fatalf("resolve workspace %q: %v", workspace, err)
+	}
+	if gotResolved != wantResolved {
+		t.Fatalf("activeRepoPathForRouting() = %q (resolved %q), want workspace %q — a redirect must not move role detection to the storage root", got, gotResolved, wantResolved)
+	}
+}
+
 func TestActiveRepoPathForRoutingFallsBackToCurrentDirectory(t *testing.T) {
 	resetRepoContextCachesForTest(t)
 
