@@ -205,6 +205,8 @@ Examples:
 			return HandleErrorRespectJSON("commit message is required (use -m, --message, or --stdin)")
 		}
 
+		beforeHash, beforeErr := store.GetCurrentCommit(ctx)
+
 		commandDidExplicitDoltCommit = true
 		if err := store.Commit(ctx, vcCommitMessage); err != nil {
 			if isDoltNothingToCommit(err) {
@@ -220,6 +222,18 @@ Examples:
 		hash, err := store.GetCurrentCommit(ctx)
 		if err != nil {
 			hash = "(unknown)"
+		}
+
+		// A store whose Commit tolerates nothing-to-commit (e.g. the embedded
+		// store) returns a nil error even when HEAD did not move. Detect that
+		// case here instead of relying on the error, so both backends report
+		// the same "nothing to commit" outcome.
+		if beforeErr == nil && err == nil && hash == beforeHash {
+			if jsonOutput {
+				return outputJSON(map[string]interface{}{"committed": false, "message": "nothing to commit"})
+			}
+			fmt.Println("Nothing to commit")
+			return nil
 		}
 
 		if jsonOutput {

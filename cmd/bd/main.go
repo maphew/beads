@@ -1886,13 +1886,23 @@ func flushBatchCommitOnShutdown() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	beforeHash, beforeErr := st.GetCurrentCommit(ctx)
+
 	if err := st.Commit(ctx, "bd: flush pending changes on shutdown"); err != nil {
 		if !isDoltNothingToCommit(err) {
 			fmt.Fprintf(os.Stderr, "\nWarning: failed to flush batch commit on shutdown: %v\n", err)
 		}
-	} else {
-		fmt.Fprintf(os.Stderr, "\nFlushed pending batch commit on shutdown\n")
+		return
 	}
+
+	// A store whose Commit tolerates nothing-to-commit (e.g. the embedded
+	// store) returns a nil error even when HEAD did not move; only report
+	// the flush when HEAD actually advanced, so a clean shutdown stays quiet.
+	if afterHash, afterErr := st.GetCurrentCommit(ctx); beforeErr == nil && afterErr == nil && afterHash == beforeHash {
+		return
+	}
+
+	fmt.Fprintf(os.Stderr, "\nFlushed pending batch commit on shutdown\n")
 }
 
 // validateWorkspaceIdentity checks that the project identity from metadata.json
