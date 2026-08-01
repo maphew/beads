@@ -381,11 +381,11 @@ func runMolBondProxiedServer(ctx context.Context, in molBondInput) error {
 		defer uw.Close(ctx)
 		r := uowMolReader{uw: uw}
 
-		issueA, formulaA, err := resolveOrDescribe(ctx, r, in.argA)
+		issueA, formulaA, err := resolveOrDescribe(ctx, r, in.argA, in.vars)
 		if err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}
-		issueB, formulaB, err := resolveOrDescribe(ctx, r, in.argB)
+		issueB, formulaB, err := resolveOrDescribe(ctx, r, in.argB, in.vars)
 		if err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}

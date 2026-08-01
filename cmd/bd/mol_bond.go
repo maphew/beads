@@ -110,11 +110,11 @@ func runMolBond(cmd *cobra.Command, args []string) error {
 	}
 
 	if in.dryRun {
-		issueA, formulaA, err := resolveOrDescribe(ctx, store, in.argA)
+		issueA, formulaA, err := resolveOrDescribe(ctx, store, in.argA, in.vars)
 		if err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}
-		issueB, formulaB, err := resolveOrDescribe(ctx, store, in.argB)
+		issueB, formulaB, err := resolveOrDescribe(ctx, store, in.argB, in.vars)
 		if err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}
@@ -606,7 +606,7 @@ func minPriority(a, b int) int {
 // resolveOrDescribe checks if an operand is an issue or formula without cooking.
 // Used for dry-run mode. Returns (issue, formulaName, error).
 // If it's an issue, issue is set. If it's a formula, formulaName is set.
-func resolveOrDescribe(ctx context.Context, s molReader, operand string) (*types.Issue, string, error) {
+func resolveOrDescribe(ctx context.Context, s molReader, operand string, vars map[string]string) (*types.Issue, string, error) {
 	// First, try to resolve as an existing issue
 	id, err := utils.ResolvePartialID(ctx, s, operand)
 	if err == nil {
@@ -624,6 +624,13 @@ func resolveOrDescribe(ctx context.Context, s molReader, operand string) (*types
 	f, err := parser.LoadByName(operand)
 	if err != nil {
 		return nil, "", fmt.Errorf("'%s' not found as issue or formula: %w", operand, err)
+	}
+
+	// A dry-run must fail the same way the real bond would: an enum/pattern/
+	// provided-empty violation in --var values fails resolveOrCookToSubgraph,
+	// so reporting "will be cooked" here would be a false preview.
+	if err := formula.ValidateProvidedVars(f, vars); err != nil {
+		return nil, "", err
 	}
 
 	return nil, f.Formula, nil
