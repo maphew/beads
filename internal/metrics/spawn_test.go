@@ -50,6 +50,11 @@ func TestInTestModeDetectsEnv(t *testing.T) {
 func TestMaybeSpawnFlusherNoOpInTestMode(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv(EnvTestMode, "1")
+	// CI exports BD_DISABLE_EVENT_FLUSH=1 workflow-wide (main.yml/pr.yml env
+	// blocks), which would trip the flushDisabledByEnv precondition below
+	// before the test-mode gate is ever exercised. Clear it hermetically.
+	t.Setenv(EnvDisableEventFlush, "")
+	os.Unsetenv(EnvDisableEventFlush)
 
 	if _, err := Init("0.0.0-test", true, ""); err != nil {
 		t.Fatalf("Init: %v", err)
