@@ -339,6 +339,17 @@ prepared_target_is_standin() {
       | grep -oE "[a-z0-9_]+$"
   ) || true
   [ -n "$targets" ] || return 1
+
+  # Every INSERT must be one we could classify. MySQL/Dolt accept `INSERT
+  # issues ...` with INTO omitted, so a conditional carrying
+  # `IF(c, 'INSERT INTO __stage ...', 'INSERT issues ...')` would otherwise
+  # yield one stand-in target, look unanimous, and exempt the real-table write
+  # in the other branch. Count the verbs and refuse to exempt unless every one
+  # of them produced a target.
+  local n_verbs n_targets
+  n_verbs=$(printf '%s\n' "$scan" | grep -oE "(^|[^a-z0-9_])insert([^a-z0-9_])" | wc -l)
+  n_targets=$(printf '%s\n' "$targets" | grep -c .)
+  [ "$n_verbs" -eq "$n_targets" ] || return 1
   while IFS= read -r t; do
     [ -n "$t" ] || continue
     case "$t" in
@@ -385,6 +396,14 @@ else
       if [[ "$line" =~ prepare[[:space:]]+[a-z0-9_]+[[:space:]]+from[[:space:]]+@([a-z0-9_]+) ]]; then
         pvar="${BASH_REMATCH[1]}"
         if [ "${dml_flagged[$pvar]:-0}" = "1" ]; then
+          hits="${hits}${lineno}: ${line}"$'\n'
+        fi
+      elif [[ "$line" =~ prepare[[:space:]]+[a-z0-9_]+[[:space:]]+from[[:space:]]+\' ]]; then
+        # `PREPARE stmt FROM 'UPDATE issues ...'` — the literal form, with no
+        # user variable in play at all. This is the most direct spelling of the
+        # hazard, not an exotic one, so it is checked in place rather than
+        # through the assignment bookkeeping above.
+        if prepared_has_dml "$line" && ! prepared_target_is_standin "$line"; then
           hits="${hits}${lineno}: ${line}"$'\n'
         fi
       fi
