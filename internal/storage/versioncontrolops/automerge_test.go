@@ -768,3 +768,72 @@ func newMockDB(t *testing.T) (*sql.DB, sqlmock.Sqlmock) {
 	t.Cleanup(func() { _ = db.Close() })
 	return db, mock
 }
+
+// TestMergeIssuesConflictRow_SettledRowGetsFreshRowLock pins the CAS hazard fix
+// absorbed from gastownhall/beads#4682: a settle that changes the row must mint
+// a row_lock distinct from BOTH parents' tokens, or a stale ExpectedVersion
+// read against one pre-merge row could win a CAS against content the merge just
+// changed.
+func TestMergeIssuesConflictRow_SettledRowGetsFreshRowLock(t *testing.T) {
+	row := conflictRowFor(t, map[string][3]any{
+		"id":         {"bd-20", "bd-20", "bd-20"},
+		"status":     {"open", "in_progress", "open"}, // only we changed it
+		"assignee":   {"", "", "alice"},               // only they changed it
+		"row_lock":   {int64(7), int64(111), int64(222)},
+		"updated_at": {tsBase, tsOurs, tsTheirs},
+	})
+	m, ok := mergeIssuesConflictRow(row)
+	if !ok {
+		t.Fatal("expected disjoint-field conflict to merge")
+	}
+	v, written := m.merged("row_lock")
+	if !written {
+		t.Fatal("a settle that writes the row must stamp a fresh row_lock")
+	}
+	lock, isInt := v.(int64)
+	if !isInt {
+		t.Fatalf("row_lock must be minted as int64, got %T", v)
+	}
+	if lock == 111 || lock == 222 {
+		t.Errorf("fresh row_lock %d must differ from both parents' tokens", lock)
+	}
+	if lock == 0 {
+		t.Error("row_lock must never be 0 (the column default)")
+	}
+}
+
+// TestMergeIssuesConflictRow_RowLockOnlyDivergenceIsNotAConflict pins the other
+// half of excluding row_lock from cell classification: when the only cell both
+// sides moved is the token itself — two replicas independently settling the
+// same merge mint different random tokens, then sync with equal updated_at —
+// the row must merge cleanly with no write (our row already IS the merge), not
+// decline on an LWW tie no timestamp can break.
+func TestMergeIssuesConflictRow_RowLockOnlyDivergenceIsNotAConflict(t *testing.T) {
+	row := conflictRowFor(t, map[string][3]any{
+		"id":         {"bd-21", "bd-21", "bd-21"},
+		"status":     {"open", "open", "open"},
+		"row_lock":   {int64(7), int64(111), int64(222)},
+		"updated_at": {tsBase, tsOurs, tsOurs}, // equal: LWW could never settle this
+	})
+	m, ok := mergeIssuesConflictRow(row)
+	if !ok {
+		t.Fatal("a row whose only divergence is the row_lock token must merge, not decline")
+	}
+	if len(m.columns) != 0 {
+		t.Errorf("nothing should be written when our row already IS the merge, got %v", m.columns)
+	}
+}
+
+// TestFreshRowLockDistinctFrom pins the reroll contract across the value shapes
+// a driver can hand back for the parents' tokens.
+func TestFreshRowLockDistinctFrom(t *testing.T) {
+	for i := 0; i < 64; i++ {
+		v := freshRowLockDistinctFrom(int64(111), []byte("222"))
+		if v == 111 || v == 222 {
+			t.Fatalf("minted token %d collides with a parent token", v)
+		}
+		if v == 0 {
+			t.Fatal("minted token must be non-zero")
+		}
+	}
+}
