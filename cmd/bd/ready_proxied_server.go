@@ -241,9 +241,9 @@ func runReadyProxiedClaim(ctx context.Context, _ uow.UnitOfWork, in readyInput) 
 }
 
 func runReadyProxiedExplain(ctx context.Context, uw uow.UnitOfWork, _ readyInput) error {
-	filter := types.WorkFilter{
-		Status:     types.StatusOpen,
-		SortPolicy: types.SortPolicyPriority,
+	filter, err := readyExplainFilter()
+	if err != nil {
+		return HandleErrorRespectJSON("%v", err)
 	}
 	readyPage, err := uw.IssueUseCase().GetReadyWork(ctx, filter)
 	if err != nil {

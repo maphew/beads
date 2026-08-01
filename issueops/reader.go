@@ -302,8 +302,9 @@ type IssuePage struct {
 // value, so the property is "no filter is written there", not "every filter
 // there came from a builder"; test files are exempt from both rules, because
 // the oracles hold filters in order to inspect them; `bd ready`'s files are
-// among the 64, since its four flag-driven modes are handed the filter itself,
-// so it is guarded by the builder and the golden files and not by the linter;
+// among the 64, since its listing and --claim are handed the filter itself and
+// the blocked-issue views in those files name one directly, so it is guarded by
+// the builder and the golden files and not by the linter;
 // GET /healthz and GET /v0/beads/context are not issue queries and are on no
 // role; `bd ready`'s direct route and `bd list`'s hierarchical tree run
 // epilogues of their own; and none of this is a merge gate — the rules run in

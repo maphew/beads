@@ -105,6 +105,53 @@ info:
     two-way JSON-tag bijection test, covering all seven, fails CI otherwise. A
     breaking change to those shapes requires cutting `/v1`, not editing `/v0`.
 
+
+    A member that is absent is not set. When reading a RESPONSE, clients MUST
+    treat an explicit `null` member identically to an absent member. Producers
+    on this surface omit absent members; a profile MAY instead emit `null` for
+    members it declares always-present. Explicit `null` in a REQUEST body is
+    NOT covered by this rule; its meaning is defined per operation.
+
+
+    ## Profiles
+
+
+    A PROFILE is a separate document that re-publishes part of this contract as
+    its own surface. Conformance to this core is a checkable relation over
+    wire-observable JSON — the profile's value model is subsumed by this one,
+    plus the deviations the profile DECLARES — not a claim of shared
+    vocabulary. Four rules make it checkable.
+
+
+    * **Verbatim or absent.** A property emitted under a core name carries the
+      core type, format and semantics, and its value is the canonical value
+      verbatim or is wholly absent. Nothing is transformed in place: a
+      re-spelling, a coercion to another JSON type, or a truncation, published
+      under a core name, is non-conformant — and omitting the member is always
+      the conformant alternative.
+
+    * **Tightening is bounds-only.** A profile MAY omit optional properties, and
+      MAY tighten `maxLength`, `maxItems` and `maxProperties` or close an open
+      vocabulary, provided every instance it emits is still valid against this
+      document once explicit `null` is read as absence. Widening a bound,
+      re-typing a member, or extending a vocabulary this document closes is not
+      tightening.
+
+    * **Required members are retained.** A profile keeps the required members of
+      every top-level resource. Dropping a required member of an EMBEDDED
+      relation — a nested edge or summary carried inside another resource — is
+      legal only where the profile DECLARES that omission and its reason. A
+      silent omission never is.
+
+    * **Extensions are declared, and their names ratchet.** A profile MAY add
+      members of its own, provided each is marked as an extension in the
+      profile's own document and its name is not one this document already
+      defines. Because `/v0` grows by ADDING optional members, a later revision
+      of this document may define a name a profile is already using: that
+      collision is reconciled — the core member adopted, or the extension
+      renamed — as part of adopting the revision, never left to resolve by
+      itself.
+
 paths:
 
   /healthz:
@@ -1418,9 +1465,20 @@ components:
       type: object
       description: >-
         RFC 9457 problem detail. This is the only error shape on this surface.
-        `type` is omitted throughout, so `about:blank` is implied.
-      required: [status, title, code]
+        The core declares `type`; this server never emits it, so `about:blank`
+        is implied throughout.
+      required: [status, title, code, request_id]
       properties:
+        type:
+          type: string
+          format: uri
+          description: >-
+            RFC 9457 problem type. This server never emits it, so `about:blank`
+            is implied. A deployment that hosts problem documentation MAY supply
+            it: one stable URI per status+code pair, dereferencing to
+            documentation for that pair. It restates identity that `code`
+            already carries, so a client MUST NOT dispatch on it and a server
+            MUST NOT use it to subdivide a code.
         status:
           type: integer
           description: The HTTP status code, repeated in the body.
@@ -1477,9 +1535,8 @@ components:
         request_id:
           type: string
           description: >-
-            Correlation id for this request, echoed in the server's request log
-            line. Present on every problem response from every route, including
-            the ones the middleware answers before a handler runs. Opaque and
-            per-process: it identifies a log line, nothing else, so it is never
-            a retry key and never survives a restart. Quote it in a bug report
-            and the operator can find the one line that explains the failure.
+            Opaque correlation id for this request, echoed in the server's
+            request log line. Never a dispatch key and never a retry key.
+            (This server mints per-process ids that do not survive a restart;
+            a deployment may substitute any identifier with the same
+            log-correlation property, such as an edge trace id.)

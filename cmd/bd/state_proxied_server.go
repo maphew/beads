@@ -91,9 +91,12 @@ func runSetStateProxiedServer(ctx context.Context, issueID, dimension, newValue,
 	newLabel := dimension + ":" + newValue
 
 	res, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (setStateResult, string, error) {
-		issue, isWisp := proxiedResolveIssueOrWisp(ctx, uw, issueID)
-		if issue == nil {
+		issue, isWisp, rerr := workapi.GetIssueOrWisp(ctx, workapi.NewUOWDetailSource(uw), issueID)
+		if errors.Is(rerr, storage.ErrNotFound) {
 			return setStateResult{}, "", fmt.Errorf("issue %s not found", issueID)
+		}
+		if rerr != nil {
+			return setStateResult{}, "", fmt.Errorf("resolving %s: %w", issueID, rerr)
 		}
 		fullID := issue.ID
 
