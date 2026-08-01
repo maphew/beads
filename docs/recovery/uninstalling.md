@@ -44,8 +44,13 @@ bd admin reset --force
 This removes beads-managed repository data such as:
 
 - the `.beads/` directory
-- beads-managed git hook sections
+- git hooks that beads installed in full
 - legacy beads sync worktrees under `.git/beads-worktrees/`
+
+Reset works on whole hook files, not on sections. A hook of your own that
+beads injected a section into is left in place and reported, because deleting
+the file would take your content with it. Remove the section from those with
+`bd hooks uninstall`.
 
 ## Remove Hooks Only
 
@@ -68,6 +73,13 @@ the repository.
 bd dolt stop 2>/dev/null || true
 
 # Remove beads-managed hooks when bd hooks uninstall is unavailable.
+#
+# Check each file before deleting it. These are the standard git hook names,
+# not names beads reserves, so any of them may be a hook you wrote. Delete
+# only the ones whose entire content beads generated — they carry a
+# "# bd-hooks-version:", "# bd-shim", or "# bd (beads)" line. A hook of yours
+# with a "# --- BEGIN BEADS INTEGRATION ... ---" block in it should be edited,
+# removing the block between the BEGIN and END markers and keeping the rest.
 rm -f .git/hooks/pre-commit
 rm -f .git/hooks/prepare-commit-msg
 rm -f .git/hooks/post-merge
