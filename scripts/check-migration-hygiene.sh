@@ -259,18 +259,32 @@ fi
 # __temp__* are the existing instances — and a real beads table never starts
 # with one. STMT is already lowercased by the caller.
 prepared_target_is_standin() {
-  local stmt="$1" target=""
-  if [[ "$stmt" =~ insert[[:space:]]+(ignore[[:space:]]+)?into[[:space:]]+\`?([a-z0-9_]+) ]]; then
-    target="${BASH_REMATCH[2]}"
-  elif [[ "$stmt" =~ update[[:space:]]+\`?([a-z0-9_]+) ]]; then
-    target="${BASH_REMATCH[1]}"
-  elif [[ "$stmt" =~ delete[[:space:]]+(from[[:space:]]+)?\`?([a-z0-9_]+) ]]; then
-    # The multi-table form (`DELETE wd FROM wisp_dependencies`) yields the
-    # alias, which will not start with __, so it stays flagged. Conservative in
-    # the right direction.
-    target="${BASH_REMATCH[2]}"
-  fi
-  [[ "$target" == __* ]]
+  local stmt="$1" targets t
+  # EVERY DML target must be a stand-in, not just the first one found. A single
+  # `SET @sql = IF(cond, '<stand-in write>', '<real write>')` carries two
+  # branches, and only one of them executes; exempting the statement because
+  # the stand-in branch happened to match first would wave through the real
+  # write sitting beside it. (Found by cross-vendor review, which probed
+  # exactly this shape.)
+  targets=$(
+    printf '%s\n' "$stmt" \
+      | grep -oE "(insert[[:space:]]+(ignore[[:space:]]+)?into[[:space:]]+|update[[:space:]]+|delete[[:space:]]+(from[[:space:]]+)?)\`?[a-z0-9_]+" \
+      | grep -oE "[a-z0-9_]+$"
+  ) || true
+  # Extracted nothing we understand -> do not exempt. The multi-table delete
+  # form (`DELETE wd FROM wisp_dependencies`) lands here or yields the alias;
+  # either way it stays flagged, which is the conservative direction.
+  [ -n "$targets" ] || return 1
+  while IFS= read -r t; do
+    [ -n "$t" ] || continue
+    case "$t" in
+      __*) ;;
+      *) return 1 ;;
+    esac
+  done <<EOF
+$targets
+EOF
+  return 0
 }
 
 if [ -z "$base" ] || [ -z "${merge_base:-}" ]; then
