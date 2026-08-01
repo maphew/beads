@@ -326,7 +326,10 @@ prepared_target_is_standin() {
   # conclusion is that the exemption belongs only on a form whose target is
   # unambiguous. An author who genuinely needs a conditional UPDATE should
   # restructure it the way 0059 does rather than have this check guess.
-  if printf '%s' "$scan" | grep -qE "(^|[^a-z0-9_])(update|delete|replace)[[:space:]]"; then
+  # Boundary matches prepared_has_dml's (any non-word char, not whitespace):
+  # Dolt takes a comment as a token separator, so `UPDATE/*x*/ issues ...` is a
+  # real write and a whitespace-anchored test walked straight past it.
+  if printf '%s' "$scan" | grep -qE "(^|[^a-z0-9_])(update|delete|replace)([^a-z0-9_]|$)"; then
     return 1
   fi
 
