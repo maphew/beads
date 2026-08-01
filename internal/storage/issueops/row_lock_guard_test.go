@@ -26,16 +26,27 @@ import (
 )
 
 // issueTableWriteRe matches the start of an UPDATE or INSERT to an issue-bearing
-// table: literal `issues`/`wisps`, or a `%s`-templated table (the routed
+// table: literal `issues`/`wisps` (optionally backtick-quoted — MySQL identifier
+// quoting, used by versioncontrolops's manual conflict-resolution writes,
+// e.g. UPDATE `issues` SET ...), or a `%s`-templated table (the routed
 // issues/wisps funnels build the table name with WispTableRouting/pickIssueTable
-// and interpolate it as %s). Auxiliary tables reached through the same %s
+// and interpolate it as %s, itself sometimes backtick-quoted — conflicts.go's
+// UPDATE `%s` SET ...). Auxiliary tables reached through the same %s
 // templating are filtered out by their distinguishing columns (auxOrExemptMarkers).
 //
 // This alone over-matches: fmt.Errorf("db: Update %s: %w", id, err) and
 // similar error-format strings echo the verb+%s shape without being SQL at
 // all. sqlWriteKeywordRe below requires a real clause keyword before a match
 // is counted.
-var issueTableWriteRe = regexp.MustCompile(`(?i)\b(?:UPDATE|INSERT\s+INTO)\s+(?:issues|wisps|%s)\b`)
+//
+// The trailing `\b` needs no backtick counterpart: it is a word/non-word
+// boundary check anchored right after the bare identifier ("issues", "wisps",
+// or the "s" of "%s"), which already holds whether the next real character is
+// a backtick, whitespace, or anything else non-word — adding an optional
+// backtick there would make it FALSE when one is actually present (backtick
+// and the whitespace after it are both non-word, so no boundary exists
+// between them).
+var issueTableWriteRe = regexp.MustCompile("(?i)\\b(?:UPDATE|INSERT\\s+INTO)\\s+`?(?:issues|wisps|%s)\\b")
 
 // sqlWriteKeywordRe requires a genuine SQL clause keyword in the same
 // enclosing literal as an issueTableWriteRe match, so an error-format string
@@ -100,6 +111,36 @@ var auxOrExemptMarkers = []string{
 	"event_type",          // events / wisp_events
 }
 
+// funcNameExemptions are functions whose issues/wisps write is deliberately
+// exempt from the row_lock stamp requirement, keyed by the enclosing
+// function's identity rather than by a substring marker in the SQL text.
+//
+// This is a DIFFERENT mechanism from auxOrExemptMarkers, and deliberately
+// bypasses setClauseAssignsLifecycleField's refusal: that refusal exists
+// because a text marker can be matched incidentally (e.g. in a WHERE clause
+// unrelated to the exemption's real reason), so a marker match must not wave
+// through a write whose SET clause happens to also assign a lifecycle
+// column. A function-name match carries no such risk — it names one specific,
+// reviewed function, not a string that could recur by coincidence — so it is
+// allowed to exempt a write even when that write's SET clause is fully
+// %s-templated and could, at runtime, assign status/assignee/started_at.
+//
+// Add an entry here only for a write that is genuinely correct without a
+// fresh stamp — never as a shortcut past a write that should stamp but
+// doesn't.
+var funcNameExemptions = map[string]string{
+	// resolveOneConflictRow's `theirs` branch (conflicts.go) is whole-row
+	// adoption for `bd conflicts resolve --theirs`: every their_* column,
+	// including their row_lock, is copied verbatim over ours. The resulting
+	// row IS their row, byte for byte, so their row_lock already vouches for
+	// exactly this content — the same "settled row equals a parent, that
+	// parent's token still vouches for it" argument automerge.go's
+	// mergeIssuesConflictRow makes for the no-op (nothing written) case.
+	// Reminting here would be pointless content-wise and would let a stale
+	// ExpectedVersion CAS reject a row it should still recognize.
+	"resolveOneConflictRow": "whole-row `theirs` adoption: the adopted row_lock already vouches for the (identical) adopted content",
+}
+
 // TestAllIssueRowWritesStampRowLock is the load-bearing completeness guard for
 // the freshRowLock invariant: it proves, at build time, that EVERY issues/wisps
 // row write across both whole-row write stacks (issueops and the proxied
@@ -117,7 +158,15 @@ var auxOrExemptMarkers = []string{
 // read against the pre-rename id matches no row at all rather than winning
 // against renamed content.
 func TestAllIssueRowWritesStampRowLock(t *testing.T) {
-	dirs := []string{".", filepath.Join("..", "domain", "db")}
+	// versioncontrolops is included alongside issueops and the proxied
+	// domain/db: it writes issues/wisps rows too, both from automerge's
+	// field-level conflict resolution (resolveIssuesFieldMerge) and from
+	// conflicts.go's manual `bd conflicts resolve` path — both of which this
+	// branch's own resolveIssuesFieldMerge/freshRowLockDistinctFrom pairing
+	// can assign status/assignee. Absorbed from a dual-vendor review of
+	// d10544c96, which found the original two-directory scan missed this
+	// package entirely.
+	dirs := []string{".", filepath.Join("..", "domain", "db"), filepath.Join("..", "versioncontrolops")}
 	checked := 0
 	for _, dir := range dirs {
 		entries, err := os.ReadDir(dir)
@@ -173,7 +222,18 @@ func scanIssueWriteRowLockStamps(t *testing.T, path string, src []byte) (checked
 		checkedStampCall, hasStampCall := false, false
 		funcStampsRowLock := func() bool {
 			if !checkedStampCall {
-				hasStampCall = containsStampCall(fn.Body)
+				// Function-scope first: the original, tighter guarantee for
+				// a funnel whose mint call and %s-templated SET clause live
+				// in the SAME function (issueops' Claim/Update).
+				hasStampCall = containsStampCall(fn.Body) ||
+					// versioncontrolops' automerge plan/apply split puts the
+					// mint call in a SIBLING function of the same file
+					// (mergeIssuesConflictRow builds the plan resolveIssuesFieldMerge
+					// later applies generically), so a per-function scan can
+					// never see it; recognition for those two call forms is
+					// intentionally file-scoped instead. See
+					// crossFuncStampCallNames and containsSetColumnRowLockStamp.
+					containsCrossFuncStamp(file)
 				checkedStampCall = true
 			}
 			return hasStampCall
@@ -193,6 +253,11 @@ func scanIssueWriteRowLockStamps(t *testing.T, path string, src []byte) (checked
 				continue
 			}
 
+			if why, exempt := funcNameExemptions[fn.Name.Name]; exempt {
+				_ = why // documented at the definition; nothing to check further
+				continue
+			}
+
 			if hasAnyMarker(stmt, auxOrExemptMarkers) && !setClauseAssignsLifecycleField(stmt) {
 				continue // auxiliary table or documented exemption: no stamp
 			}
@@ -202,8 +267,9 @@ func scanIssueWriteRowLockStamps(t *testing.T, path string, src []byte) (checked
 			if !stamped && !isInsert && setClauseHasPercentSPlaceholder(stmt) {
 				// The write's own literal doesn't show the mint (its SET
 				// clause is itself a %s placeholder assembled elsewhere —
-				// update.go / domain-db's Update and Claim funnels), so fall
-				// back to the enclosing function as a whole.
+				// update.go / domain-db's Update and Claim funnels, or
+				// versioncontrolops' resolveIssuesFieldMerge), so fall back
+				// to the funnel-fallback check above.
 				stamped = funcStampsRowLock()
 			}
 			if !stamped {
@@ -348,6 +414,79 @@ func stampCallName(expr ast.Expr) (string, bool) {
 	return "", false
 }
 
+// crossFuncStampCallNames are mint forms whose CallExpr is deliberately NOT
+// required to live in the same function as the write it stamps.
+// versioncontrolops' automerge conflict resolution splits row_lock's
+// plan-building step from its generic plan-apply step: mergeIssuesConflictRow
+// (automerge.go) computes the fresh token and stores it into the write-back
+// plan with freshRowLockDistinctFrom, and resolveIssuesFieldMerge (also
+// automerge.go) later writes whatever columns the plan names — including
+// row_lock, whenever present — without ever mentioning the column by name in
+// its own source. containsStampCall's function-scoped search can never see
+// that pairing, so recognition for this name is intentionally file-scoped
+// (see containsCrossFuncStamp) rather than added to stampCallNames, which
+// stays function-scoped so the single-function funnels in issueops keep the
+// tighter guarantee finding 3 of the earlier review restored.
+var crossFuncStampCallNames = map[string]bool{
+	"freshRowLockDistinctFrom": true,
+}
+
+// containsCrossFuncStamp reports whether file, taken as a whole (every
+// function, not just one), contains evidence that SOME function in it mints
+// row_lock in a form crossFuncStampCallNames or containsSetColumnRowLockStamp
+// recognizes. Called only as a second-level fallback after containsStampCall
+// on the single enclosing function has already failed, so it never weakens
+// the primary per-write check or the same-function funnel guarantee — it
+// only recognizes the specific plan/apply split described above.
+func containsCrossFuncStamp(file *ast.File) bool {
+	found := false
+	ast.Inspect(file, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		ce, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if name, ok := stampCallName(ce.Fun); ok && crossFuncStampCallNames[name] {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found || containsSetColumnRowLockStamp(file)
+}
+
+// containsSetColumnRowLockStamp reports whether node contains a call of the
+// shape `<x>.setColumn("row_lock", ...)` — issuesRowMerge.setColumn
+// (automerge.go), the OTHER form mergeIssuesConflictRow uses to stamp
+// row_lock into the write-back plan resolveIssuesFieldMerge later applies.
+// AST-based, like containsStampCall: the literal "row_lock" must be the
+// call's own first argument, not merely mentioned nearby.
+func containsSetColumnRowLockStamp(node ast.Node) bool {
+	found := false
+	ast.Inspect(node, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		ce, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		name, ok := stampCallName(ce.Fun)
+		if !ok || name != "setColumn" || len(ce.Args) == 0 {
+			return true
+		}
+		lit, ok := ce.Args[0].(*ast.BasicLit)
+		if ok && lit.Kind == token.STRING && lit.Value == `"row_lock"` {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
+}
+
 // TestRowLockGuardHasTeeth proves the guard actually flags an unstamped
 // issues/wisps write and passes a correctly-stamped one — so a green
 // TestAllIssueRowWritesStampRowLock means something. The cases below also
@@ -447,6 +586,98 @@ func w(tx T, id, s, table string) {
 }`)
 	if n, v := scanIssueWriteRowLockStamps(t, "commentonly.go", commentOnlyStampCall); n != 1 || len(v) != 1 {
 		t.Errorf("comment-only stamp mention: got checked=%d violations=%d; want checked=1 violations=1 (a stamp name mentioned only in a comment must not satisfy the funnel fallback)", n, len(v))
+	}
+
+	// Finding 2 of the dual-vendor review of d10544c96: MySQL backtick-quoted
+	// identifiers (versioncontrolops's UPDATE `issues` SET ...) escaped the
+	// original bare-identifier regex entirely — a write in that shape was
+	// never even matched, let alone checked. Built with string concatenation
+	// (not a raw-string literal) because the payload itself needs a literal
+	// backtick, which a backtick-delimited Go raw string cannot contain.
+	backtickUnstamped := []byte("package p\n" +
+		"func w(tx T, id, s string) {\n" +
+		"\ttx.ExecContext(ctx, \"UPDATE `issues` SET status = ? WHERE id = ?\", s, id)\n" +
+		"}")
+	if n, v := scanIssueWriteRowLockStamps(t, "backtickunstamped.go", backtickUnstamped); n != 1 || len(v) != 1 {
+		t.Errorf("backtick-quoted unstamped lifecycle write: got checked=%d violations=%d; want checked=1 violations=1 (UPDATE `issues` must match despite backtick quoting)", n, len(v))
+	}
+
+	// The backtick-quoting fix must not introduce a false positive on a
+	// legitimately stamped backtick-quoted write.
+	backtickStamped := []byte("package p\n" +
+		"func w(tx T, id, s string) {\n" +
+		"\ttx.ExecContext(ctx, \"UPDATE `issues` SET status = ?, row_lock = ? WHERE id = ?\", s, freshRowLock(), id)\n" +
+		"}")
+	if n, v := scanIssueWriteRowLockStamps(t, "backtickstamped.go", backtickStamped); n != 1 || len(v) != 0 {
+		t.Errorf("backtick-quoted stamped write: got checked=%d violations=%v; want checked=1 violations=none", n, v)
+	}
+
+	// Finding 1 of the dual-vendor review of d10544c96: versioncontrolops'
+	// automerge splits row_lock's plan-building step (which mints the token)
+	// from its generic plan-apply step (which writes whatever the plan names,
+	// including row_lock, without ever mentioning the column). The two live
+	// in SIBLING functions of one file, so the mint call is invisible to a
+	// per-function scan; recognition needs to be file-scoped instead
+	// (containsCrossFuncStamp), gated on the two call forms that pattern
+	// actually uses: freshRowLockDistinctFrom() and setColumn("row_lock", ...).
+	crossFuncStampedViaMintCall := []byte(`package p
+func buildsPlan(a, b int) int {
+	return freshRowLockDistinctFrom(a, b)
+}
+func w(tx T, id, s, table string) {
+	tx.ExecContext(ctx, fmt.Sprintf("UPDATE %s SET status = ?, %s WHERE id = ?", table, "row_lock = ?"), s, id)
+}`)
+	if n, v := scanIssueWriteRowLockStamps(t, "crossfuncmint.go", crossFuncStampedViaMintCall); n != 1 || len(v) != 0 {
+		t.Errorf("cross-function stamp via a sibling's freshRowLockDistinctFrom call: got checked=%d violations=%v; want checked=1 violations=none", n, v)
+	}
+
+	crossFuncStampedViaSetColumn := []byte(`package p
+func buildsPlan(m *plan, v int) {
+	m.setColumn("row_lock", v)
+}
+func w(tx T, id, s, table string) {
+	tx.ExecContext(ctx, fmt.Sprintf("UPDATE %s SET status = ?, %s WHERE id = ?", table, "row_lock = ?"), s, id)
+}`)
+	if n, v := scanIssueWriteRowLockStamps(t, "crossfuncsetcolumn.go", crossFuncStampedViaSetColumn); n != 1 || len(v) != 0 {
+		t.Errorf("cross-function stamp via a sibling's setColumn(\"row_lock\", ...) call: got checked=%d violations=%v; want checked=1 violations=none", n, v)
+	}
+
+	// The cross-function fallback must still refuse a %s-templated write with
+	// no stamp evidence ANYWHERE in the file — a sibling that calls
+	// setColumn with an unrelated column name must not be mistaken for a
+	// row_lock stamp.
+	crossFuncNoStamp := []byte(`package p
+func buildsPlan(m *plan, v string) {
+	m.setColumn("title", v)
+}
+func w(tx T, id, s, table string) {
+	tx.ExecContext(ctx, fmt.Sprintf("UPDATE %s SET status = ?, %s WHERE id = ?", table, "not_row_lock = ?"), s, id)
+}`)
+	if n, v := scanIssueWriteRowLockStamps(t, "crossfuncnostamp.go", crossFuncNoStamp); n != 1 || len(v) != 1 {
+		t.Errorf("no stamp evidence anywhere in file: got checked=%d violations=%d; want checked=1 violations=1 (an unrelated setColumn call must not satisfy the cross-function fallback)", n, len(v))
+	}
+
+	// funcNameExemptions is keyed to the enclosing function's identity, not a
+	// text marker, so it must exempt the exact named function (conflicts.go's
+	// whole-row `theirs` adoption) even though its SET clause could assign
+	// status/assignee at runtime...
+	exemptByName := []byte(`package p
+func resolveOneConflictRow(tx T, id, s, table string) {
+	tx.ExecContext(ctx, fmt.Sprintf("UPDATE %s SET status = ?, assignee = ? WHERE id = ?", table), s, id)
+}`)
+	if n, v := scanIssueWriteRowLockStamps(t, "exemptbyname.go", exemptByName); n != 0 || len(v) != 0 {
+		t.Errorf("resolveOneConflictRow func-name exemption: got checked=%d violations=%v; want checked=0 violations=none (a whole-row-adoption write named by function identity must be exempt)", n, v)
+	}
+
+	// ...but must NOT exempt a differently-named function with the identical
+	// write shape: the exemption is the specific reviewed function, not the
+	// SQL shape.
+	notExemptByName := []byte(`package p
+func someOtherWrite(tx T, id, s, table string) {
+	tx.ExecContext(ctx, fmt.Sprintf("UPDATE %s SET status = ?, assignee = ? WHERE id = ?", table), s, id)
+}`)
+	if n, v := scanIssueWriteRowLockStamps(t, "notexemptbyname.go", notExemptByName); n != 1 || len(v) != 1 {
+		t.Errorf("non-exempt function with the same write shape: got checked=%d violations=%d; want checked=1 violations=1 (the exemption must be keyed to the specific function name, not the SQL shape)", n, len(v))
 	}
 }
 
