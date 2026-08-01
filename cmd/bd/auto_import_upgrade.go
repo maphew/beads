@@ -141,8 +141,11 @@ func maybeAutoImportJSONL(ctx context.Context, s storage.DoltStorage, beadsDir s
 	}
 	rejected = orderRejects(rejected)
 	quarantine := rejectFilePath(jsonlPath)
-	if werr := writeRejectFile(quarantine, rejected); werr != nil {
+	wrote, werr := writeRejectFile(quarantine, rejected)
+	if werr != nil {
 		fmt.Fprintf(os.Stderr, "warning: auto-import: %v\n", werr)
+		quarantine = ""
+	} else if !wrote {
 		quarantine = ""
 	}
 	reportRejectedRecords(os.Stderr, jsonlPath, rejected, quarantine)

@@ -217,12 +217,16 @@ func TestOrderRejectsSortsBySourceLine(t *testing.T) {
 func TestWriteRejectFileIsVerbatimAndRewrites(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nested", "rejects.jsonl")
 
-	if err := writeRejectFile(path, []rejectedRecord{
+	wrote, err := writeRejectFile(path, []rejectedRecord{
 		{Line: 1, raw: `{"a":1}`},
 		{Line: 2, raw: ""}, // no captured source — must be skipped, not invented
 		{Line: 3, raw: `{"b":2}`},
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("writeRejectFile: %v", err)
+	}
+	if !wrote {
+		t.Fatalf("writeRejectFile wrote = false, want true: two records had captured raw text")
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -234,8 +238,10 @@ func TestWriteRejectFileIsVerbatimAndRewrites(t *testing.T) {
 
 	// A later import of the same source must describe that import, not append
 	// to the previous one.
-	if err := writeRejectFile(path, []rejectedRecord{{Line: 1, raw: `{"c":3}`}}); err != nil {
+	if wrote, err := writeRejectFile(path, []rejectedRecord{{Line: 1, raw: `{"c":3}`}}); err != nil {
 		t.Fatalf("writeRejectFile (rewrite): %v", err)
+	} else if !wrote {
+		t.Fatalf("writeRejectFile (rewrite) wrote = false, want true")
 	}
 	data, err = os.ReadFile(path)
 	if err != nil {
@@ -248,11 +254,85 @@ func TestWriteRejectFileIsVerbatimAndRewrites(t *testing.T) {
 
 func TestWriteRejectFileSkipsWhenNothingCaptured(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "rejects.jsonl")
-	if err := writeRejectFile(path, []rejectedRecord{{Line: 1, raw: "  "}}); err != nil {
+	wrote, err := writeRejectFile(path, []rejectedRecord{{Line: 1, raw: "  "}})
+	if err != nil {
 		t.Fatalf("writeRejectFile: %v", err)
+	}
+	if wrote {
+		t.Fatalf("writeRejectFile wrote = true, want false: no record had captured raw text")
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("expected no quarantine file when no raw line was captured, stat err = %v", err)
+	}
+}
+
+// bd review (dual-vendor pass on PR 5202): a rerun that produces zero rejects
+// must not leave a stale rejects file from a previous run in place looking
+// current.
+func TestWriteRejectFileRemovesStaleFileWhenNothingToWrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rejects.jsonl")
+	if wrote, err := writeRejectFile(path, []rejectedRecord{{Line: 1, raw: `{"a":1}`}}); err != nil || !wrote {
+		t.Fatalf("writeRejectFile (seed): wrote=%v err=%v, want true/nil", wrote, err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("seed file missing: %v", err)
+	}
+
+	// A rerun with nothing to quarantine (empty batch, or every raw text
+	// uncaptured) must remove the stale file rather than leave it behind.
+	wrote, err := writeRejectFile(path, nil)
+	if err != nil {
+		t.Fatalf("writeRejectFile (rerun): %v", err)
+	}
+	if wrote {
+		t.Fatalf("writeRejectFile (rerun) wrote = true, want false: nothing to write")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("stale rejects file still present after a clean rerun, stat err = %v", err)
+	}
+
+	// Removing a file that was never there is not an error.
+	if wrote, err := writeRejectFile(path, nil); err != nil || wrote {
+		t.Fatalf("writeRejectFile (no file, nothing to write): wrote=%v err=%v, want false/nil", wrote, err)
+	}
+}
+
+func TestRejectPathCollidesWithSource(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "issues.jsonl")
+	if err := os.WriteFile(source, []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	// Direct same path.
+	if collide, err := rejectPathCollidesWithSource(source, source); err != nil || !collide {
+		t.Fatalf("collide=%v err=%v, want true/nil for the identical path", collide, err)
+	}
+
+	// Relative alias of the same file.
+	rel := filepath.Join(dir, "..", filepath.Base(dir), "issues.jsonl")
+	if collide, err := rejectPathCollidesWithSource(rel, source); err != nil || !collide {
+		t.Fatalf("collide=%v err=%v, want true/nil for a relative alias of the same file", collide, err)
+	}
+
+	// A different file in the same directory does not collide.
+	other := filepath.Join(dir, "issues.rejected.jsonl")
+	if collide, err := rejectPathCollidesWithSource(other, source); err != nil || collide {
+		t.Fatalf("collide=%v err=%v, want false/nil for a distinct file", collide, err)
+	}
+
+	// stdin (empty sourcePath) never collides.
+	if collide, err := rejectPathCollidesWithSource(source, ""); err != nil || collide {
+		t.Fatalf("collide=%v err=%v, want false/nil when importing from stdin", collide, err)
+	}
+
+	// A symlinked reject path that resolves to the source path collides too.
+	symlinkPath := filepath.Join(dir, "alias.jsonl")
+	if err := os.Symlink(source, symlinkPath); err != nil {
+		t.Skipf("symlinks unsupported in this environment: %v", err)
+	}
+	if collide, err := rejectPathCollidesWithSource(symlinkPath, source); err != nil || !collide {
+		t.Fatalf("collide=%v err=%v, want true/nil for a symlink to the source", collide, err)
 	}
 }
 
@@ -375,5 +455,62 @@ func TestImportVocabularyFailsClosed(t *testing.T) {
 	}
 	if _, _, err := importVocabulary(ctx, nil); err == nil {
 		t.Error("importVocabulary(nil store) = nil error, want error")
+	}
+}
+
+// bd review (dual-vendor pass on PR 5202, P1): --rejects is user-supplied and
+// writeRejectFile truncates and rewrites it. If it names the import source —
+// directly or via a relative alias — the source must be refused, not
+// destroyed. This exercises the actual runImportFromReader wiring, not just
+// the rejectPathCollidesWithSource helper.
+func TestRunImportFromReaderRefusesRejectPathCollidingWithSource(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "issues.jsonl")
+	original := `{"id":"tst-1","title":"bad status","status":"verify","issue_type":"task"}` + "\n"
+	if err := os.WriteFile(source, []byte(original), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	origStore, origRejects, origSkip, origJSON := store, importRejects, importSkipInvalid, jsonOutput
+	t.Cleanup(func() {
+		store, importRejects, importSkipInvalid, jsonOutput = origStore, origRejects, origSkip, origJSON
+	})
+	store = &fakeVocabStore{}
+	importSkipInvalid = true
+	jsonOutput = false
+
+	cases := []struct {
+		name       string
+		rejectPath string
+	}{
+		{"direct same path", source},
+		{"relative alias", filepath.Join(dir, "..", filepath.Base(dir), "issues.jsonl")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			importRejects = tc.rejectPath
+
+			f, err := os.Open(source)
+			if err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+			defer f.Close()
+
+			err = runImportFromReader(context.Background(), f, source, source)
+			if err == nil {
+				t.Fatal("runImportFromReader = nil error, want a collision refusal")
+			}
+			if !strings.Contains(err.Error(), "same file as the import source") {
+				t.Errorf("error = %q, want it to name the collision", err.Error())
+			}
+
+			data, rerr := os.ReadFile(source)
+			if rerr != nil {
+				t.Fatalf("ReadFile: %v", rerr)
+			}
+			if string(data) != original {
+				t.Fatalf("source file was modified by the refused import: got %q, want unchanged %q", data, original)
+			}
+		})
 	}
 }

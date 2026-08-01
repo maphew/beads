@@ -250,10 +250,15 @@ func rejectFilePath(sourcePath string) string {
 // file untrustworthy as a re-import source.
 //
 // The file is rewritten (not appended) so it always describes the most recent
-// import of that source rather than accumulating across runs.
-func writeRejectFile(path string, rejected []rejectedRecord) error {
-	if path == "" || len(rejected) == 0 {
-		return nil
+// import of that source rather than accumulating across runs. When this run has
+// nothing to quarantine, any file a previous run left at path is removed rather
+// than left in place: a leftover quarantine file from an earlier, worse import
+// would otherwise sit there looking current after a rerun that fixed every
+// record. wrote reports whether path holds this run's content, so callers only
+// advertise the path (JSON/stderr) when it does.
+func writeRejectFile(path string, rejected []rejectedRecord) (wrote bool, err error) {
+	if path == "" {
+		return false, nil
 	}
 	var b strings.Builder
 	n := 0
@@ -266,17 +271,69 @@ func writeRejectFile(path string, rejected []rejectedRecord) error {
 		n++
 	}
 	if n == 0 {
-		return nil
+		if rmErr := os.Remove(path); rmErr != nil && !os.IsNotExist(rmErr) {
+			return false, fmt.Errorf("removing stale %s: %w", path, rmErr)
+		}
+		return false, nil
 	}
 	if dir := filepath.Dir(path); dir != "" && dir != "." {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return fmt.Errorf("creating directory for %s: %w", path, err)
+			return false, fmt.Errorf("creating directory for %s: %w", path, err)
 		}
 	}
 	// 0600: the quarantine file is a verbatim copy of issue records, so it
 	// carries whatever the source JSONL carried.
 	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
-		return fmt.Errorf("writing %s: %w", path, err)
+		return false, fmt.Errorf("writing %s: %w", path, err)
 	}
-	return nil
+	return true, nil
+}
+
+// rejectPathCollidesWithSource reports whether rejectPath and sourcePath name
+// the same file once both are resolved to an absolute, symlink-free form.
+// sourcePath is empty when importing from stdin, which has no file to collide
+// with.
+//
+// writeRejectFile truncates and rewrites rejectPath. --rejects is a
+// user-supplied path, and if it happens to name the import source — directly,
+// via a relative alias, or through a symlink — the source is destroyed and
+// replaced with only the rejected lines. Callers must check this before
+// writing.
+func rejectPathCollidesWithSource(rejectPath, sourcePath string) (bool, error) {
+	if rejectPath == "" || sourcePath == "" {
+		return false, nil
+	}
+	resolvedReject, err := resolveForCollisionCheck(rejectPath)
+	if err != nil {
+		return false, fmt.Errorf("resolving --rejects path %s: %w", rejectPath, err)
+	}
+	resolvedSource, err := resolveForCollisionCheck(sourcePath)
+	if err != nil {
+		return false, fmt.Errorf("resolving import source %s: %w", sourcePath, err)
+	}
+	return resolvedReject == resolvedSource, nil
+}
+
+// resolveForCollisionCheck returns the canonical absolute form of path, with
+// symlinks resolved. The reject path usually does not exist yet — writeRejectFile
+// creates it — so EvalSymlinks on the path itself fails with ENOENT; fall back
+// to resolving the parent directory and rejoining the base name, which still
+// catches a reject path reached through a symlinked directory.
+func resolveForCollisionCheck(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		return resolved, nil
+	}
+	dir, base := filepath.Split(abs)
+	resolvedDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		// Parent directory doesn't resolve either (e.g. --rejects into a
+		// directory that doesn't exist yet). Fall back to the unresolved
+		// absolute path rather than failing the guard outright.
+		return abs, nil
+	}
+	return filepath.Join(resolvedDir, base), nil
 }

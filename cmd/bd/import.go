@@ -160,7 +160,9 @@ func runImportInner(args []string) error {
 	fromStdin := importInput == "-" || (len(args) > 0 && args[0] == "-")
 
 	if fromStdin {
-		return runImportFromReader(ctx, os.Stdin, "stdin")
+		// sourceFilePath is "" here: stdin has no file to collide with the
+		// --rejects path.
+		return runImportFromReader(ctx, os.Stdin, "stdin", "")
 	}
 
 	// Determine source file
@@ -208,7 +210,7 @@ func runImportInner(args []string) error {
 	}
 	defer f.Close()
 
-	return runImportFromReader(ctx, f, jsonlPath)
+	return runImportFromReader(ctx, f, jsonlPath, jsonlPath)
 }
 
 type importResultJSON struct {
@@ -233,7 +235,11 @@ type importResultJSON struct {
 	DryRun              bool             `json:"dry_run,omitempty"`
 }
 
-func runImportFromReader(ctx context.Context, r io.Reader, source string) error {
+// sourceFilePath is the real path of the import source when it is a file, and
+// "" when importing from stdin (which cannot be truncated by --rejects — see
+// the collision guard below). It is distinct from source, which is a
+// human-readable label ("stdin" or the file path) used only in messages.
+func runImportFromReader(ctx context.Context, r io.Reader, source string, sourceFilePath string) error {
 	if store == nil {
 		return fmt.Errorf("no database — run 'bd init' or 'bd bootstrap' first")
 	}
@@ -343,11 +349,28 @@ func runImportFromReader(ctx context.Context, r io.Reader, source string) error 
 	}
 	rejectPath := importRejects
 	if rejectPath != "" {
-		if werr := writeRejectFile(rejectPath, rejected); werr != nil {
-			return werr
+		// writeRejectFile truncates and rewrites rejectPath, so if it happens
+		// to name the import source (directly, via a relative alias, or
+		// through a symlink) the source would be destroyed and replaced with
+		// only the rejected lines. Refuse before writing anything.
+		if collide, cerr := rejectPathCollidesWithSource(rejectPath, sourceFilePath); cerr != nil {
+			return cerr
+		} else if collide {
+			return fmt.Errorf("--rejects %s names the same file as the import source; writing rejects would truncate and overwrite the source, so refusing (pass a different --rejects path)", rejectPath)
 		}
 	}
-	reportRejectedRecords(os.Stderr, source, rejected, rejectPath)
+	rejectsWritten, werr := writeRejectFile(rejectPath, rejected)
+	if werr != nil {
+		return werr
+	}
+	// Only advertise the path when it holds this run's content — writeRejectFile
+	// removes a stale file from a previous run instead of leaving it in place,
+	// so a path that was cleaned up (or never written) must not be reported.
+	reportedRejectPath := ""
+	if rejectsWritten {
+		reportedRejectPath = rejectPath
+	}
+	reportRejectedRecords(os.Stderr, source, rejected, reportedRejectPath)
 
 	// Dedup: skip issues whose title matches an existing open issue
 	dedupHits := 0
@@ -361,7 +384,7 @@ func runImportFromReader(ctx context.Context, r io.Reader, source string) error 
 		DryRun:           importDryRun,
 		Invalid:          len(rejected),
 		InvalidRecords:   rejected,
-		RejectsWrittenTo: rejectPath,
+		RejectsWrittenTo: reportedRejectPath,
 	}
 
 	if importDryRun {

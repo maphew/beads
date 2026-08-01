@@ -1145,8 +1145,11 @@ func importFromLocalJSONLWithOpts(ctx context.Context, store storage.DoltStorage
 	}
 	rejected = orderRejects(rejected)
 	quarantine := rejectFilePath(localPath)
-	if err := writeRejectFile(quarantine, rejected); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: %v\n", err)
+	wrote, werr := writeRejectFile(quarantine, rejected)
+	if werr != nil {
+		fmt.Fprintf(os.Stderr, "warning: %v\n", werr)
+		quarantine = ""
+	} else if !wrote {
 		quarantine = ""
 	}
 	reportRejectedRecords(os.Stderr, localPath, rejected, quarantine)
