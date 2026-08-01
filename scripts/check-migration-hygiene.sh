@@ -51,6 +51,22 @@
 #      column attribute is not read as a write. Both `=` and `:=` assignment
 #      forms are recognised. Only .up.sql is scanned, since only
 #      migrations/*.up.sql is embedded into the bundle.
+#
+#      KNOWN LIMITS — this is a best-effort heuristic, not a SQL parser, and
+#      says so rather than implying coverage it does not have. Five rounds of
+#      cross-vendor review each found another shape the previous fix missed;
+#      the pattern of the misses (position-anchored matching) was addressed,
+#      but the correlation between a `SET @var` and its later
+#      `PREPARE ... FROM @var` is still line-oriented, so these bypass it:
+#        - multi-variable assignment: `SET @guard = 1, @sql = 'UPDATE ...';`
+#          (only the first variable is tracked)
+#        - a PREPARE split across lines: `PREPARE stmt` / `FROM @sql;`
+#        - a literal `;` inside the prepared string (ends buffering early)
+#      None of these forms occurs anywhere in the current migration tree, and
+#      the check is advisory hygiene on new files that a human reviews anyway,
+#      so the gap is a follow-up (mybd-q8hy2) rather than a
+#      reason to withhold the guard. A reviewer who sees any of these three
+#      shapes in a new migration should not trust a green check here.
 #      This is a going-forward guard, and deliberately new-files-only: seven
 #      shipped main-plane migrations (0035, 0037, 0041, 0047, 0053, 0055,
 #      0058) already PREPARE writes to real tables. They are not a live bug
