@@ -1,6 +1,9 @@
 package metrics
 
-import "testing"
+import (
+	"os"
+	"testing"
+)
 
 // TestInTestModeDetectsEnv exercises the extracted boolean decision directly:
 // inTestMode must match on BEADS_TEST_MODE=1 exactly, the same idiom the
@@ -23,6 +26,14 @@ func TestInTestModeDetectsEnv(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.set {
 				t.Setenv(EnvTestMode, tc.val)
+			} else {
+				// Hermetic unset: the repo's own runner exports
+				// BEADS_TEST_MODE=1 (scripts/test.sh), so relying on the
+				// ambient environment would fail under a supported test
+				// mode. t.Setenv registers the restore; Unsetenv then
+				// clears it for this subtest.
+				t.Setenv(EnvTestMode, "")
+				os.Unsetenv(EnvTestMode)
 			}
 			if got := inTestMode(); got != tc.want {
 				t.Errorf("inTestMode() = %v, want %v (val=%q set=%v)", got, tc.want, tc.val, tc.set)
@@ -50,6 +61,27 @@ func TestMaybeSpawnFlusherNoOpInTestMode(t *testing.T) {
 		t.Fatalf("flushDisabledByEnv() = true, want false (BD_DISABLE_EVENT_FLUSH unset)")
 	}
 
-	// The only thing preventing a spawn here is the BEADS_TEST_MODE guard.
+	// The only thing preventing a spawn here is the BEADS_TEST_MODE guard —
+	// assert the extracted decision directly, so a regression fails the test
+	// instead of silently forking a real child.
+	if shouldSpawnFlusher() {
+		t.Fatalf("shouldSpawnFlusher() = true under BEADS_TEST_MODE=1, want false")
+	}
+
+	// Positive control: with test mode hermetically cleared (and every other
+	// gate still open), the spawn decision must flip to true — proving the
+	// assertion above is gated on BEADS_TEST_MODE and not on some other
+	// condition that happens to hold in this environment.
+	t.Setenv(EnvTestMode, "")
+	os.Unsetenv(EnvTestMode)
+	t.Setenv(EnvDisableEventFlush, "")
+	os.Unsetenv(EnvDisableEventFlush)
+	if !shouldSpawnFlusher() {
+		t.Fatalf("shouldSpawnFlusher() = false with BEADS_TEST_MODE cleared, want true")
+	}
+
+	// And the exported entry point still returns without spawning under the
+	// guard (smoke path).
+	t.Setenv(EnvTestMode, "1")
 	MaybeSpawnFlusher()
 }

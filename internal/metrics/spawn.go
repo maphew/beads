@@ -28,11 +28,14 @@ func inTestMode() bool {
 	return os.Getenv(EnvTestMode) == "1"
 }
 
+// shouldSpawnFlusher is the whole spawn gate, extracted so tests can assert
+// the decision without forking a real detached child.
+func shouldSpawnFlusher() bool {
+	return os.Getenv(EnvIsFlusher) != "1" && Enabled() && !flushDisabledByEnv() && !inTestMode()
+}
+
 func MaybeSpawnFlusher() {
-	if os.Getenv(EnvIsFlusher) == "1" {
-		return
-	}
-	if !Enabled() || flushDisabledByEnv() || inTestMode() {
+	if !shouldSpawnFlusher() {
 		return
 	}
 	self, err := os.Executable()
