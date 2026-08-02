@@ -1467,13 +1467,14 @@ func buildTestModeProductionPortPanic(cfg *Config) string {
 // dialProbe reports whether an address accepts a connection within timeout.
 // Declared as a var (not a plain call) so unit tests can stub connectivity
 // without a live Dolt server. Returns nil when the endpoint is reachable.
+//
+// Delegates to doltserver.ProbeSQLServer so the probe drains the MySQL
+// handshake before closing (Close() then sends FIN, not RST) — applies to
+// unix sockets too, since the protocol spoken over them is still MySQL.
+// See gastownhall/beads#4132, #4133.
 var dialProbe = func(network, addr string, timeout time.Duration) error {
-	conn, err := net.DialTimeout(network, addr, timeout)
-	if err != nil {
-		return err
-	}
-	_ = conn.Close()
-	return nil
+	_, err := doltserver.ProbeSQLServer(network, addr, timeout)
+	return err
 }
 
 // ResolveSocketTransport applies a socket-first / TCP-fallback policy and
@@ -1699,7 +1700,11 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 				addr, dialErr, hint)
 		}
 	}
-	_ = conn.Close()
+	// Drain the MySQL handshake before closing so Close() sends FIN, not RST
+	// (dolt sql-server crash risk otherwise, gastownhall/beads#4132, #4133).
+	// This single close site covers both the initial successful dial above
+	// and the post-auto-start retry dial in the branch just above.
+	doltserver.DrainAndCloseProbe(conn)
 
 	// If this process already owns a test-started auto-start server, later
 	// stores sharing it must participate in the refcount so one Close() does

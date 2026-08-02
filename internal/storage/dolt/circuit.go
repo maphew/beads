@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/steveyegge/beads/internal/doltserver"
 )
 
 // Circuit breaker states.
@@ -198,14 +200,15 @@ func (cb *circuitBreaker) Allow() bool {
 }
 
 // probe performs a quick TCP dial to check if the Dolt server is reachable.
+// One-shot: reachability is based on dial success alone, so a drain timeout
+// (dial-accepted-but-mute) still counts as reachable here. Draining before
+// close still applies — it avoids sending the dolt sql-server a TCP RST that
+// it would interpret as an aborted MySQL handshake (gastownhall/beads#4132,
+// #4133).
 func (cb *circuitBreaker) probe() bool {
 	addr := net.JoinHostPort(cb.host, fmt.Sprintf("%d", cb.port))
-	conn, err := net.DialTimeout("tcp", addr, 1*time.Second)
-	if err != nil {
-		return false
-	}
-	_ = conn.Close()
-	return true
+	_, err := doltserver.ProbeSQLServer("tcp", addr, 1*time.Second)
+	return err == nil
 }
 
 // RecordSuccess records a successful connection. Resets the breaker to closed.

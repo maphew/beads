@@ -1701,15 +1701,22 @@ func KillStaleServers(beadsDir string) ([]int, error) {
 	)
 }
 
-// waitForReady polls TCP until the server accepts connections.
+// waitForReady polls until the server accepts TCP connections AND greets
+// with a MySQL handshake. Draining the handshake before closing the probe
+// connection makes Close() send TCP FIN instead of RST, which prevents the
+// dolt sql-server process from interpreting probe closes as aborted MySQL
+// handshakes and crashing (see gastownhall/beads#4132, #4133).
+//
+// A dial that succeeds but never greets (TCP listener accepting, MySQL
+// engine not yet writing) is not treated as ready: this function keeps
+// polling until either a greeting arrives or the deadline is reached.
 func waitForReady(host string, port int, timeout time.Duration) error {
 	addr := net.JoinHostPort(host, strconv.Itoa(port))
 	deadline := time.Now().Add(timeout)
 
 	for time.Now().Before(deadline) {
-		conn, err := net.DialTimeout("tcp", addr, 500*time.Millisecond) //nolint:gosec // G704: addr is built from internal host+port, not user input
-		if err == nil {
-			_ = conn.Close()
+		greeted, err := ProbeSQLServer("tcp", addr, 500*time.Millisecond) //nolint:gosec // G704: addr is built from internal host+port, not user input
+		if err == nil && greeted {
 			return nil
 		}
 		time.Sleep(500 * time.Millisecond)

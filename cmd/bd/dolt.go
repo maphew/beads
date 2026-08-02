@@ -2232,12 +2232,8 @@ var serverDialTimeout = 3 * time.Second
 func testServerConnection(host string, port int) bool {
 	addr := net.JoinHostPort(host, strconv.Itoa(port))
 
-	conn, err := net.DialTimeout("tcp", addr, serverDialTimeout)
-	if err != nil {
-		return false
-	}
-	_ = conn.Close() // Best effort cleanup
-	return true
+	_, err := doltserver.ProbeSQLServer("tcp", addr, serverDialTimeout)
+	return err == nil
 }
 
 // extractSSHHost extracts the hostname from an SSH URL for connectivity testing.
@@ -2261,6 +2257,8 @@ func extractSSHHost(url string) string {
 }
 
 // testSSHConnectivity tests if an SSH host is reachable on port 22.
+// Bare dial+close (no doltserver.ProbeSQLServer): SSH, not MySQL — there is
+// no handshake greeting to drain here.
 func testSSHConnectivity(host string) bool {
 	conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, "22"), 5*time.Second)
 	if err != nil {
@@ -2296,6 +2294,8 @@ func httpURLToTCPAddr(url string) string {
 }
 
 // testHTTPConnectivity tests if an HTTP(S) URL is reachable via TCP.
+// Bare dial+close (no doltserver.ProbeSQLServer): HTTP(S), not MySQL — there
+// is no handshake greeting to drain here.
 func testHTTPConnectivity(url string) bool {
 	addr := httpURLToTCPAddr(url)
 	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
