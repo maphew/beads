@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -59,19 +60,472 @@ func TestPRCIGateRequiresPolicyAndLintWrappers(t *testing.T) {
 	}
 }
 
+func TestGoCacheOwnershipTopology(t *testing.T) {
+	workflows := map[string]ciWorkflow{
+		"main.yml":    readCIWorkflow(t, "main.yml"),
+		"pr.yml":      readCIWorkflow(t, "pr.yml"),
+		"pr-risk.yml": readCIWorkflow(t, "pr-risk.yml"),
+	}
+
+	for workflowName, workflow := range workflows {
+		assertPinnedGoCacheActions(t, workflowName, workflow)
+	}
+	t.Run("monolithic cache action is forbidden", func(t *testing.T) {
+		if !isGoCacheActionFamily(cacheMonolithicActionFamily) || !isForbiddenGoCacheActionFamily(cacheMonolithicActionFamily) {
+			t.Fatal("actions/cache must be recognized as a forbidden cache action family")
+		}
+	})
+
+	assertGoCacheInventory(t, workflows["main.yml"].job(t, "build-artifacts"), []goCacheStep{
+		mainRestoreModuleCache(), mainRestoreBuildCache("non-race"), saveModuleCache(), saveBuildCache("non-race"),
+	})
+	assertGoCacheInventory(t, workflows["main.yml"].job(t, "build-embedded"), []goCacheStep{
+		mainRestoreModuleCache(), mainRestoreBuildCache("race"), saveBuildCache("race"),
+	})
+	assertGoCacheInventory(t, workflows["main.yml"].job(t, "pr-core-wrapper"), []goCacheStep{
+		mainRestoreModuleCache(), mainRestoreBuildCache("race"),
+	})
+	assertGoCacheInventory(t, workflows["main.yml"].job(t, "test"), []goCacheStep{
+		mainRestoreModuleCache(), mainRestoreBuildCacheIf("non-race", macOSMatrixCondition), mainRestoreBuildCache("race"),
+		saveModuleCacheIf(macOSMatrixCondition), saveBuildCacheIf("non-race", macOSMatrixCondition), saveBuildCacheIf("race", macOSMatrixCondition),
+	})
+	assertGoCacheInventory(t, workflows["main.yml"].job(t, "test-windows"), []goCacheStep{
+		mainRestoreModuleCache(), mainRestoreBuildCache("non-race"), saveModuleCache(), saveBuildCache("non-race"),
+	})
+	assertConditionalCacheWritersHaveMatrixMember(t, workflows["main.yml"].job(t, "test"), macOSRunner)
+
+	assertGoCacheInventory(t, workflows["pr.yml"].job(t, "build-artifacts"), []goCacheStep{
+		restoreModuleCache(), restoreBuildCache("non-race"),
+	})
+	assertGoCacheInventory(t, workflows["pr.yml"].job(t, "pr-core-wrapper"), []goCacheStep{
+		restoreModuleCache(), restoreBuildCache("race"),
+	})
+	assertGoCacheInventory(t, workflows["pr.yml"].job(t, "test-macos"), []goCacheStep{
+		restoreModuleCache(), restoreBuildCache("non-race"), restoreBuildCache("race"),
+	})
+	assertGoCacheInventory(t, workflows["pr.yml"].job(t, "worktree-remove-windows"), []goCacheStep{
+		restoreModuleCache(), restoreBuildCache("non-race"),
+	})
+	for _, jobName := range []string{"check-doc-freshness-platforms", "pr-preflight-platforms"} {
+		assertGoCacheInventory(t, workflows["pr.yml"].job(t, jobName), []goCacheStep{restoreModuleCache()})
+	}
+	assertGoCacheInventory(t, workflows["pr-risk.yml"].job(t, "build-embedded"), []goCacheStep{
+		restoreModuleCache(), restoreBuildCache("race"), restoreBuildCache("non-race"),
+	})
+	assertNoUnmanagedGoCacheSteps(t, workflows, map[string]map[string]bool{
+		"main.yml": {
+			"build-artifacts": true, "build-embedded": true, "pr-core-wrapper": true, "test": true, "test-windows": true,
+		},
+		"pr.yml": {
+			"build-artifacts": true, "pr-core-wrapper": true, "test-macos": true, "worktree-remove-windows": true,
+			"check-doc-freshness-platforms": true, "pr-preflight-platforms": true,
+		},
+		"pr-risk.yml": {"build-embedded": true},
+	})
+
+	mainArtifacts := workflows["main.yml"].job(t, "build-artifacts")
+	assertStepsBefore(t, mainArtifacts, []string{"Restore Go module cache", "Restore non-race Go build cache"}, []string{"Build reusable Linux artifacts"})
+	assertStepsBefore(t, mainArtifacts, []string{"Build reusable Linux artifacts", "Upload build artifacts"}, []string{"Save Go module cache", "Save non-race Go build cache"})
+
+	mainEmbedded := workflows["main.yml"].job(t, "build-embedded")
+	embeddedRaceBuilds := []string{"Build embedded bd binary", "Build embedded storage test binary", "Build embedded cmd test binary"}
+	assertStepsBefore(t, mainEmbedded, []string{"Restore Go module cache", "Restore race Go build cache"}, embeddedRaceBuilds)
+	assertStepsBefore(t, mainEmbedded, append(embeddedRaceBuilds, "Upload binaries"), []string{"Save race Go build cache"})
+
+	assertStepsBefore(t, workflows["main.yml"].job(t, "pr-core-wrapper"),
+		[]string{"Restore Go module cache", "Restore race Go build cache"}, []string{"Run PR core wrapper"})
+	mainTest := workflows["main.yml"].job(t, "test")
+	assertStepsBefore(t, mainTest, []string{"Restore Go module cache"}, []string{"Install gotestsum", "Build", "Test (with coverage + JUnit XML)", "Test"})
+	assertStepsBefore(t, mainTest, []string{"Restore non-race Go build cache"}, []string{"Build"})
+	assertStepsBefore(t, mainTest, []string{"Restore race Go build cache"}, []string{"Test (with coverage + JUnit XML)", "Test"})
+	assertStepsBefore(t, mainTest, []string{"Build", "Test"}, []string{"Save Go module cache"})
+	assertStepsBefore(t, mainTest, []string{"Build"}, []string{"Save non-race Go build cache"})
+	assertStepsBefore(t, mainTest, []string{"Test"}, []string{"Save race Go build cache"})
+
+	mainWindows := workflows["main.yml"].job(t, "test-windows")
+	assertStepsBefore(t, mainWindows, []string{"Restore Go module cache", "Restore non-race Go build cache"}, []string{"Build (pure Go regex)"})
+	assertStepsBefore(t, mainWindows, []string{"Build (pure Go regex)", "Smoke test - version", "Smoke test - help"}, []string{"Save Go module cache", "Save non-race Go build cache"})
+
+	assertStepsBefore(t, workflows["pr.yml"].job(t, "build-artifacts"),
+		[]string{"Restore Go module cache", "Restore non-race Go build cache"}, []string{"Build reusable Linux artifacts"})
+	assertStepsBefore(t, workflows["pr.yml"].job(t, "pr-core-wrapper"),
+		[]string{"Restore Go module cache", "Restore race Go build cache"}, []string{"Run PR core wrapper"})
+	prMacOS := workflows["pr.yml"].job(t, "test-macos")
+	assertStepsBefore(t, prMacOS, []string{"Restore Go module cache"}, []string{"Build", "Test"})
+	assertStepsBefore(t, prMacOS, []string{"Restore non-race Go build cache"}, []string{"Build"})
+	assertStepsBefore(t, prMacOS, []string{"Restore race Go build cache"}, []string{"Test"})
+	assertStepsBefore(t, workflows["pr.yml"].job(t, "worktree-remove-windows"),
+		[]string{"Restore Go module cache", "Restore non-race Go build cache"}, []string{"Run native Windows worktree removal boundary tests"})
+	assertStepsBefore(t, workflows["pr.yml"].job(t, "check-doc-freshness-platforms"),
+		[]string{"Restore Go module cache"}, []string{"Exercise native date and Bash process boundary"})
+	assertStepsBefore(t, workflows["pr.yml"].job(t, "pr-preflight-platforms"),
+		[]string{"Restore Go module cache"}, []string{"Exercise the real Bash process boundary"})
+
+	prRiskEmbedded := workflows["pr-risk.yml"].job(t, "build-embedded")
+	prRiskNonRaceBuilds := []string{"Build proxied bd subprocess binary", "Build server Dolt conformance test binary"}
+	assertStepsBefore(t, prRiskEmbedded, []string{"Restore Go module cache"}, append(append([]string{}, embeddedRaceBuilds...), prRiskNonRaceBuilds...))
+	assertStepsBefore(t, prRiskEmbedded, []string{"Restore race Go build cache"}, embeddedRaceBuilds)
+	assertStepsBefore(t, prRiskEmbedded, []string{"Restore non-race Go build cache"}, prRiskNonRaceBuilds)
+
+	assertGoCacheEnv(t, workflows["main.yml"].job(t, "build-artifacts"), "Build reusable Linux artifacts", "non-race")
+	for _, stepName := range []string{"Build embedded bd binary", "Build embedded storage test binary", "Build embedded cmd test binary"} {
+		assertGoCacheEnv(t, workflows["main.yml"].job(t, "build-embedded"), stepName, "race")
+	}
+	assertGoCacheEnv(t, workflows["main.yml"].job(t, "test"), "Build", "non-race")
+	assertGoCacheEnv(t, workflows["main.yml"].job(t, "test"), "Test (with coverage + JUnit XML)", "race")
+	assertGoCacheEnv(t, workflows["main.yml"].job(t, "test"), "Test", "race")
+	assertGoCacheEnv(t, workflows["main.yml"].job(t, "test-windows"), "Build (pure Go regex)", "non-race")
+	assertGoCacheEnv(t, workflows["pr.yml"].job(t, "build-artifacts"), "Build reusable Linux artifacts", "non-race")
+	assertGoCacheEnv(t, workflows["pr.yml"].job(t, "pr-core-wrapper"), "Run PR core wrapper", "race")
+	assertGoCacheEnv(t, workflows["pr.yml"].job(t, "test-macos"), "Build", "non-race")
+	assertGoCacheEnv(t, workflows["pr.yml"].job(t, "test-macos"), "Test", "race")
+	assertGoCacheEnv(t, workflows["pr.yml"].job(t, "worktree-remove-windows"), "Run native Windows worktree removal boundary tests", "non-race")
+	for _, stepName := range []string{"Build embedded bd binary", "Build embedded storage test binary", "Build embedded cmd test binary"} {
+		assertGoCacheEnv(t, workflows["pr-risk.yml"].job(t, "build-embedded"), stepName, "race")
+	}
+	for _, stepName := range []string{"Build proxied bd subprocess binary", "Build server Dolt conformance test binary"} {
+		assertGoCacheEnv(t, workflows["pr-risk.yml"].job(t, "build-embedded"), stepName, "non-race")
+	}
+	for _, workflowName := range []string{"pr.yml", "pr-risk.yml"} {
+		for jobName, job := range workflows[workflowName].Jobs {
+			for _, step := range job.Steps {
+				family := actionFamily(step.Uses)
+				if family == cacheSaveActionFamily || isForbiddenGoCacheActionFamily(family) {
+					t.Errorf("%s job %q may not save cache in PR workflow", workflowName, jobName)
+				}
+			}
+		}
+	}
+
+	assertGoCacheWriter(t, workflows["main.yml"], "build-artifacts", "ubuntu-latest", "Save Go module cache", cacheMissCondition(goModuleCacheRestoreID))
+	assertGoCacheWriter(t, workflows["main.yml"], "build-artifacts", "ubuntu-latest", "Save non-race Go build cache", cacheMissCondition(goBuildCacheRestoreID("non-race")))
+	assertGoCacheWriter(t, workflows["main.yml"], "build-embedded", "ubuntu-latest", "Save race Go build cache", cacheMissCondition(goBuildCacheRestoreID("race")))
+	assertGoCacheWriter(t, workflows["main.yml"], "test", "${{ matrix.os }}", "Save Go module cache", combineConditions(macOSMatrixCondition, cacheMissCondition(goModuleCacheRestoreID)))
+	assertGoCacheWriter(t, workflows["main.yml"], "test", "${{ matrix.os }}", "Save non-race Go build cache", combineConditions(macOSMatrixCondition, cacheMissCondition(goBuildCacheRestoreID("non-race"))))
+	assertGoCacheWriter(t, workflows["main.yml"], "test", "${{ matrix.os }}", "Save race Go build cache", combineConditions(macOSMatrixCondition, cacheMissCondition(goBuildCacheRestoreID("race"))))
+	assertGoCacheWriter(t, workflows["main.yml"], "test-windows", "windows-latest", "Save Go module cache", cacheMissCondition(goModuleCacheRestoreID))
+	assertGoCacheWriter(t, workflows["main.yml"], "test-windows", "windows-latest", "Save non-race Go build cache", cacheMissCondition(goBuildCacheRestoreID("non-race")))
+	for _, target := range []struct{ workflow, job string }{
+		{"main.yml", "build-artifacts"},
+		{"main.yml", "build-embedded"},
+		{"main.yml", "pr-core-wrapper"},
+		{"main.yml", "test"},
+		{"main.yml", "test-windows"},
+		{"pr.yml", "build-artifacts"},
+		{"pr.yml", "pr-core-wrapper"},
+		{"pr.yml", "test-macos"},
+		{"pr.yml", "worktree-remove-windows"},
+		{"pr.yml", "check-doc-freshness-platforms"},
+		{"pr.yml", "pr-preflight-platforms"},
+		{"pr-risk.yml", "build-embedded"},
+	} {
+		if got := workflows[target.workflow].job(t, target.job).step(t, "Set up Go").ID; got != "setup-go" {
+			t.Errorf("%s job %q setup-go id = %q, want setup-go", target.workflow, target.job, got)
+		}
+	}
+}
+
+func assertNoUnmanagedGoCacheSteps(t *testing.T, workflows map[string]ciWorkflow, managed map[string]map[string]bool) {
+	t.Helper()
+
+	for workflowName, workflow := range workflows {
+		for jobName, job := range workflow.Jobs {
+			for _, step := range job.Steps {
+				family := actionFamily(step.Uses)
+				if isForbiddenGoCacheActionFamily(family) {
+					t.Errorf("%s job %q has forbidden monolithic cache step %q", workflowName, jobName, step.Name)
+					continue
+				}
+				if isGoCacheActionFamily(family) && !managed[workflowName][jobName] {
+					t.Errorf("%s job %q has unmanaged cache step %q", workflowName, jobName, step.Name)
+				}
+			}
+		}
+	}
+}
+
+const (
+	setupGoActionFamily         = "actions/setup-go"
+	cacheMonolithicActionFamily = "actions/cache"
+	cacheRestoreActionFamily    = "actions/cache/restore"
+	cacheSaveActionFamily       = "actions/cache/save"
+	setupGoSHA                  = "b7ad1dad31e06c5925ef5d2fc7ad053ef454303e"
+	cacheSHA                    = "caa296126883cff596d87d8935842f9db880ef25"
+	goCacheSchema               = "v2"
+	goBaseTag                   = "gms_pure_go"
+	goModuleCachePath           = "~/go/pkg/mod"
+	goModuleCacheRestoreID      = "restore-go-module-cache"
+	macOSRunner                 = "macos-latest"
+	macOSMatrixCondition        = "matrix.os == '" + macOSRunner + "'"
+)
+
+type goCacheStep struct {
+	name        string
+	id          string
+	family      string
+	key         string
+	restoreKeys string
+	path        string
+	ifCondition string
+}
+
+func goModuleCacheKey() string {
+	return "beads-go-mod-" + goCacheSchema + "-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}"
+}
+
+func goModuleCacheRestoreKeys() string {
+	return "beads-go-mod-" + goCacheSchema + "-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-"
+}
+
+func goBuildCachePrefix(profile string) string {
+	// The base tag identifies the cache topology. Go's content-addressed
+	// cache includes compiler options, so extra tags can safely share it.
+	return "beads-go-build-" + goCacheSchema + "-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-" + goBaseTag + "-" + profile + "-"
+}
+
+func goBuildCacheKey(profile string) string {
+	return goBuildCachePrefix(profile) + "${{ github.sha }}"
+}
+
+func goBuildCachePath(profile string) string { return "${{ runner.temp }}/go-cache/" + profile }
+
+func goBuildCacheRestoreID(profile string) string {
+	return "restore-" + profile + "-go-build-cache"
+}
+
+func cacheMissCondition(restoreID string) string {
+	return "steps." + restoreID + ".outputs.cache-hit != 'true'"
+}
+
+func combineConditions(conditions ...string) string {
+	var nonEmpty []string
+	for _, condition := range conditions {
+		if condition != "" {
+			nonEmpty = append(nonEmpty, condition)
+		}
+	}
+	return strings.Join(nonEmpty, " && ")
+}
+
+func restoreModuleCache() goCacheStep {
+	return goCacheStep{name: "Restore Go module cache", family: cacheRestoreActionFamily, key: goModuleCacheKey(), restoreKeys: goModuleCacheRestoreKeys(), path: goModuleCachePath}
+}
+
+func mainRestoreModuleCache() goCacheStep {
+	step := restoreModuleCache()
+	step.id = goModuleCacheRestoreID
+	return step
+}
+
+func saveModuleCache() goCacheStep { return saveModuleCacheIf("") }
+
+func saveModuleCacheIf(condition string) goCacheStep {
+	return goCacheStep{name: "Save Go module cache", family: cacheSaveActionFamily, key: goModuleCacheKey(), path: goModuleCachePath, ifCondition: combineConditions(condition, cacheMissCondition(goModuleCacheRestoreID))}
+}
+
+func restoreBuildCache(profile string) goCacheStep {
+	return restoreBuildCacheIf(profile, "")
+}
+
+func restoreBuildCacheIf(profile, condition string) goCacheStep {
+	return goCacheStep{name: "Restore " + profile + " Go build cache", family: cacheRestoreActionFamily, key: goBuildCacheKey(profile), restoreKeys: goBuildCachePrefix(profile), path: goBuildCachePath(profile), ifCondition: condition}
+}
+
+func mainRestoreBuildCache(profile string) goCacheStep {
+	return mainRestoreBuildCacheIf(profile, "")
+}
+
+func mainRestoreBuildCacheIf(profile, condition string) goCacheStep {
+	step := restoreBuildCacheIf(profile, condition)
+	step.id = goBuildCacheRestoreID(profile)
+	return step
+}
+
+func saveBuildCache(profile string) goCacheStep { return saveBuildCacheIf(profile, "") }
+
+func saveBuildCacheIf(profile, condition string) goCacheStep {
+	return goCacheStep{name: "Save " + profile + " Go build cache", family: cacheSaveActionFamily, key: goBuildCacheKey(profile), path: goBuildCachePath(profile), ifCondition: combineConditions(condition, cacheMissCondition(goBuildCacheRestoreID(profile)))}
+}
+
+func assertGoCacheInventory(t *testing.T, job ciWorkflowJob, want []goCacheStep) {
+	t.Helper()
+
+	var got []ciWorkflowStep
+	for _, step := range job.Steps {
+		if isGoCacheActionFamily(actionFamily(step.Uses)) {
+			got = append(got, step)
+		}
+	}
+	if len(got) != len(want) {
+		t.Fatalf("cache steps = %d, want %d; got %+v", len(got), len(want), got)
+	}
+	for i, expected := range want {
+		step := got[i]
+		if step.Name != expected.name || step.ID != expected.id || actionFamily(step.Uses) != expected.family || step.With["key"] != expected.key || step.With["restore-keys"] != expected.restoreKeys || step.With["path"] != expected.path || step.If != expected.ifCondition {
+			t.Errorf("cache step %d = {name:%q id:%q family:%q key:%q restore-keys:%q path:%q if:%q}, want {name:%q id:%q family:%q key:%q restore-keys:%q path:%q if:%q}", i, step.Name, step.ID, actionFamily(step.Uses), step.With["key"], step.With["restore-keys"], step.With["path"], step.If, expected.name, expected.id, expected.family, expected.key, expected.restoreKeys, expected.path, expected.ifCondition)
+		}
+	}
+}
+
+func assertConditionalCacheWritersHaveMatrixMember(t *testing.T, job ciWorkflowJob, wantMember string) {
+	t.Helper()
+
+	memberCount := 0
+	for _, member := range job.Strategy.Matrix.OS {
+		if member == wantMember {
+			memberCount++
+		}
+	}
+	if memberCount != 1 {
+		t.Errorf("strategy matrix os has %d concrete %q members, want exactly 1: %v", memberCount, wantMember, job.Strategy.Matrix.OS)
+	}
+
+	conditionalWriters := 0
+	for _, step := range job.Steps {
+		if actionFamily(step.Uses) != cacheSaveActionFamily {
+			continue
+		}
+		remainder, found := strings.CutPrefix(step.If, "matrix.os == '")
+		if !found {
+			continue
+		}
+		member, _, found := strings.Cut(remainder, "'")
+		if !found {
+			t.Errorf("cache writer %q has malformed matrix.os condition %q", step.Name, step.If)
+			continue
+		}
+		conditionalWriters++
+		if member != wantMember {
+			t.Errorf("cache writer %q targets matrix member %q, want %q", step.Name, member, wantMember)
+		}
+	}
+	if conditionalWriters == 0 {
+		t.Fatal("job has no conditional matrix cache writers")
+	}
+}
+
+func assertStepsBefore(t *testing.T, job ciWorkflowJob, before, after []string) {
+	t.Helper()
+
+	for _, beforeName := range before {
+		beforeIndex := job.stepIndex(t, beforeName)
+		for _, afterName := range after {
+			afterIndex := job.stepIndex(t, afterName)
+			if beforeIndex >= afterIndex {
+				t.Errorf("step %q index %d must precede %q index %d", beforeName, beforeIndex, afterName, afterIndex)
+			}
+		}
+	}
+}
+
+func assertGoCacheEnv(t *testing.T, job ciWorkflowJob, stepName, profile string) {
+	t.Helper()
+	if got := job.step(t, stepName).Env["GOCACHE"]; got != goBuildCachePath(profile) {
+		t.Errorf("step %q GOCACHE = %q, want %q", stepName, got, goBuildCachePath(profile))
+	}
+}
+
+func assertGoCacheWriter(t *testing.T, workflow ciWorkflow, wantJob, wantRunner, wantStep, wantCondition string) {
+	t.Helper()
+
+	var writers []string
+	for jobName, job := range workflow.Jobs {
+		for _, step := range job.Steps {
+			if job.RunsOn == wantRunner && actionFamily(step.Uses) == cacheSaveActionFamily && step.Name == wantStep && step.If == wantCondition {
+				writers = append(writers, jobName+"/"+step.Name)
+			}
+		}
+	}
+	want := wantJob + "/" + wantStep
+	if len(writers) != 1 || writers[0] != want {
+		t.Errorf("cache writer %q with if %q = %v, want exactly [%s]", wantStep, wantCondition, writers, want)
+	}
+}
+
+var actionPin = regexp.MustCompile(`^[0-9a-f]{40}$`)
+
+func actionFamily(uses string) string {
+	family, _, found := strings.Cut(uses, "@")
+	if !found {
+		return uses
+	}
+	return family
+}
+
+func isGoCacheActionFamily(family string) bool {
+	return family == cacheMonolithicActionFamily || family == cacheRestoreActionFamily || family == cacheSaveActionFamily
+}
+
+func isForbiddenGoCacheActionFamily(family string) bool {
+	return family == cacheMonolithicActionFamily
+}
+
+func assertPinnedGoCacheActions(t *testing.T, workflowName string, workflow ciWorkflow) {
+	t.Helper()
+
+	allowed := map[string]string{
+		setupGoActionFamily:      setupGoSHA,
+		cacheRestoreActionFamily: cacheSHA,
+		cacheSaveActionFamily:    cacheSHA,
+	}
+	for jobName, job := range workflow.Jobs {
+		for _, step := range job.Steps {
+			family := actionFamily(step.Uses)
+			wantSHA, managed := allowed[family]
+			if isForbiddenGoCacheActionFamily(family) {
+				managed = true
+			}
+			if !managed {
+				continue
+			}
+			_, sha, found := strings.Cut(step.Uses, "@")
+			if !found || !actionPin.MatchString(sha) {
+				t.Errorf("%s job %q step %q action %q is not pinned to exactly 40 lowercase hex characters", workflowName, jobName, step.Name, step.Uses)
+			}
+			if isForbiddenGoCacheActionFamily(family) {
+				t.Errorf("%s job %q step %q uses forbidden monolithic action %q", workflowName, jobName, step.Name, family)
+				continue
+			}
+			if !found || !actionPin.MatchString(sha) {
+				continue
+			}
+			if sha != wantSHA {
+				t.Errorf("%s job %q step %q action %q has SHA %q, want released SHA %q", workflowName, jobName, step.Name, family, sha, wantSHA)
+			}
+			if family == setupGoActionFamily && step.With["cache"] != "false" {
+				t.Errorf("%s job %q setup-go cache = %q, want false", workflowName, jobName, step.With["cache"])
+			}
+		}
+	}
+}
+
 type ciWorkflow struct {
 	Jobs map[string]ciWorkflowJob `yaml:"jobs"`
 }
 
 type ciWorkflowJob struct {
-	Needs ciWorkflowStringList `yaml:"needs"`
-	Steps []ciWorkflowStep     `yaml:"steps"`
+	Needs    ciWorkflowStringList `yaml:"needs"`
+	Steps    []ciWorkflowStep     `yaml:"steps"`
+	RunsOn   string               `yaml:"runs-on"`
+	Strategy ciWorkflowStrategy   `yaml:"strategy"`
+}
+
+type ciWorkflowStrategy struct {
+	Matrix ciWorkflowMatrix `yaml:"matrix"`
+}
+
+type ciWorkflowMatrix struct {
+	OS []string `yaml:"os"`
 }
 
 type ciWorkflowStep struct {
 	Name string            `yaml:"name"`
+	ID   string            `yaml:"id"`
+	If   string            `yaml:"if"`
+	Uses string            `yaml:"uses"`
 	Run  string            `yaml:"run"`
 	Env  map[string]string `yaml:"env"`
+	With map[string]string `yaml:"with"`
 }
 
 type ciWorkflowStringList []string
@@ -132,6 +586,25 @@ func (job ciWorkflowJob) step(t *testing.T, name string) ciWorkflowStep {
 	}
 	t.Fatalf("job has no %q step", name)
 	return ciWorkflowStep{}
+}
+
+func (job ciWorkflowJob) stepIndex(t *testing.T, name string) int {
+	t.Helper()
+
+	index := -1
+	for i, step := range job.Steps {
+		if step.Name != name {
+			continue
+		}
+		if index >= 0 {
+			t.Fatalf("job has more than one %q step", name)
+		}
+		index = i
+	}
+	if index < 0 {
+		t.Fatalf("job has no %q step", name)
+	}
+	return index
 }
 
 func assertJobRunsExactly(t *testing.T, job ciWorkflowJob, want string) {
