@@ -62,6 +62,18 @@ func TestServerDSN_PinsMaxAllowedPacket(t *testing.T) {
 			"per-connection max_allowed_packet probe; got %d from DSN %q",
 			cfg.MaxAllowedPacket, dsn)
 	}
+
+	// Skipping the probe must not also shrink what the client will send.
+	// Dolt's max_allowed_packet defaults to 1 GiB and its sysvar type caps it
+	// there, so anything lower would make the driver reject locally with
+	// ErrPktTooLarge statements the server would have accepted — the
+	// regression that using the driver's own 64 MiB default would introduce.
+	const doltServerMaxAllowedPacket = 1 << 30
+	if cfg.MaxAllowedPacket < doltServerMaxAllowedPacket {
+		t.Errorf("MaxAllowedPacket must be at least Dolt's %d-byte ceiling so "+
+			"the client never rejects a packet the server would accept; got %d",
+			doltServerMaxAllowedPacket, cfg.MaxAllowedPacket)
+	}
 }
 
 func TestServerDSN_UnixSocket(t *testing.T) {

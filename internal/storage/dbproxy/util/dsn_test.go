@@ -23,6 +23,13 @@ func TestDoltServerDSN_PinsMaxAllowedPacket(t *testing.T) {
 			"per-connection max_allowed_packet probe; got %d from DSN %q",
 			cfg.MaxAllowedPacket, dsn)
 	}
+
+	// And must not shrink the client's ceiling below what Dolt accepts.
+	const doltServerMaxAllowedPacket = 1 << 30
+	if cfg.MaxAllowedPacket < doltServerMaxAllowedPacket {
+		t.Errorf("MaxAllowedPacket must be at least Dolt's %d-byte ceiling; got %d",
+			doltServerMaxAllowedPacket, cfg.MaxAllowedPacket)
+	}
 }
 
 func TestDoltServerDSN_TLS(t *testing.T) {
