@@ -3,7 +3,27 @@ package util
 import (
 	"strings"
 	"testing"
+
+	mysql "github.com/go-sql-driver/mysql"
 )
+
+func TestDoltServerDSN_PinsMaxAllowedPacket(t *testing.T) {
+	dsn := DoltServerDSN{Host: "127.0.0.1", Port: 3306, User: "root"}.String()
+
+	// See internal/storage/doltutil: a zero MaxAllowedPacket makes the driver
+	// run "SELECT @@max_allowed_packet" on every new connection. Assert the
+	// parsed value, not the DSN text — FormatDSN omits the parameter when it
+	// matches the driver default.
+	cfg, err := mysql.ParseDSN(dsn)
+	if err != nil {
+		t.Fatalf("ParseDSN(%q) failed: %v", dsn, err)
+	}
+	if cfg.MaxAllowedPacket <= 0 {
+		t.Errorf("MaxAllowedPacket should be positive so the driver skips the "+
+			"per-connection max_allowed_packet probe; got %d from DSN %q",
+			cfg.MaxAllowedPacket, dsn)
+	}
+}
 
 func TestDoltServerDSN_TLS(t *testing.T) {
 	t.Run("config name takes precedence", func(t *testing.T) {
