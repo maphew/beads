@@ -29,15 +29,15 @@ func TestPrepareRefusesUnsafeTargetsInExistingOrder(t *testing.T) {
 	}
 }
 
-func TestPrepareCleanlinessAndContainmentRespectForce(t *testing.T) {
+func TestPreparePolicyCleanlinessAndContainment(t *testing.T) {
 	for _, tt := range []struct {
 		name string
 		req  Request
 		set  func(*PrepareFacts)
 		want string
 	}{
-		{"dirty refused", Request{Mode: Normal}, func(f *PrepareFacts) { f.Status = Dirty }, "modified, untracked, or ignored"},
-		{"dirty forced", Request{Mode: Force}, func(f *PrepareFacts) {
+		{"dirty target refusal", Request{Mode: Normal}, func(f *PrepareFacts) { f.Status = Dirty }, "modified, untracked, or ignored"},
+		{"force stable dirty success", Request{Mode: Force}, func(f *PrepareFacts) {
 			f.Status, f.Comparator, f.Containment = Dirty, ComparatorNotRequired, ContainmentNotRequired
 		}, ""},
 		{"comparator required", Request{Mode: Normal}, func(f *PrepareFacts) { f.Comparator = ComparatorMissing }, "cannot verify unpushed commits"},
@@ -136,25 +136,30 @@ func TestRevalidateRefusesZeroUnknownAndChangedInvariant(t *testing.T) {
 	}
 }
 
-func TestClassifyFailureUsesRawPostFailureEvidence(t *testing.T) {
+func TestClassifyFailurePolicyUsesRawPostFailureEvidence(t *testing.T) {
 	plan, err := Prepare(Request{Mode: Normal}, prepareFacts())
 	if err != nil {
 		t.Fatal(err)
 	}
 	removeErr := assertErr{}
 	stable := FailureFacts{Revalidation: revalidationFacts(Normal), RevalidationResult: RevalidationPassed, Registration: Present, TargetPath: Present}
-	if got, err := ClassifyFailure(plan, stable, removeErr); err != nil || got.Kind != UnchangedFailure {
-		t.Fatalf("stable failure = (%#v, %v), want unchanged", got, err)
-	}
-	for _, facts := range []FailureFacts{
-		{Revalidation: revalidationFacts(Normal), Registration: Missing, TargetPath: Present},
-		{Revalidation: revalidationFacts(Normal), Registration: Present, TargetPath: Missing},
-		{Revalidation: revalidationFacts(Normal), RevalidationResult: RevalidationFailed, Registration: Present, TargetPath: Present},
-		func() FailureFacts { f := stable; f.Revalidation.Head = InvariantUnknown; return f }(),
+	for _, tt := range []struct {
+		name  string
+		facts FailureFacts
+		want  FailureKind
+	}{
+		{"unchanged primary failure", stable, UnchangedFailure},
+		{"indeterminate primary failure: missing registration", FailureFacts{Revalidation: revalidationFacts(Normal), Registration: Missing, TargetPath: Present}, PartialFailure},
+		{"indeterminate primary failure: missing path", FailureFacts{Revalidation: revalidationFacts(Normal), Registration: Present, TargetPath: Missing}, PartialFailure},
+		{"indeterminate primary failure: failed reinspection", FailureFacts{Revalidation: revalidationFacts(Normal), RevalidationResult: RevalidationFailed, Registration: Present, TargetPath: Present}, PartialFailure},
+		{"indeterminate primary failure: unknown invariant", func() FailureFacts { f := stable; f.Revalidation.Head = InvariantUnknown; return f }(), PartialFailure},
 	} {
-		if got, err := ClassifyFailure(plan, facts, removeErr); err != nil || got.Kind != PartialFailure {
-			t.Fatalf("indeterminate failure = (%#v, %v), want partial", got, err)
-		}
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ClassifyFailure(plan, tt.facts, removeErr)
+			if err != nil || got.Kind != tt.want {
+				t.Fatalf("ClassifyFailure() = (%#v, %v), want %v", got, err, tt.want)
+			}
+		})
 	}
 	if _, err := ClassifyFailure(Plan{}, stable, removeErr); err == nil {
 		t.Fatal("ClassifyFailure() accepted zero plan")

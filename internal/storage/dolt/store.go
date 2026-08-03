@@ -1691,6 +1691,17 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 					"  dolt sql-server --socket %s\n"+
 					"Auto-start is not supported in socket mode.",
 					cfg.ServerSocket, cfg.ServerSocket)
+			} else if isExternalServerHost(cfg.ServerHost) {
+				// External (non-localhost) server: bd does not
+				// manage it; "bd dolt start" would be wrong advice
+				// (GH#3518). Suggest verifying the external server
+				// instead.
+				hint = fmt.Sprintf("Configured Dolt server at %s:%d is unreachable.\n"+
+					"Verify the external server is running and reachable from this host:\n"+
+					"  nc -zv %s %d  # or curl %s:%d for an HTTP-style check",
+					cfg.ServerHost, cfg.ServerPort,
+					cfg.ServerHost, cfg.ServerPort,
+					cfg.ServerHost, cfg.ServerPort)
 			} else if !cfg.AutoStart && doltserver.IsAutoStartDisabled() {
 				hint = "Dolt server auto-start is disabled (dolt.auto-start: false).\n" +
 					"Start the server manually:\n  bd dolt start"
@@ -1961,6 +1972,20 @@ func isLocalHost(host string) bool {
 		return true
 	}
 	return false
+}
+
+// isExternalServerHost reports whether host names a remote server for the
+// purposes of connect-failure hints (GH#3518). Unlike isLocalHost it
+// normalizes case/whitespace and treats 0.0.0.0 as local, matching the
+// mode-inference classification in internal/configfile — the two must
+// agree or an unreachable local server gets external-server advice with
+// no "bd dolt start" recovery hint.
+func isExternalServerHost(host string) bool {
+	switch strings.ToLower(strings.TrimSpace(host)) {
+	case "", "localhost", "127.0.0.1", "::1", "[::1]", "0.0.0.0":
+		return false
+	}
+	return true
 }
 
 // buildServerDSN constructs a MySQL DSN for connecting to a Dolt server.

@@ -128,6 +128,7 @@ func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltS
 	if err := validateConfiguredBackend(cfg); err != nil {
 		return nil, err
 	}
+	cfg = normalizeLoadedConfig(cfg)
 	if backend, ok := backends.Lookup(cfg.GetBackend()); ok {
 		return backend.Open(ctx, beadsDir)
 	}
@@ -230,6 +231,7 @@ func openNonMutatingStoreFromConfig(ctx context.Context, beadsDir string, previe
 	if err := validateConfiguredBackend(cfg); err != nil {
 		return nil, err
 	}
+	cfg = normalizeLoadedConfig(cfg)
 	if backend, ok := backends.Lookup(cfg.GetBackend()); ok {
 		return backend.OpenReadOnly(ctx, beadsDir)
 	}

@@ -464,9 +464,10 @@ func loadServerModeFromBeadsDir(beadsDir string) error {
 	if err != nil {
 		return fmt.Errorf("load %s: %w (storage mode unknown; data commands will refuse to run rather than fall back to the embedded store)", configfile.ConfigPath(beadsDir), err)
 	}
-	if cfg == nil {
-		return nil
-	}
+	// Absent metadata.json keeps the fresh-repo embedded default unless
+	// env/config.yaml supply a remote host (GH#3545) — inference must not
+	// depend on metadata existing.
+	cfg = normalizeLoadedConfig(cfg)
 	warnSharedServerEmbeddedMismatch(cfg)
 	psm := cfg.IsDoltProxiedServerMode()
 	sm := cfg.IsDoltServerMode()
@@ -1185,6 +1186,14 @@ var rootCmd = &cobra.Command{
 					// or unknown metadata likewise must reach config validation
 					// instead of becoming a generic "no database" result.
 					dbPath = bd
+				} else if cfg == nil && cfgErr == nil &&
+					configfile.DefaultConfig().HostImpliesServerMode() {
+					// Metadata-less workspace whose server lives at a
+					// remote host named by BEADS_DOLT_SERVER_HOST or
+					// config.yaml (GH#3545): there is no local database
+					// directory to discover, so route the .beads dir as
+					// a server workspace instead of "no database found".
+					dbPath = bd
 				}
 			}
 		}
@@ -1385,7 +1394,14 @@ var rootCmd = &cobra.Command{
 		// deployments that empty relic answers every query with an empty
 		// result set and exit 0 (false-empty), which readers misinterpret as
 		// "no work". Absent metadata.json (cfg == nil, cfgErr == nil) keeps
-		// the fresh-repo embedded default below.
+		// the fresh-repo embedded default below — unless env/config.yaml
+		// supply a remote host (GH#3545): host inference must not depend
+		// on metadata existing, so substitute the default config and let
+		// the normal mode/connection resolution run.
+		if cfg == nil && configfile.DefaultConfig().HostImpliesServerMode() {
+			logConfigDiscovery(beadsDir, "no metadata.json; host inference (GH#3545) selects server mode")
+			cfg = configfile.DefaultConfig()
+		}
 		if cfg != nil {
 			warnSharedServerEmbeddedMismatch(cfg)
 			doltCfg.ProxiedServer = cfg.IsDoltProxiedServerMode()

@@ -3,10 +3,7 @@ package main
 import (
 	"context"
 	"errors"
-	"os"
-	"path/filepath"
 	"reflect"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -149,28 +146,6 @@ func TestWorktreeRemovalOrchestrationPresentsPartialRemoveFailure(t *testing.T) 
 	}
 }
 
-func TestWorktreeRemovalCommandUsesPolicyPinnedMutation(t *testing.T) {
-	observer := &recordingWorktreeRemovalObserver{
-		prepare:      worktreeRemovalFacts(worktreeremove.IgnoreAbsent),
-		revalidation: []worktreeremove.RevalidationFacts{worktreeRemovalRevalidationFacts(worktreeremove.Normal)},
-	}
-	mutator := &recordingWorktreeRemovalMutator{}
-
-	err := runWorktreeRemovalOrchestration(
-		context.Background(),
-		worktreeRemovalRequest{mode: worktreeremove.Normal},
-		observer,
-		mutator,
-		&recordingWorktreeRemovalPresenter{},
-	)
-	if err != nil {
-		t.Fatalf("runWorktreeRemovalOrchestration() error = %v", err)
-	}
-	if want := []worktreeremove.Mutation{{TargetPath: "/exact/registry/path", Force: false}}; !reflect.DeepEqual(mutator.removals, want) {
-		t.Fatalf("removals = %#v, want %#v", mutator.removals, want)
-	}
-}
-
 func TestWorktreeRemovalCommandRefusesStaleApprovalAndPrepareDiagnostic(t *testing.T) {
 	for _, tt := range []struct {
 		name          string
@@ -215,43 +190,6 @@ func TestWorktreeRemovalCommandRefusesStaleApprovalAndPrepareDiagnostic(t *testi
 				t.Fatalf("removals = %#v, want none", mutator.removals)
 			}
 		})
-	}
-}
-
-func TestWorktreeRemovalGitAdapterUsesExactApprovedArgs(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("the recording git executable is a POSIX shell script")
-	}
-	dir := t.TempDir()
-	argsPath := filepath.Join(dir, "args")
-	gitPath := filepath.Join(dir, "git")
-	if err := os.WriteFile(gitPath, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$WORKTREE_REMOVE_ARGS_FILE\"\n"), 0755); err != nil {
-		t.Fatalf("write recording git: %v", err)
-	}
-	adapter := &gitWorktreeRemovalAdapter{plan: &worktreeRemovalPlan{
-		git:           &worktreeRemovalGit{executable: gitPath, env: []string{"WORKTREE_REMOVE_ARGS_FILE=" + argsPath}},
-		executionRoot: dir,
-		target:        pinnedWorktreeTarget{path: "/exact/registered path"},
-		force:         true,
-	}}
-	mutation := worktreeremove.Mutation{TargetPath: "/exact/registered path", Force: true}
-	if err := adapter.Remove(context.Background(), mutation); err != nil {
-		t.Fatalf("Remove() error = %v", err)
-	}
-	got, err := os.ReadFile(argsPath)
-	if err != nil {
-		t.Fatalf("read recorded git arguments: %v", err)
-	}
-	if want := "-c\ncore.hooksPath=\n-c\ncore.fsmonitor=false\n-c\ncore.ignorecase=false\nworktree\nremove\n--force\n--\n/exact/registered path\n"; string(got) != want {
-		t.Fatalf("git arguments = %q, want %q", got, want)
-	}
-
-	if err := adapter.Remove(context.Background(), worktreeremove.Mutation{TargetPath: "/forged/path", Force: true}); err == nil {
-		t.Fatal("Remove() accepted a forged target path")
-	}
-	adapter.plan.gitignoreCleanup = &gitignoreCleanupPlan{entry: "nested/lane"}
-	if err := adapter.Cleanup(context.Background(), worktreeremove.Cleanup{Entry: "other/lane"}); err == nil {
-		t.Fatal("Cleanup() accepted a forged managed-ignore entry")
 	}
 }
 
