@@ -7,9 +7,12 @@ import (
 	mysql "github.com/go-sql-driver/mysql"
 )
 
-// maxAllowedPacketBytes mirrors go-sql-driver/mysql's unexported
-// defaultMaxAllowedPacket (64 MiB).
-const maxAllowedPacketBytes = 64 << 20
+// maxAllowedPacketBytes is the client-side packet ceiling pinned into every
+// DSN this package builds: 1 GiB, matching Dolt's max_allowed_packet default
+// and the maximum its sysvar type permits. See
+// internal/storage/doltutil.maxAllowedPacketBytes for the full rationale,
+// including why this is deliberately not go-sql-driver/mysql's 64 MiB default.
+const maxAllowedPacketBytes = 1 << 30
 
 type DoltServerDSN struct {
 	Socket          string
@@ -50,8 +53,7 @@ func (d DoltServerDSN) String() string {
 		// Same reason as internal/storage/doltutil.ServerDSN: this config is a
 		// composite literal, so without an explicit value FormatDSN emits
 		// maxAllowedPacket=0 and the driver spends an extra round-trip on
-		// "SELECT @@max_allowed_packet" for every new connection. The value is
-		// the driver's own default (64 MiB), so the packet limit is unchanged.
+		// "SELECT @@max_allowed_packet" for every new connection.
 		MaxAllowedPacket:     maxAllowedPacketBytes,
 		Timeout:              timeout,
 		AllowNativePasswords: true,
