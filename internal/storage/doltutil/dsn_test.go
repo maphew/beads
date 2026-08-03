@@ -3,6 +3,8 @@ package doltutil
 import (
 	"strings"
 	"testing"
+
+	mysql "github.com/go-sql-driver/mysql"
 )
 
 func TestServerDSN_TLSExplicitlyDisabledByDefault(t *testing.T) {
@@ -34,6 +36,31 @@ func TestServerDSN_InterpolatesParams(t *testing.T) {
 	// connection built from this struct benefits.
 	if !strings.Contains(dsn, "interpolateParams=true") {
 		t.Errorf("DSN should contain interpolateParams=true; got %q", dsn)
+	}
+}
+
+func TestServerDSN_PinsMaxAllowedPacket(t *testing.T) {
+	dsn := ServerDSN{
+		Host: "dolt.example.com",
+		Port: 3307,
+		User: "root",
+	}.String()
+
+	// The driver decides whether to probe the server by testing
+	// cfg.MaxAllowedPacket > 0 while establishing each connection; when it is
+	// zero it issues "SELECT @@max_allowed_packet" first, costing an extra
+	// round-trip per new connection. Assert the effective parsed value rather
+	// than the DSN text: FormatDSN deliberately omits the parameter when it
+	// equals the driver default, so a substring check would assert the wrong
+	// thing and pass for the wrong reason.
+	cfg, err := mysql.ParseDSN(dsn)
+	if err != nil {
+		t.Fatalf("ParseDSN(%q) failed: %v", dsn, err)
+	}
+	if cfg.MaxAllowedPacket <= 0 {
+		t.Errorf("MaxAllowedPacket should be positive so the driver skips the "+
+			"per-connection max_allowed_packet probe; got %d from DSN %q",
+			cfg.MaxAllowedPacket, dsn)
 	}
 }
 
