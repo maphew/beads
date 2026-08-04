@@ -1562,6 +1562,123 @@ func TestResolveServerMode_ExplicitPort(t *testing.T) {
 	}
 }
 
+func TestResolveServerMode_HostInferredExternal(t *testing.T) {
+	// GH#3545: a non-localhost host with no explicit mode or port means
+	// the server lives on another machine — bd cannot own its lifecycle,
+	// so "bd dolt start" must not launch a repo-local server against it.
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	config.ResetForTesting()
+
+	dir := t.TempDir()
+	metaCfg := &configfile.Config{
+		DoltServerHost: "10.0.0.5",
+	}
+	if err := metaCfg.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	mode := ResolveServerMode(dir)
+	if mode != ServerModeExternal {
+		t.Errorf("expected ServerModeExternal with non-localhost host, got %v", mode)
+	}
+
+	// Host-only config must fall back to the documented default port,
+	// not 0 — there is no local Start() to allocate one for a remote
+	// server (cross-vendor review P1, 2026-08-02).
+	cfg := DefaultConfig(dir)
+	if cfg.Port != configfile.DefaultDoltServerPort {
+		t.Errorf("DefaultConfig.Port = %d, want %d for host-only external config", cfg.Port, configfile.DefaultDoltServerPort)
+	}
+	if cfg.PortSource != PortSourceExternalHostDefault {
+		t.Errorf("DefaultConfig.PortSource = %q, want %q", cfg.PortSource, PortSourceExternalHostDefault)
+	}
+
+	// A stale local port file (bd's bookkeeping for a bd-owned LOCAL
+	// server) must not be paired with the remote host (cross-vendor
+	// review round 4): still expect the documented default.
+	if err := os.WriteFile(portPath(dir), []byte("45123"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg = DefaultConfig(dir)
+	if cfg.Port != configfile.DefaultDoltServerPort {
+		t.Errorf("DefaultConfig.Port = %d, want %d: stale local port file must be ignored for a remote host", cfg.Port, configfile.DefaultDoltServerPort)
+	}
+	if err := os.Remove(portPath(dir)); err != nil {
+		t.Fatal(err)
+	}
+
+	// Localhost host stays owned.
+	metaCfg = &configfile.Config{
+		DoltServerHost: "127.0.0.1",
+	}
+	if err := metaCfg.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+	if mode := ResolveServerMode(dir); mode != ServerModeOwned {
+		t.Errorf("expected ServerModeOwned with localhost host, got %v", mode)
+	}
+}
+
+func TestResolveServerMode_EnvHostBeatsEmbeddedMetadata(t *testing.T) {
+	// GH#2949 precedent applied to the host env var: a runtime remote
+	// host must beat stale dolt_mode=embedded metadata, and the two mode
+	// resolvers (IsDoltServerMode, ResolveServerMode) must agree — or
+	// data commands select SQL-server storage while lifecycle/port
+	// resolution runs embedded (cross-vendor review round 4).
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "192.0.2.10")
+	config.ResetForTesting()
+
+	dir := t.TempDir()
+	metaCfg := &configfile.Config{
+		DoltMode: configfile.DoltModeEmbedded,
+	}
+	if err := metaCfg.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	if mode := ResolveServerMode(dir); mode != ServerModeExternal {
+		t.Errorf("expected ServerModeExternal with remote env host over embedded metadata, got %v", mode)
+	}
+	cfg := DefaultConfig(dir)
+	if cfg.Port != configfile.DefaultDoltServerPort {
+		t.Errorf("DefaultConfig.Port = %d, want %d", cfg.Port, configfile.DefaultDoltServerPort)
+	}
+
+	// Proxied-server workspaces are exempt, matching the inference gate.
+	metaCfg = &configfile.Config{
+		DoltMode: configfile.DoltModeProxiedServer,
+	}
+	if err := metaCfg.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+	if mode := ResolveServerMode(dir); mode == ServerModeExternal {
+		t.Errorf("proxied-server workspace must not be reclassified external by env host; got %v", mode)
+	}
+
+	// An EMPTY env host behaves as unset (matching GetDoltServerHost,
+	// cross-vendor review round 6): the remote metadata host stays
+	// effective, so inference still fires. Suppression requires an
+	// explicit localhost value.
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	metaCfg = &configfile.Config{
+		DoltServerHost: "10.0.0.5",
+	}
+	if err := metaCfg.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+	if mode := ResolveServerMode(dir); mode != ServerModeExternal {
+		t.Errorf("expected ServerModeExternal: empty env host must not mask the effective remote metadata host, got %v", mode)
+	}
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "localhost")
+	if mode := ResolveServerMode(dir); mode != ServerModeOwned {
+		t.Errorf("expected ServerModeOwned with explicit localhost env override, got %v", mode)
+	}
+}
+
 func TestResolveServerMode_ServerModeEnv(t *testing.T) {
 	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
 	t.Setenv("BEADS_DOLT_SERVER_MODE", "1")
@@ -1969,12 +2086,26 @@ func TestBuildDoltServerYAMLConfig_DebugLogLevel(t *testing.T) {
 	}
 }
 
+// physicalTempDir returns t.TempDir() with symlinks resolved. resolveCfgDir
+// deliberately normalizes doltDir via filepath.EvalSymlinks, and on macOS
+// t.TempDir() lives under /var/folders which is a symlink to
+// /private/var/folders — expected paths must be built from the physical
+// root or the comparison fails on that platform alone.
+func physicalTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks(t.TempDir()): %v", err)
+	}
+	return dir
+}
+
 // TestResolveCfgDir_NeitherExists is the common case: no parent or
 // data-dir .doltcfg found on disk, so resolveCfgDir must default to
 // dataDir/.doltcfg — matching Dolt's own flag-mode default ("Assign the one
 // that exists, defaults to current if neither exist" in setupDoltConfig).
 func TestResolveCfgDir_NeitherExists(t *testing.T) {
-	doltDir := filepath.Join(t.TempDir(), "dolt")
+	doltDir := filepath.Join(physicalTempDir(t), "dolt")
 	if err := os.MkdirAll(doltDir, 0o755); err != nil {
 		t.Fatalf("mkdir doltDir: %v", err)
 	}
@@ -1998,7 +2129,7 @@ func TestResolveCfgDir_NeitherExists(t *testing.T) {
 // would otherwise silently ignore it; resolveCfgDir must find it and point
 // cfg_dir there instead of a fresh dataDir/.doltcfg.
 func TestResolveCfgDir_ParentExists(t *testing.T) {
-	root := t.TempDir()
+	root := physicalTempDir(t)
 	doltDir := filepath.Join(root, "dolt")
 	if err := os.MkdirAll(doltDir, 0o755); err != nil {
 		t.Fatalf("mkdir doltDir: %v", err)
@@ -2029,7 +2160,7 @@ func TestResolveCfgDir_ParentExists(t *testing.T) {
 // one) resolves to itself, matching flag-mode's "look in data directory"
 // branch.
 func TestResolveCfgDir_CurrentExists(t *testing.T) {
-	root := t.TempDir()
+	root := physicalTempDir(t)
 	doltDir := filepath.Join(root, "dolt")
 	if err := os.MkdirAll(doltDir, 0o755); err != nil {
 		t.Fatalf("mkdir doltDir: %v", err)
@@ -2083,7 +2214,7 @@ func TestResolveCfgDir_BothExistIsAmbiguous(t *testing.T) {
 // (not a directory) is not mistaken for a real .doltcfg dir — matches
 // Dolt's own dEnv.FS.Exists(...) check, which also requires isDir.
 func TestResolveCfgDir_FileNotDirIgnored(t *testing.T) {
-	root := t.TempDir()
+	root := physicalTempDir(t)
 	doltDir := filepath.Join(root, "dolt")
 	if err := os.MkdirAll(doltDir, 0o755); err != nil {
 		t.Fatalf("mkdir doltDir: %v", err)
@@ -2380,4 +2511,112 @@ func TestEnsureGlobalDatabase_ServerNotReachable(t *testing.T) {
 	if err == nil {
 		t.Error("expected error when server is not reachable")
 	}
+}
+
+// TestExternalNonLocalhostHost_GH3518 covers the helper that drives the
+// host-aware error-message branching in EnsureRunning. When the
+// configured Dolt server is non-localhost, EnsureRunning's "external
+// server unreachable" path now suggests verifying the external server
+// rather than running `bd dolt start` (which would not help).
+func TestExternalNonLocalhostHost_GH3518(t *testing.T) {
+	t.Run("env host non-localhost returns (host, true)", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_HOST", "192.0.2.10")
+		// IsDoltServerMode now infers from non-localhost host (GH#3545)
+		// so we don't need to set BEADS_DOLT_SERVER_MODE here — that's
+		// the whole point of the sibling fix.
+		config.ResetForTesting()
+		dir := t.TempDir()
+
+		host, ok := externalNonLocalhostHost(dir)
+		if !ok {
+			t.Fatalf("externalNonLocalhostHost: ok=false, want true")
+		}
+		if host != "192.0.2.10" {
+			t.Errorf("host = %q, want 192.0.2.10", host)
+		}
+	})
+
+	t.Run("env host localhost returns (\"\", false)", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_HOST", "localhost")
+		config.ResetForTesting()
+		dir := t.TempDir()
+
+		host, ok := externalNonLocalhostHost(dir)
+		if ok {
+			t.Errorf("externalNonLocalhostHost: ok=true, want false (host=%q)", host)
+		}
+	})
+
+	t.Run("env host 127.0.0.1 returns (\"\", false)", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_HOST", "127.0.0.1")
+		config.ResetForTesting()
+		dir := t.TempDir()
+
+		_, ok := externalNonLocalhostHost(dir)
+		if ok {
+			t.Error("externalNonLocalhostHost: ok=true, want false for 127.0.0.1")
+		}
+	})
+
+	t.Run("metadata.json DoltServerHost non-localhost + dolt_mode server returns (host, true)", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+		config.ResetForTesting()
+		dir := t.TempDir()
+		metaCfg := &configfile.Config{
+			Backend:        configfile.BackendDolt,
+			DoltMode:       configfile.DoltModeServer,
+			DoltServerHost: "10.0.0.5",
+		}
+		if err := metaCfg.Save(dir); err != nil {
+			t.Fatal(err)
+		}
+
+		host, ok := externalNonLocalhostHost(dir)
+		if !ok {
+			t.Fatalf("externalNonLocalhostHost: ok=false, want true")
+		}
+		if host != "10.0.0.5" {
+			t.Errorf("host = %q, want 10.0.0.5", host)
+		}
+	})
+
+	t.Run("no config returns (\"\", false)", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+		config.ResetForTesting()
+		dir := t.TempDir()
+		// No metadata.json — configfile.Load returns nil cfg, no error.
+		// (Or an error; either way, helper returns false.)
+
+		_, ok := externalNonLocalhostHost(dir)
+		if ok {
+			t.Error("externalNonLocalhostHost: ok=true, want false for empty beadsDir")
+		}
+	})
+
+	t.Run("non-server mode does NOT yield external", func(t *testing.T) {
+		// Force backend off-dolt to exercise the !IsDoltServerMode
+		// gate. On this codebase GetBackend() recognizes "sqlite" as
+		// a distinct registered backend (BackendSQLite), unlike the
+		// GH#3563 reference PR where GetBackend() normalized any
+		// input back to BackendDolt — so here the backend gate at
+		// the top of IsDoltServerMode fires and short-circuits
+		// *before* env-host inference is ever consulted, regardless
+		// of BEADS_DOLT_SERVER_HOST. Pin current behavior so future
+		// changes to the gate are intentional.
+		t.Setenv("BEADS_DOLT_SERVER_HOST", "192.0.2.10")
+		t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+		config.ResetForTesting()
+		dir := t.TempDir()
+		metaCfg := &configfile.Config{
+			Backend:  "sqlite",
+			DoltMode: "embedded",
+		}
+		if err := metaCfg.Save(dir); err != nil {
+			t.Fatal(err)
+		}
+		host, ok := externalNonLocalhostHost(dir)
+		if ok {
+			t.Errorf("with backend=sqlite, externalNonLocalhostHost should be false (backend gate precedes host inference); got ok=true host=%q", host)
+		}
+	})
 }
