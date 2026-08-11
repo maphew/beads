@@ -491,27 +491,52 @@ func buildGitHubPushHooks(ctx context.Context, gt *github.Tracker) *tracker.Push
 	if config == nil {
 		config = github.DefaultMappingConfig()
 	}
-	formatDescription := func(issue *types.Issue) string {
-		dependencies, depErr := store.GetDependenciesWithMetadata(ctx, issue.ID)
-		dependents, dependentErr := store.GetDependentsWithMetadata(ctx, issue.ID)
-		if depErr != nil {
-			dependencies = nil
+	targetRepoURL := gt.TargetRepoHTMLURL()
+	renderBody := func(issue *types.Issue) (string, error) {
+		// A failed graph query must abort this issue's push rather than
+		// degrade to an empty edge list: rendering "no dependencies" would
+		// delete an existing tasklist on GitHub and then cache that wrong
+		// body as pushed.
+		dependencies, err := store.GetDependenciesWithMetadata(ctx, issue.ID)
+		if err != nil {
+			return "", fmt.Errorf("fetching dependencies for %s: %w", issue.ID, err)
 		}
-		if dependentErr != nil {
-			dependents = nil
+		dependents, err := store.GetDependentsWithMetadata(ctx, issue.ID)
+		if err != nil {
+			return "", fmt.Errorf("fetching dependents for %s: %w", issue.ID, err)
 		}
-		return github.RenderGitHubIssueBody(issue, dependencies, dependents)
+		return github.RenderGitHubIssueBody(issue, dependencies, dependents, targetRepoURL), nil
+	}
+	// The engine calls FormatDescription, ContentEqual, and ContentHash with
+	// the same *types.Issue within one push-loop iteration, and each needs the
+	// same rendered body. Memoize the last render (the loop is serial) so the
+	// dependency-graph queries run once per issue instead of once per hook.
+	var (
+		memoIssue *types.Issue
+		memoBody  string
+		memoErr   error
+	)
+	renderBodyOnce := func(issue *types.Issue) (string, error) {
+		if issue != memoIssue {
+			memoIssue = issue
+			memoBody, memoErr = renderBody(issue)
+		}
+		return memoBody, memoErr
 	}
 	// The engine hands ContentEqual/ContentHash the raw local issue but pushes
 	// the FormatDescription output, so compare/hash a copy carrying the
 	// rendered body.
-	withRenderedBody := func(local *types.Issue) *types.Issue {
+	withRenderedBody := func(local *types.Issue) (*types.Issue, error) {
+		body, err := renderBodyOnce(local)
+		if err != nil {
+			return nil, err
+		}
 		rendered := *local
-		rendered.Description = formatDescription(local)
-		return &rendered
+		rendered.Description = body
+		return &rendered, nil
 	}
 	return &tracker.PushHooks{
-		FormatDescription: formatDescription,
+		FormatDescription: renderBodyOnce,
 		ContentEqual: func(local *types.Issue, remote *tracker.TrackerIssue) bool {
 			if remote == nil {
 				return false
@@ -520,14 +545,23 @@ func buildGitHubPushHooks(ctx context.Context, gt *github.Tracker) *tracker.Push
 			if !ok || gh == nil {
 				return false
 			}
-			return github.PushFieldsEqual(withRenderedBody(local), gh, config)
+			rendered, err := withRenderedBody(local)
+			if err != nil {
+				return false
+			}
+			return github.PushFieldsEqual(rendered, gh, config)
 		},
 		// ContentHash lets the engine skip the per-issue GitHub fetch entirely
 		// when an issue is unchanged since its last push, so a no-op
 		// `github sync --push-only` makes ~zero REST calls instead of one GET
-		// per linked issue (gastownhall/beads#4214).
+		// per linked issue (gastownhall/beads#4214). A render failure returns
+		// "" which disables the short-circuit for that issue.
 		ContentHash: func(local *types.Issue) string {
-			return github.PushContentHash(withRenderedBody(local), config)
+			rendered, err := withRenderedBody(local)
+			if err != nil {
+				return ""
+			}
+			return github.PushContentHash(rendered, config)
 		},
 		// TargetScope supplies the host and repository omitted by shorthand refs
 		// such as github:42, so changing GitHub target configuration invalidates
@@ -558,4 +592,3 @@ func buildGitHubPullHooks(ctx context.Context) *tracker.PullHooks {
 		},
 	}
 }
-
