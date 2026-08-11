@@ -165,18 +165,18 @@ func reportRejectedRecords(w io.Writer, source string, rejected []rejectedRecord
 		shown = maxRejectWarnings
 	}
 	for _, r := range rejected[:shown] {
-		fmt.Fprintf(w, "warning: skipped invalid record%s%s: %s\n",
+		fmt.Fprintf(w, "warning: skipped invalid record%s%s: %s\n", //nolint:gosec // G705: stderr, not a browser context
 			formatRejectLine(r.Line), formatRejectID(r.ID), r.Reason)
 	}
 	if len(rejected) > shown {
-		fmt.Fprintf(w, "warning: ... and %d more invalid record(s)\n", len(rejected)-shown)
+		fmt.Fprintf(w, "warning: ... and %d more invalid record(s)\n", len(rejected)-shown) //nolint:gosec // G705: stderr, not a browser context
 	}
 
 	label := source
 	if label == "" {
 		label = "input"
 	}
-	fmt.Fprintf(w, "warning: %d invalid record(s) skipped from %s\n", len(rejected), label)
+	fmt.Fprintf(w, "warning: %d invalid record(s) skipped from %s\n", len(rejected), label) //nolint:gosec // G705: stderr, not a browser context
 	if quarantinePath != "" {
 		fmt.Fprintf(w, "warning: skipped records written to %s\n", quarantinePath)
 	}
