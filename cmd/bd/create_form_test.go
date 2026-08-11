@@ -532,6 +532,133 @@ func TestCreateIssueFromFormValues(t *testing.T) {
 			}
 		}
 	})
+
+	// GH#5560: create-form's dependency parsing used its own inline loop
+	// instead of routing through parseDepSpecs, so it never gained the
+	// alias normalization GH#5069/#5116 added for `bd create --deps` and
+	// `bd dep add --type`. A "blocked-by:" entry used to be stored as the
+	// literal string "blocked-by" rather than the canonical "blocks" type.
+	t.Run("AliasTypeNormalizesToCanonical", func(t *testing.T) {
+		parentFv := &createFormValues{
+			Title:     "Alias parent",
+			Priority:  1,
+			IssueType: "task",
+		}
+		parent, err := CreateIssueFromFormValues(ctx, s, parentFv, "test")
+		if err != nil {
+			t.Fatalf("failed to create parent: %v", err)
+		}
+
+		childFv := &createFormValues{
+			Title:        "Alias child",
+			Priority:     1,
+			IssueType:    "task",
+			Dependencies: []string{"blocked-by:" + parent.ID},
+		}
+		child, err := CreateIssueFromFormValues(ctx, s, childFv, "test")
+		if err != nil {
+			t.Fatalf("failed to create child: %v", err)
+		}
+
+		deps, err := s.GetDependenciesWithMetadata(ctx, child.ID)
+		if err != nil {
+			t.Fatalf("failed to get dependencies: %v", err)
+		}
+		var got types.DependencyType
+		found := false
+		for _, d := range deps {
+			if d.ID == parent.ID {
+				found = true
+				got = d.DependencyType
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("expected dependency on %s, not found in %+v", parent.ID, deps)
+		}
+		if got != types.DepBlocks {
+			t.Errorf("blocked-by alias stored as %q, want canonical %q (GH#5069/#5560)", got, types.DepBlocks)
+		}
+	})
+
+	// GH#4626/#4833: two form Deps entries with different types targeting the
+	// same issue used to silently keep only one edge. `bd create --deps`
+	// hard-fails this case via dedupeDepSpecs; the form path must now match.
+	t.Run("SameTargetDifferentTypeConflictRejected", func(t *testing.T) {
+		targetFv := &createFormValues{
+			Title:     "Conflict target",
+			Priority:  1,
+			IssueType: "task",
+		}
+		target, err := CreateIssueFromFormValues(ctx, s, targetFv, "test")
+		if err != nil {
+			t.Fatalf("failed to create target: %v", err)
+		}
+
+		childFv := &createFormValues{
+			Title:     "Conflict child",
+			Priority:  1,
+			IssueType: "task",
+			// "blocked-by" is the raw spelling the user typed; the error
+			// must report it, not the canonical type it normalizes to.
+			Dependencies: []string{"discovered-from:" + target.ID, "blocked-by:" + target.ID},
+		}
+		_, err = CreateIssueFromFormValues(ctx, s, childFv, "test")
+		if err == nil {
+			t.Fatal("expected same-target-different-type conflict to be rejected, got nil error")
+		}
+		if !strings.Contains(err.Error(), "blocked-by") {
+			t.Errorf("conflict error should carry the raw typed spelling %q, got: %v", "blocked-by", err)
+		}
+		if strings.Contains(err.Error(), "discovered-from") == false {
+			t.Errorf("conflict error should also name the other side's typed spelling, got: %v", err)
+		}
+
+		// The conflict is caught by parseDepSpecs before CreateIssueFromFormValues
+		// calls createIssueWithDeps, so no issue row is ever written for this
+		// case — unlike the atomic-rollback contract createIssueWithDeps itself
+		// guarantees for failures discovered after the write starts.
+		results, searchErr := s.SearchIssues(ctx, "Conflict child", types.IssueFilter{})
+		if searchErr != nil {
+			t.Fatalf("failed to search issues: %v", searchErr)
+		}
+		if len(results) != 0 {
+			t.Errorf("issue \"Conflict child\" persisted despite rejected same-target-different-type deps: %+v", results)
+		}
+	})
+
+	// Malformed/unknown types keep the form's historical lenient behavior:
+	// warn and skip rather than hard-failing the whole create.
+	t.Run("InvalidDependencyTypeWarnedAndSkipped", func(t *testing.T) {
+		parentFv := &createFormValues{
+			Title:     "Lenient parent",
+			Priority:  1,
+			IssueType: "task",
+		}
+		parent, err := CreateIssueFromFormValues(ctx, s, parentFv, "test")
+		if err != nil {
+			t.Fatalf("failed to create parent: %v", err)
+		}
+
+		childFv := &createFormValues{
+			Title:        "Lenient child",
+			Priority:     1,
+			IssueType:    "task",
+			Dependencies: []string{"bogus-type:" + parent.ID},
+		}
+		child, err := CreateIssueFromFormValues(ctx, s, childFv, "test")
+		if err != nil {
+			t.Fatalf("expected invalid dep type to be warned and skipped, not fatal: %v", err)
+		}
+
+		deps, err := s.GetDependencies(ctx, child.ID)
+		if err != nil {
+			t.Fatalf("failed to get dependencies: %v", err)
+		}
+		if len(deps) != 0 {
+			t.Errorf("expected the malformed dep to be skipped, got %d deps: %+v", len(deps), deps)
+		}
+	})
 }
 
 func TestCreateIssueFromFormValues_WithParent(t *testing.T) {

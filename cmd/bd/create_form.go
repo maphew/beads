@@ -12,7 +12,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -156,33 +155,52 @@ func CreateIssueFromFormValues(ctx context.Context, s storage.DoltStorage, fv *c
 	}
 
 	// Parse dependency specs before creating anything. The form keeps its
-	// historical lenient parsing (warn and skip malformed entries), but the
-	// edges that do parse commit atomically with the create below.
-	var depSpecs []domain.DependencySpec
+	// historical lenient parsing (warn and skip malformed entries) for the
+	// type itself, but once an entry's type is accepted it goes through the
+	// same parseDepSpecs/dedupeDepSpecs pair `bd create --deps` uses, so
+	// alias normalization (GH#5069) and the same-target-different-type
+	// conflict (GH#4626, #4833) are handled identically on both paths.
+	var validDepStrings []string
 	for _, depSpec := range fv.Dependencies {
 		depSpec = strings.TrimSpace(depSpec)
 		if depSpec == "" {
 			continue
 		}
 
-		var depType types.DependencyType
-		var dependsOnID string
-
+		var rawType types.DependencyType
 		if strings.Contains(depSpec, ":") {
 			parts := strings.SplitN(depSpec, ":", 2)
-			depType = types.DependencyType(strings.TrimSpace(parts[0]))
-			dependsOnID = strings.TrimSpace(parts[1])
+			rawType = types.DependencyType(strings.TrimSpace(parts[0]))
 		} else {
-			depType = types.DepBlocks
-			dependsOnID = depSpec
+			rawType = types.DepBlocks
 		}
 
-		if !depType.IsValid() {
-			fmt.Fprintf(os.Stderr, "Warning: invalid dependency type '%s' (valid: blocks, related, parent-child, discovered-from)\n", depType)
+		if err := validateDependencyType(canonicalDependencyType(rawType)); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: invalid dependency type '%s' (valid: blocks, related, parent-child, discovered-from)\n", rawType)
 			continue
 		}
 
-		depSpecs = append(depSpecs, domain.DependencySpec{Type: depType, TargetID: dependsOnID})
+		validDepStrings = append(validDepStrings, depSpec)
+	}
+
+	// The form's `blocks:<id>` has always meant "the new issue depends on
+	// <id>" - the OPPOSITE of --deps' explicit blocks: spelling, which
+	// swaps direction. Parse each entry for alias canonicalization and
+	// conflict detection, but pin the form's historical direction (every
+	// form dep is an edge FROM the new issue) BEFORE deduping, so the
+	// dedupe key sees the direction that will actually be stored.
+	var depEntries []depSpecEntry
+	for _, raw := range validDepStrings {
+		spec, rawType, err := parseDepSpec(raw)
+		if err != nil {
+			return nil, err
+		}
+		spec.SwapDirection = false
+		depEntries = append(depEntries, depSpecEntry{spec: spec, rawType: rawType})
+	}
+	depSpecs, err := dedupeDepSpecs(depEntries)
+	if err != nil {
+		return nil, err
 	}
 
 	// The issue and its edges (parent-child per GH#1983, plus form deps)

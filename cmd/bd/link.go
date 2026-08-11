@@ -62,13 +62,13 @@ Examples:
 		}
 		defer toCleanup()
 
-		dt := types.DependencyType(depType)
+		dt := canonicalDependencyType(types.DependencyType(depType))
 		if isDisallowedHierarchicalDependency(fromID, toID, dt) {
 			return HandleErrorRespectJSON("cannot add dependency: %s is already a child of %s. Children inherit dependency on parent completion via hierarchy. Adding an explicit dependency would create a deadlock", fromID, toID)
 		}
 
-		if !dt.IsValid() {
-			return HandleErrorRespectJSON("invalid dependency type %q: must be non-empty and at most %d characters", depType, types.MaxDependencyTypeLen)
+		if err := validateDependencyType(dt); err != nil {
+			return HandleErrorRespectJSON("%v", err)
 		}
 
 		dep := &types.Dependency{
@@ -97,11 +97,11 @@ Examples:
 				"status":        "added",
 				"issue_id":      fromID,
 				"depends_on_id": toID,
-				"type":          depType,
+				"type":          string(dt),
 			})
 		}
 		fmt.Printf("%s Linked: %s depends on %s (%s)\n",
-			ui.RenderPass("✓"), formatFeedbackIDParen(fromID, lookupTitle(fromID)), formatFeedbackIDParen(toID, lookupTitle(toID)), depType)
+			ui.RenderPass("✓"), formatFeedbackIDParen(fromID, lookupTitle(fromID)), formatFeedbackIDParen(toID, lookupTitle(toID)), dt)
 		return nil
 	},
 }
