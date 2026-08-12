@@ -240,9 +240,23 @@ func TestActiveRepoPathForRoutingFallsBackToBeadsDirParent(t *testing.T) {
 	// beads.GetRepoContext() can't resolve via CWD either.
 	t.Chdir(t.TempDir())
 	t.Setenv("BEADS_DIR", targetBeadsDir)
+	setBeadsDirStartupProvenanceForTest(t, true)
 
-	if got := activeRepoPathForRouting(); got != targetDir {
-		t.Fatalf("activeRepoPathForRouting() = %q, want %q", got, targetDir)
+	// Compare through EvalSymlinks: on macOS t.TempDir() hands back a
+	// /var/... symlink while resolution may canonicalize to /private/var/...
+	// — the same directory. The sibling redirect tests already compare this
+	// way; asserting the raw string makes the test order-fragile there.
+	got := activeRepoPathForRouting()
+	gotResolved, err := filepath.EvalSymlinks(got)
+	if err != nil {
+		t.Fatalf("resolve got %q: %v", got, err)
+	}
+	wantResolved, err := filepath.EvalSymlinks(targetDir)
+	if err != nil {
+		t.Fatalf("resolve target %q: %v", targetDir, err)
+	}
+	if gotResolved != wantResolved {
+		t.Fatalf("activeRepoPathForRouting() = %q (resolved %q), want %q", got, gotResolved, wantResolved)
 	}
 }
 
@@ -398,6 +412,7 @@ func TestActiveRepoPathForRoutingFallsBackToCurrentDirectory(t *testing.T) {
 
 	t.Chdir(t.TempDir())
 	t.Setenv("BEADS_DIR", "")
+	setBeadsDirStartupProvenanceForTest(t, false)
 
 	if got := activeRepoPathForRouting(); got != "." {
 		t.Fatalf("activeRepoPathForRouting() = %q, want %q", got, ".")
