@@ -53,6 +53,17 @@ func resetRepoContextCachesForTest(t *testing.T) {
 	})
 }
 
+// setBeadsDirStartupProvenanceForTest pins whether this test simulates a
+// caller who exported BEADS_DIR before bd started. The production value is
+// captured once at process start, so tests must set it explicitly rather than
+// inherit whatever environment the test process happened to launch with.
+func setBeadsDirStartupProvenanceForTest(t *testing.T, provided bool) {
+	t.Helper()
+	old := beadsDirProvidedAtStartup
+	beadsDirProvidedAtStartup = provided
+	t.Cleanup(func() { beadsDirProvidedAtStartup = old })
+}
+
 type flagSnapshot struct {
 	value   string
 	changed bool
@@ -183,6 +194,7 @@ func TestDetectUserRoleForActiveRepoUsesSelectedBeadsDir(t *testing.T) {
 
 	t.Chdir(callerDir)
 	t.Setenv("BEADS_DIR", targetBeadsDir)
+	setBeadsDirStartupProvenanceForTest(t, true)
 
 	readStderr, writeStderr, err := os.Pipe()
 	if err != nil {
@@ -258,6 +270,7 @@ func TestActiveRepoPathForRoutingKeepsWorkspaceRepoAcrossRedirect(t *testing.T) 
 
 	t.Chdir(workspace)
 	t.Setenv("BEADS_DIR", "")
+	setBeadsDirStartupProvenanceForTest(t, false)
 
 	got := activeRepoPathForRouting()
 	// Compare through EvalSymlinks: git resolves the physical path while
@@ -272,6 +285,65 @@ func TestActiveRepoPathForRoutingKeepsWorkspaceRepoAcrossRedirect(t *testing.T) 
 	}
 	if gotResolved != wantResolved {
 		t.Fatalf("activeRepoPathForRouting() = %q (resolved %q), want workspace %q — a redirect must not move role detection to the storage root", got, gotResolved, wantResolved)
+	}
+}
+
+func TestActiveRepoPathForRoutingSurvivesStartupRebindAcrossRedirect(t *testing.T) {
+	resetRepoContextCachesForTest(t)
+
+	// The regression this pins: rootCmd's PersistentPreRunE resolves the
+	// redirect target and calls prepareSelectedCommandContext, which sets
+	// BEADS_DIR for EVERY command — redirects included. Role detection must
+	// not read that internal rebind as explicit user selection. The
+	// helper-only redirect test above leaves BEADS_DIR empty and so never
+	// exercises this startup path.
+	workspace := t.TempDir()
+	initGitRepoForContextTest(t, workspace)
+	storageDir := t.TempDir()
+	storageBeadsDir := filepath.Join(storageDir, ".beads")
+	writeTestConfigYAML(t, storageBeadsDir, "")
+
+	workspaceBeadsDir := filepath.Join(workspace, ".beads")
+	if err := os.MkdirAll(workspaceBeadsDir, 0o700); err != nil {
+		t.Fatalf("mkdir workspace beads dir: %v", err)
+	}
+	redirectFile := filepath.Join(workspaceBeadsDir, beads.RedirectFileName)
+	if err := os.WriteFile(redirectFile, []byte(storageBeadsDir+"\n"), 0o600); err != nil {
+		t.Fatalf("write redirect file: %v", err)
+	}
+
+	t.Chdir(workspace)
+	t.Setenv("BEADS_DIR", "")
+	setBeadsDirStartupProvenanceForTest(t, false)
+
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+	oldServerMode := serverMode
+	flagState := snapshotRootFlagState()
+	t.Cleanup(func() {
+		serverMode = oldServerMode
+		restoreRootFlagState(t, flagState)
+	})
+
+	// The same rebind PersistentPreRunE performs once discovery has followed
+	// the redirect to the storage .beads.
+	prepareSelectedCommandContext(storageBeadsDir, false)
+
+	if got := os.Getenv("BEADS_DIR"); got != storageBeadsDir {
+		t.Fatalf("BEADS_DIR = %q, want %q (startup rebind should have run)", got, storageBeadsDir)
+	}
+
+	got := activeRepoPathForRouting()
+	gotResolved, err := filepath.EvalSymlinks(got)
+	if err != nil {
+		t.Fatalf("resolve got %q: %v", got, err)
+	}
+	wantResolved, err := filepath.EvalSymlinks(workspace)
+	if err != nil {
+		t.Fatalf("resolve workspace %q: %v", workspace, err)
+	}
+	if gotResolved != wantResolved {
+		t.Fatalf("activeRepoPathForRouting() = %q (resolved %q), want workspace %q — the startup BEADS_DIR rebind must not turn a redirect into explicit selection", got, gotResolved, wantResolved)
 	}
 }
 
