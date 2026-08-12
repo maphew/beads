@@ -347,6 +347,52 @@ func TestActiveRepoPathForRoutingSurvivesStartupRebindAcrossRedirect(t *testing.
 	}
 }
 
+func TestActiveRepoPathForRoutingHonorsEnvFileSelection(t *testing.T) {
+	resetRepoContextCachesForTest(t)
+
+	// .beads/.env routing (loadSelectionEnvironment) is user-authored
+	// selection: BEADS_DIR set there must keep binding role detection to the
+	// selected project, exactly like exporting BEADS_DIR before running bd.
+	callerDir := t.TempDir()
+	initGitRepoForContextTest(t, callerDir)
+	callerBeadsDir := filepath.Join(callerDir, ".beads")
+	writeTestConfigYAML(t, callerBeadsDir, "")
+
+	targetDir := t.TempDir()
+	initGitRepoForContextTest(t, targetDir)
+	targetBeadsDir := filepath.Join(targetDir, ".beads")
+	writeTestConfigYAML(t, targetBeadsDir, "")
+
+	if err := os.WriteFile(filepath.Join(callerBeadsDir, ".env"), []byte("BEADS_DIR="+targetBeadsDir+"\n"), 0o600); err != nil {
+		t.Fatalf("write .env: %v", err)
+	}
+
+	t.Chdir(callerDir)
+	t.Setenv("BEADS_DIR", "")
+	t.Setenv("BEADS_DB", "")
+	t.Setenv("BD_DB", "")
+	setBeadsDirStartupProvenanceForTest(t, false)
+
+	loadSelectionEnvironment()
+
+	if got := os.Getenv("BEADS_DIR"); got != targetBeadsDir {
+		t.Fatalf("BEADS_DIR = %q, want %q (selection env load should have run)", got, targetBeadsDir)
+	}
+
+	got := activeRepoPathForRouting()
+	gotResolved, err := filepath.EvalSymlinks(got)
+	if err != nil {
+		t.Fatalf("resolve got %q: %v", got, err)
+	}
+	wantResolved, err := filepath.EvalSymlinks(targetDir)
+	if err != nil {
+		t.Fatalf("resolve target %q: %v", targetDir, err)
+	}
+	if gotResolved != wantResolved {
+		t.Fatalf("activeRepoPathForRouting() = %q (resolved %q), want selected target %q — .env-provided BEADS_DIR is explicit selection", got, gotResolved, wantResolved)
+	}
+}
+
 func TestActiveRepoPathForRoutingFallsBackToCurrentDirectory(t *testing.T) {
 	resetRepoContextCachesForTest(t)
 

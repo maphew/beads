@@ -371,6 +371,12 @@ func loadBeadsSelectionEnvFile(beadsDir string) {
 		}
 		if value, ok := pairs[key]; ok && strings.TrimSpace(value) != "" {
 			_ = os.Setenv(key, value)
+			if key == "BEADS_DIR" {
+				// A .beads/.env that routes commands via BEADS_DIR is
+				// user-authored selection, same as exporting the variable
+				// before running bd; role detection must honor it.
+				beadsDirProvidedAtStartup = true
+			}
 		}
 	}
 }
@@ -793,11 +799,12 @@ func resolveChangeDirBeadsDir(path string) (string, error) {
 	return beadsDir, nil
 }
 
-// beadsDirProvidedAtStartup records whether BEADS_DIR was already present in
-// the environment when the process started. Internal rebinds set BEADS_DIR for
-// every command (prepareSelectedCommandContext, applyChangeDirSelection), so by
-// the time role detection runs, the live env var can no longer say who set it —
-// only the startup value carries user intent.
+// beadsDirProvidedAtStartup records whether BEADS_DIR carries user intent: it
+// was present in the environment when the process started, or a .beads/.env
+// selector file set it (loadBeadsSelectionEnvFile). Internal rebinds set
+// BEADS_DIR for every command (prepareSelectedCommandContext,
+// applyChangeDirSelection), so by the time role detection runs, the live env
+// var can no longer say who set it.
 var beadsDirProvidedAtStartup = os.Getenv("BEADS_DIR") != ""
 
 // explicitBeadsSelection reports whether the active beads project was selected
