@@ -93,6 +93,9 @@ func TestDetermineAutoRoutedRepoPath_UsesSelectedBeadsDirRole(t *testing.T) {
 		t.Fatalf("chdir callerDir: %v", err)
 	}
 	t.Setenv("BEADS_DIR", filepath.Join(repoDir, ".beads"))
+	// This test simulates a caller who exported BEADS_DIR before bd started;
+	// selection provenance is captured at process start, so pin it explicitly.
+	setBeadsDirStartupProvenanceForTest(t, true)
 
 	got, _ := determineAutoRoutedRepoPath(ctx, sourceStore)
 	if got != planningDir {
