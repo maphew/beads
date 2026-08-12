@@ -514,3 +514,51 @@ func TestRunImportFromReaderRefusesRejectPathCollidingWithSource(t *testing.T) {
 		})
 	}
 }
+
+// TestResolveImportRejectsDryRunLeavesRejectsFileAlone pins the --dry-run
+// filesystem contract found in review: resolveImportRejects used to run
+// writeRejectFile unconditionally, so a dry run with --rejects wrote the
+// quarantine — and, sharper, DELETED a pre-existing file at that path when
+// the dry run produced no rejects (writeRejectFile's stale-cleanup branch).
+func TestResolveImportRejectsDryRunLeavesRejectsFileAlone(t *testing.T) {
+	origDry, origSkip, origRejects := importDryRun, importSkipInvalid, importRejects
+	t.Cleanup(func() { importDryRun, importSkipInvalid, importRejects = origDry, origSkip, origRejects })
+
+	dir := t.TempDir()
+	rejectsPath := filepath.Join(dir, "rejects.jsonl")
+	importDryRun = true
+	importSkipInvalid = true
+	importRejects = rejectsPath
+
+	t.Run("dry run with rejects creates no file", func(t *testing.T) {
+		outcome, err := resolveImportRejects([]rejectedRecord{
+			{Line: 3, Reason: "bad status", Kind: rejectValidate, raw: `{"id":"x"}`},
+		}, "fixture.jsonl", "")
+		if err != nil {
+			t.Fatalf("resolveImportRejects: %v", err)
+		}
+		if outcome.writtenTo != "" {
+			t.Errorf("writtenTo = %q, want empty on dry run", outcome.writtenTo)
+		}
+		if _, statErr := os.Stat(rejectsPath); !os.IsNotExist(statErr) {
+			t.Errorf("dry run wrote the rejects file (stat err: %v)", statErr)
+		}
+	})
+
+	t.Run("dry run without rejects preserves a pre-existing file", func(t *testing.T) {
+		const keep = "previous run's quarantine content\n"
+		if err := os.WriteFile(rejectsPath, []byte(keep), 0o600); err != nil {
+			t.Fatalf("seed rejects file: %v", err)
+		}
+		if _, err := resolveImportRejects(nil, "fixture.jsonl", ""); err != nil {
+			t.Fatalf("resolveImportRejects: %v", err)
+		}
+		data, err := os.ReadFile(rejectsPath)
+		if err != nil {
+			t.Fatalf("pre-existing rejects file gone after dry run: %v", err)
+		}
+		if string(data) != keep {
+			t.Errorf("pre-existing rejects file content changed: %q", string(data))
+		}
+	})
+}

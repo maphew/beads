@@ -11,6 +11,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -90,6 +91,36 @@ func importVocabulary(ctx context.Context, store storage.DoltStorage) (customSta
 		return nil, nil, fmt.Errorf("reading custom types: %w", err)
 	}
 	return customStatuses, customTypes, nil
+}
+
+// importVocabularyProxied is importVocabulary for the proxied-server route:
+// same contract (an error means the pre-filter must not run), but read
+// through the UOW provider's ConfigUseCase in one read transaction — the
+// proxied path has no local store handle, and this is the same vocabulary
+// authority the proxied list/create paths consult.
+func importVocabularyProxied(ctx context.Context) (customStatuses, customTypes []string, err error) {
+	if uowProvider == nil {
+		return nil, nil, fmt.Errorf("proxied-server UOW provider not initialized")
+	}
+	type vocabulary struct {
+		statuses []string
+		types    []string
+	}
+	v, err := uow.RunTxRead(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (vocabulary, error) {
+		statuses, err := uw.ConfigUseCase().GetCustomStatuses(ctx)
+		if err != nil {
+			return vocabulary{}, fmt.Errorf("reading custom statuses: %w", err)
+		}
+		typeNames, err := uw.ConfigUseCase().GetCustomTypes(ctx)
+		if err != nil {
+			return vocabulary{}, fmt.Errorf("reading custom types: %w", err)
+		}
+		return vocabulary{statuses: types.CustomStatusNames(statuses), types: typeNames}, nil
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return v.statuses, v.types, nil
 }
 
 // validateImportRecord reports whether the writer would accept this record.

@@ -959,9 +959,6 @@ func intPtrEqual(a, b *int) bool {
 type importLocalResult struct {
 	Issues   int
 	Memories int
-	// Rejected counts records that failed record-level validation and were
-	// skipped so the rest of the file could still import (GH#4492).
-	Rejected int
 }
 
 // memoryRecord represents a memory entry in the JSONL export.
@@ -1221,7 +1218,7 @@ func importFromLocalJSONLWithOpts(ctx context.Context, store storage.DoltStorage
 	}
 	reportRejectedRecords(os.Stderr, localPath, rejected, quarantine)
 
-	result := &importLocalResult{Rejected: len(rejected)}
+	result := &importLocalResult{}
 
 	// Import memories
 	for key, value := range configEntries {

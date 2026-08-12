@@ -244,11 +244,23 @@ func runImportFromReader(ctx context.Context, r io.Reader, source string, source
 	}
 
 	if usesProxiedServer() {
-		// The vocabulary pre-validation below reads the local store, which the
-		// proxied path does not have. Parse-level rejects are still honored
-		// (skipped under --skip-invalid, quarantined via --rejects), and a
-		// record the server-side writer refuses surfaces as the batch error
-		// exactly as before.
+		// Same vocabulary pre-validation as the classic path below, read
+		// through the UOW provider's ConfigUseCase — the proxied route has no
+		// local store handle, but the vocabulary is still reachable, and
+		// without this partition a validation-invalid record would reach the
+		// server-side batch writer and abort the whole batch with no line
+		// number and no --skip-invalid escape: the exact GH#4492 failure, on
+		// the primary deployment mode.
+		if customStatuses, customTypes, vocabErr := importVocabularyProxied(ctx); vocabErr == nil {
+			var invalid []rejectedRecord
+			issues, invalid = partitionImportRecords(issues, sources, customStatuses, customTypes)
+			rejected = append(rejected, invalid...)
+		} else if importSkipInvalid {
+			// Without the vocabulary a custom status is indistinguishable
+			// from a typo, so leave the batch alone and let the writer's
+			// error stand (mirrors the classic branch below).
+			fmt.Fprintf(os.Stderr, "warning: skipping import pre-validation: %v\n", vocabErr)
+		}
 		rejects, rerr := resolveImportRejects(rejected, source, sourceFilePath)
 		if rerr != nil {
 			return rerr
@@ -308,13 +320,23 @@ func resolveImportRejects(rejected []rejectedRecord, source, sourceFilePath stri
 			return importRejectOutcome{}, fmt.Errorf("--rejects %s names the same file as the import source; writing rejects would truncate and overwrite the source, so refusing (pass a different --rejects path)", rejectPath)
 		}
 	}
-	rejectsWritten, werr := writeRejectFile(rejectPath, rejected)
-	if werr != nil {
-		return importRejectOutcome{}, werr
+	// A dry run must not touch the filesystem: writeRejectFile both writes
+	// the quarantine and REMOVES a pre-existing file at the --rejects path
+	// when this run has no rejects, and either mutation violates --dry-run's
+	// contract. The strict-mode failure and the collision guard above still
+	// run, so a dry run refuses exactly where the real run would.
+	rejectsWritten := false
+	if !importDryRun {
+		var werr error
+		rejectsWritten, werr = writeRejectFile(rejectPath, rejected)
+		if werr != nil {
+			return importRejectOutcome{}, werr
+		}
 	}
 	// Only advertise the path when it holds this run's content — writeRejectFile
 	// removes a stale file from a previous run instead of leaving it in place,
-	// so a path that was cleaned up (or never written) must not be reported.
+	// so a path that was cleaned up (or never written, including the dry-run
+	// case) must not be reported.
 	reportedRejectPath := ""
 	if rejectsWritten {
 		reportedRejectPath = rejectPath
