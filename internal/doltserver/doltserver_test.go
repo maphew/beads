@@ -2426,7 +2426,9 @@ func TestWaitForReady(t *testing.T) {
 
 	// Spawn a goroutine that delays binding the port. This simulates a
 	// "slow server" -- the TCP listener is not yet bound when waitForReady
-	// is first called.
+	// is first called. Once bound, each accepted connection is sent a fake
+	// MySQL handshake greeting so waitForReady's post-F7 "must be greeted,
+	// not just accepted" check is satisfiable.
 	bindAfter := 200 * time.Millisecond
 	listenerReady := make(chan net.Listener, 1)
 	go func() {
@@ -2436,6 +2438,18 @@ func TestWaitForReady(t *testing.T) {
 			close(listenerReady)
 			return
 		}
+		go func() {
+			for {
+				conn, acceptErr := ln.Accept()
+				if acceptErr != nil {
+					return
+				}
+				go func(c net.Conn) {
+					_, _ = c.Write([]byte{0x08, 0x00, 0x00, 0x00, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a})
+					_ = c.Close()
+				}(conn)
+			}
+		}()
 		listenerReady <- ln
 	}()
 	t.Cleanup(func() {

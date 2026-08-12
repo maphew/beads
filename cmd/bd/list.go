@@ -189,6 +189,7 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	out := cmd.OutOrStdout()
 
 	if usesProxiedServer() {
 		// The cap USED to be rejected here: the proxied query path threaded no
@@ -197,7 +198,7 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 		// through the same two functions the store seam uses), so this route
 		// answers *ErrTooManyRows the same way the direct route below does —
 		// same message, same exit code.
-		if err := runListProxiedServer(cmd, rootCtx, in); err != nil {
+		if err := runListProxiedServer(cmd, rootCtx, out, in); err != nil {
 			if capErr := handleMaxRowsError(err); capErr != nil {
 				return capErr
 			}
@@ -331,7 +332,7 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 
 	if in.formatStr != "" {
 		depsByIssueID, _ := activeStore.GetAllDependencyRecords(ctx)
-		if err := outputFormattedList(issues, depsByIssueID, in.formatStr); err != nil {
+		if err := outputFormattedList(out, issues, depsByIssueID, in.formatStr); err != nil {
 			return HandleError("%v", err)
 		}
 		printTruncationHint(truncated, in.effectiveLimit)
@@ -442,6 +443,15 @@ func init() {
 			"of actual labels. Use only when the caller does not depend on label data. "+
 			"Cannot combine with --label, --label-any, --label-pattern, --label-regex, "+
 			"--exclude-label, or --no-labels.")
+
+	// Projection toggle. Like --skip-labels it trades data for bytes, and
+	// unlike it the dropped fields leave a mark on the row (IsLitePartial).
+	listCmd.Flags().Bool("brief", false,
+		"Omit the free-form text (description, design, acceptance criteria, notes, "+
+			"payload, waiters) from each row. Filters that read those fields, such as "+
+			"--desc-contains, still select on them. An omitted field is"+
+			" indistinguishable from an empty one in --json; fetch a whole issue"+
+			" with bd show.")
 
 	// Priority ranges
 	listCmd.Flags().String("priority-min", "", "Filter by minimum priority (inclusive, 0-4 or P0-P4)")

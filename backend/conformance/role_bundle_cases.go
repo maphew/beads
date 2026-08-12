@@ -362,6 +362,23 @@ var roleContractCases = []roleContract{
 		RunIssueOperationsCreateParentChildRecomputesWaitsForClosure,
 	),
 
+	// The accessor named here is not an accessor at all, alone among these
+	// rows. journalops.Journal is reached by TYPE ASSERTION on a store —
+	// `bd serve` does exactly that (cmd/bd/serve.go, serveJournalCursor) — or
+	// through uow.EventsJournalCursorSource on a unit-of-work provider, because
+	// the journal is engine state on a dolt_ignored table that
+	// storage.DoltStorage does not publish. A backend that cannot read it
+	// leaves this field nil; see journal_contract.go's header.
+	roleCases("Journal", "the storage.EventsJournalCursor type assertion (or uow.EventsJournalCursor())", oncePerRole,
+		func(b RoleContractBundle) func(t *testing.T) *JournalFixture { return b.Journal },
+		RunJournalPagesAreSeqAscendingAndSinceExclusive,
+		RunJournalHeadArrivesWithItsRowsAndDetectsCaughtUp,
+		RunJournalLimitCapsRowsNotHead,
+		RunJournalTruncationIsTypedAndNamesTheWindow,
+		RunJournalHeadSurvivesAFullPrune,
+		RunJournalEveryMutationKindLandsARow,
+	),
+
 	roleCases("LifecycleCloseReopen", "IssueLifecycle()", oncePerRole,
 		func(b RoleContractBundle) func(t *testing.T) *LifecycleCloseReopenFixture {
 			return b.LifecycleCloseReopen

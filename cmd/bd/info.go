@@ -221,6 +221,17 @@ type VersionChange struct {
 // versionChanges contains agent-actionable changes for recent versions
 var versionChanges = []VersionChange{
 	{
+		Version: "1.2.1",
+		Date:    "2026-08-11",
+		Changes: []string{
+			"MIGRATION: first open with this binary runs migration 0062 (events -> dolt_ignored storage, bd-red8u): a one-time four-phase self-committing flip that removes per-event dolt commit churn. Expect one slower first invocation per clone; do not interrupt it.",
+			"NEW: `bd sync` — the federation loop (export, commit, pull, import, push) as one verb.",
+			"NEW: `--brief` on `bd list` / `bd ready --json` and the HTTP listings — omits free-form text fields (~93% smaller payloads on large stores); fields are omitted without a marker, so only the caller that passed the flag knows rows are partial.",
+			"BEHAVIOR: expired dated defers now AUTO-WAKE on ready-front reads and claims (#5386) — a lapsed `--defer` no longer hides an issue forever; stale defers surface on the next `bd ready`.",
+			"PERF: telemetry no longer costs startup time on every invocation (#5646), and the queued-events dir is bounded (7d TTL + drop-oldest caps, #5660) — a backlogged ~/.beads/eventsData self-prunes.",
+		},
+	},
+	{
 		Version: "1.1.2",
 		Date:    "2026-07-26",
 		Changes: []string{

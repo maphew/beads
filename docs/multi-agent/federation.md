@@ -17,6 +17,13 @@ data between independent teams or locations. Key benefits:
 - **Flexible infrastructure**: Works with DoltHub, S3, GCS, local paths, or SSH
 - **Data sovereignty**: Configurable tiers for compliance (GDPR, regional laws)
 
+<Note>
+Just want two machines sharing one database through a bucket you own? The
+[Bucket Federation Quickstart](/multi-agent/bucket-federation) walks that path
+end to end — bucket, seed push, second replica, sync cadence — with measured
+timings and the failure modes.
+</Note>
+
 ## Prerequisites
 
 1. **Dolt backend**: Federation requires the Dolt storage backend (the only supported backend)

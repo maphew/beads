@@ -285,6 +285,7 @@
           "multi-agent/routing",
           "multi-agent/coordination",
           "multi-agent/federation",
+          "multi-agent/bucket-federation",
           "multi-agent/multi-repo-migration"
         ]
       },

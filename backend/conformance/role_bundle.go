@@ -92,6 +92,7 @@ type RoleContractBundle struct {
 	EdgeReader           func(t *testing.T) *EdgeReaderFixture
 	GraphCounter         func(t *testing.T) *GraphCounterFixture
 	Importer             func(t *testing.T) *ImporterFixture
+	Journal              func(t *testing.T) *JournalFixture
 	LifecycleCloseReopen func(t *testing.T) *LifecycleCloseReopenFixture
 	LifecycleCreate      func(t *testing.T) *LifecycleCreateFixture
 	LifecycleUpdate      func(t *testing.T) *LifecycleUpdateFixture

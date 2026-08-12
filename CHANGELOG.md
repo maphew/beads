@@ -7,7 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-08-11
+
+(Released as 1.2.1: the v1.2.0 tag burned pre-publish on a freebsd
+cross-compile failure in the release build — fixed below — and a burned tag is
+never reused, per the v1.1.1 precedent.)
+
 ### Added
+
+- **`--brief` on `bd list` and `bd ready`, and `brief` on the two HTTP
+  listings** (#5546, #5554, #5586). The listing commands return the whole body
+  of every row they page. On one real 16,051-issue store `bd ready --json`
+  returned 454,021 bytes with notes plus description accounting for 76% of it,
+  on exactly the call an agent makes to decide what to work on next. `--brief`
+  omits the free-form text (`description`, `design`, `acceptance_criteria`,
+  `notes`, `payload`, `waiters`), measuring 93.4% smaller. Filtering is
+  untouched: `--desc-contains` and its siblings select rows, and this selects
+  fields. It is opt-in and the default payload is unchanged.
+
+  **The response carries no marker for the omission.** An omitted field is
+  indistinguishable from a genuinely empty one, so only the caller that passed
+  the flag knows its rows are partial; there is no `is_lite_partial` in the
+  JSON. The one visible marker is in text output, where `bd list --long
+  --brief` prints `Description: (omitted by --brief)` rather than an empty
+  section.
+
+  The flag is refused wherever it could not be honored, rather than accepted
+  and dropped. On `bd ready` it requires `--json` and is refused with `--claim`,
+  `--gated`, `--mol` and `--explain`: the projection reaches the driver through
+  the counts query alone, which those routes do not run. On `bd list` it works
+  in text mode too, and is refused with `--watch`, with the `--parent` tree
+  walk, and with `--format`, where a caller's template could print a dropped
+  field with nothing to mark it.
 
 - **`--brief-deps` on `bd show`, and `brief_deps` on the HTTP detail read**
   (#5546, #5547, #5549). `bd show --json` inlines every dependency at full
@@ -436,6 +467,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `bd init --from-jsonl`, upgrade auto-import) keep failing loudly on corrupt
   lines but no longer let one writer-refused row discard the rest of the file.
   A dry run no longer writes (or removes) the `--rejects` file.
+- **FreeBSD builds compile again** (#5661). The dbproxy process-identity arc
+  (procid, unverified-process) shipped linux/darwin/windows implementations
+  with no fallback, breaking `GOOS=freebsd` compilation — caught only by the
+  release build's cross-compile (GH#5662 tracks the CI gap). Unsupported
+  platforms now get stubs that fail proxied-mode spawns with a clean,
+  actionable error; classic (non-proxied) bd is unaffected, matching what
+  v1.1.2 shipped on freebsd.
+- **Telemetry no longer taxes every bd invocation.** Two startup costs paid on
+  every command, measured during the post-wave startup audit, are gone. First,
+  the machine-scoped distinct ID was recomputed on every invocation — a fork
+  of the platform machine-id probe (`ioreg` on macOS, 20.2±1.2ms) — even with
+  `BD_DISABLE_METRICS=1` and even for `bd --version`. The ID is now resolved
+  only when metrics are enabled and cached at `~/.beads/machine-id` (0600), so
+  the probe runs at most once per machine; a probe failure is retried next run
+  rather than cached. Second, every invocation unconditionally spawned a
+  detached `bd send-metrics` child — a full re-exec of the binary plus an
+  HTTPS upload attempt, with no check that anything was queued. The spawn now
+  requires at least one queued event batch and is throttled to one attempt per
+  5 minutes (marker: `eventsData/.last-flush`); queued events still upload,
+  just batched. Telemetry content, opt-out semantics, and the sanctioned
+  endpoint pinning are all unchanged.
+
+- **A long or multi-paragraph close reason renders as body text in `bd show`**
+  ([#5595](https://github.com/gastownhall/beads/pull/5595)). Every other
+  free-text field — description, design, notes, acceptance criteria, comments —
+  reaches the terminal through the markdown renderer, which word wraps and
+  indents. The close reason did not: it was formatted into the metadata block
+  beside `Owner:` and `Created:`, so it never wrapped and its second and later
+  lines read as separate metadata entries, a blank line and a bare `- bullet`
+  sitting directly under `Created:`. `bd close --reason-file` exists so agents
+  can write structured close reports, and those were exactly the reasons that
+  came out corrupted. A reason that still fits one metadata line — nearly all
+  of them, including one-liners that arrive from a file with a trailing
+  newline — is unchanged; anything larger now gets a `CLOSE REASON` section
+  rendered by the same call the other body fields make. The JSON payload is
+  untouched. The compaction savings line moved into the metadata block at the
+  same time, so it can no longer be stranded below that section, and all five
+  `bd show` render paths now report it alike.
 
 - **Script hooks now fire on both write plumbings** (bd-opisf). bd has two write
   plumbings and only one of them ran the workspace's hook scripts. The

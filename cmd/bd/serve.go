@@ -309,6 +309,7 @@ func runServe() error {
 			EdgeReader:        roles.edges,
 			GraphCounter:      roles.edgeCounter,
 			Relations:         roles.relations,
+			Commenter:         roles.commenter,
 			BlockingAnnotator: roles.blocking,
 			TreeWalker:        roles.tree,
 			ReadyCounter:      roles.readyCounter,
@@ -650,6 +651,7 @@ type serveRoleSource interface {
 	EdgeReader() (issueops.EdgeReader, error)
 	GraphCounter() (issueops.GraphCounter, error)
 	IssueRelations() (issueops.Relations, error)
+	Commenter() (issueops.Commenter, error)
 	BlockingAnnotator() (issueops.BlockingAnnotator, error)
 	TreeWalker() (issueops.TreeWalker, error)
 	ReadyCounter() (issueops.ReadyCounter, error)
@@ -715,6 +717,7 @@ func serveIssueRoles(src serveRoleSource, journalEnabled bool) (serveRoles, erro
 		{"edge reader", func() (err error) { roles.edges, err = src.EdgeReader(); return }},
 		{"graph counter", func() (err error) { roles.edgeCounter, err = src.GraphCounter(); return }},
 		{"issue relations", func() (err error) { roles.relations, err = src.IssueRelations(); return }},
+		{"commenter", func() (err error) { roles.commenter, err = src.Commenter(); return }},
 		{"blocking annotator", func() (err error) { roles.blocking, err = src.BlockingAnnotator(); return }},
 		{"tree walker", func() (err error) { roles.tree, err = src.TreeWalker(); return }},
 		{"ready counter", func() (err error) { roles.readyCounter, err = src.ReadyCounter(); return }},
@@ -735,6 +738,16 @@ func serveIssueRoles(src serveRoleSource, journalEnabled bool) (serveRoles, erro
 			// assertion has to reach the concrete store or it finds nothing at
 			// all. Nothing is skipped by going the whole way: there is no
 			// journal decorator to peel past.
+			//
+			// A ROLE REACHED BY ASSERTION IS NOT A ROLE OUTSIDE THE RULES.
+			// journalops.Journal is a facade role with a contract tier and a
+			// per-leg lock like every other; what it has no accessor for is
+			// the reason issueops.Importer has none either — the capability is
+			// not on storage.DoltStorage's published surface, so the census
+			// that would otherwise miss it reads SOURCE rather than reflecting
+			// over accessors (backend/conformance/role_coverage_scan_test.go).
+			// The assertion below is what a front door does with such a role,
+			// not a shortcut around one.
 			cursor, ok := serveJournalCursor(src)
 			if ok {
 				roles.eventsJournal = cursor
@@ -763,6 +776,15 @@ func serveIssueRoles(src serveRoleSource, journalEnabled bool) (serveRoles, erro
 // is narrower than the whole store UnwrapStore takes. A source that is not a
 // store has no decorator to peel — the test stubs are exactly that — so it is
 // asked for the seam as it stands.
+//
+// It survives the journal's promotion to a facade role (journalops.Journal,
+// which storage.EventsJournalCursor aliases) unchanged, and deliberately: a
+// role with no accessor is reached exactly this way. issueops.Importer set the
+// precedent — one accessor, none on the store interface — and the apparatus
+// that keeps such a role honest is the conformance census, which parses the
+// facade packages for declarations instead of reflecting over the accessors a
+// store hands out. There is no accessor for this function to have been
+// replaced by.
 func serveJournalCursor(src serveRoleSource) (storage.EventsJournalCursor, bool) {
 	raw := any(src)
 	if store, ok := src.(storage.DoltStorage); ok {
@@ -802,6 +824,7 @@ type serveRoles struct {
 	edges        issueops.EdgeReader
 	edgeCounter  issueops.GraphCounter
 	relations    issueops.Relations
+	commenter    issueops.Commenter
 	blocking     issueops.BlockingAnnotator
 	tree         issueops.TreeWalker
 	readyCounter issueops.ReadyCounter
@@ -835,10 +858,14 @@ type serveRoles struct {
 	memories memoryops.Memories
 	// eventsJournal is the only role here that comes from a TYPE ASSERTION
 	// rather than an accessor, because the journal is not part of DoltStorage's
-	// published surface: it is engine state on a dolt_ignored table that the two
-	// concrete stores implement and a backend may not. Missing it is a startup
-	// error rather than a route that 500s, which is the same deal every other
-	// role here takes.
+	// published surface: it is a replay feed over engine state on a
+	// dolt_ignored table that the two concrete stores implement and a backend
+	// may not. Missing it is a startup error rather than a route that 500s,
+	// which is the same deal every other role here takes.
+	//
+	// It IS a role — journalops.Journal, which storage.EventsJournalCursor
+	// aliases — with its own contract tier and per-leg lock. Accessorless is
+	// the issueops.Importer shape, not an exemption; see serveJournalCursor.
 	eventsJournal storage.EventsJournalCursor
 }
 

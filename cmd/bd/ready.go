@@ -49,6 +49,15 @@ This is useful for agents executing molecules to see which steps can run next.`,
 
 		claimReady, _ := cmd.Flags().GetBool("claim")
 
+		// ABOVE THE MODE DISPATCH, and above the proxied branch, so it is the
+		// one place a --brief conflict is decided for this command on either
+		// route. The branches below return before gatherReadyInput runs, so a
+		// check written into each of them would be three untested copies; this
+		// is one call into the body the gatherer also uses.
+		if err := briefModeConflictFromFlags(cmd); err != nil {
+			return err
+		}
+
 		if usesProxiedServer() {
 			// --claim consumes exactly one row, same reasoning as the
 			// direct-path fix in issueops/claim.go: a rig-wide cap sized
@@ -707,6 +716,14 @@ func init() {
 	readyCmd.Flags().StringSlice("exclude-type", nil, "Exclude issue types from results (comma-separated or repeatable, e.g., --exclude-type=convoy,epic)")
 	readyCmd.Flags().Bool("explain", false, "Show dependency-aware reasoning for why issues are ready or blocked")
 	readyCmd.Flags().Bool("claim", false, "Atomically claim the first ready issue matching the filters")
+	// Projection toggle, the same one `bd list --brief` sets. Refused with
+	// --claim, which returns one whole row by contract; see gatherReadyInput.
+	readyCmd.Flags().Bool("brief", false,
+		"Omit the free-form text (description, design, acceptance criteria, notes, "+
+			"payload, waiters) from each row. Filters that read those fields still "+
+			"select on them. An omitted field is indistinguishable from an empty "+
+			"one; fetch a whole issue with bd show. Requires --json, and cannot be "+
+			"combined with --claim, --gated, --mol or --explain.")
 	// Metadata filtering (GH#1406)
 	readyCmd.Flags().StringArray("metadata-field", nil, "Filter by metadata field (key=value, repeatable)")
 	readyCmd.Flags().String("has-metadata-key", "", "Filter issues that have this metadata key set")
