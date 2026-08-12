@@ -137,7 +137,21 @@ func validateImportRecord(issue *types.Issue, customStatuses, customTypes []stri
 		return fmt.Errorf("nil record")
 	}
 	probe := *issue
-	return issueops.PrepareIssueForInsert(&probe, customStatuses, customTypes)
+	if err := issueops.PrepareIssueForInsert(&probe, customStatuses, customTypes); err != nil {
+		return err
+	}
+	// PrepareIssueForInsert validates the issue ROW only. Labels persist
+	// through their own writer (AddLabelInTx), which refuses an over-length
+	// label with ErrFieldTooLong — so a record whose issue fields are fine
+	// but whose label is too long would pass this probe and still abort the
+	// batch later (cross-vendor review finding). Mirror that check here so
+	// the record is partitioned out instead.
+	for _, label := range issue.Labels {
+		if err := types.CheckFieldLen("label", label); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // partitionImportRecords splits parsed records into those the writer will
@@ -312,9 +326,32 @@ func writeRejectFile(path string, rejected []rejectedRecord) (wrote bool, err er
 			return false, fmt.Errorf("creating directory for %s: %w", path, err)
 		}
 	}
-	// 0600: the quarantine file is a verbatim copy of issue records, so it
-	// carries whatever the source JSONL carried.
-	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
+	// Write to a temp file and rename it over path rather than os.WriteFile
+	// in place. Two hardening properties fall out (cross-vendor review
+	// findings): a pre-existing SYMLINK at path is replaced as a link
+	// instead of followed — the implicit `<source>.rejected.jsonl` callers
+	// (bootstrap, auto-import) have no CLI collision guard in front of this
+	// write, so following a planted link would truncate an unrelated file —
+	// and the quarantine always lands with a fresh 0600 mode, where
+	// os.WriteFile's perm argument is ignored for a file that already
+	// exists with a laxer mode. The quarantine is a verbatim copy of issue
+	// records, so it carries whatever the source JSONL carried.
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return false, fmt.Errorf("creating temp file for %s: %w", path, err)
+	}
+	tmpName := tmp.Name()
+	_, werr := tmp.WriteString(b.String())
+	cerr := tmp.Close()
+	if werr != nil || cerr != nil {
+		_ = os.Remove(tmpName)
+		if werr == nil {
+			werr = cerr
+		}
+		return false, fmt.Errorf("writing %s: %w", path, werr)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		_ = os.Remove(tmpName)
 		return false, fmt.Errorf("writing %s: %w", path, err)
 	}
 	return true, nil

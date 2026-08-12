@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -559,6 +560,89 @@ func TestResolveImportRejectsDryRunLeavesRejectsFileAlone(t *testing.T) {
 		}
 		if string(data) != keep {
 			t.Errorf("pre-existing rejects file content changed: %q", string(data))
+		}
+	})
+}
+
+// TestPartitionImportRecordsRejectsOverlengthLabel pins the label half of
+// record-local validation (cross-vendor review finding): labels persist
+// through AddLabelInTx, which refuses over-length labels with
+// ErrFieldTooLong — a record whose issue fields are valid but whose label
+// is too long must be partitioned out here, not abort the batch there.
+func TestPartitionImportRecordsRejectsOverlengthLabel(t *testing.T) {
+	long := strings.Repeat("x", 300)
+	issues := []*types.Issue{
+		{ID: "t-ok", Title: "fine", Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2, Labels: []string{"short"}},
+		{ID: "t-long", Title: "fine too", Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2, Labels: []string{long}},
+	}
+	sources := []recordSource{{Line: 1, Raw: "ok"}, {Line: 2, Raw: "long"}}
+
+	valid, rejected := partitionImportRecords(issues, sources, nil, nil)
+	if len(valid) != 1 || valid[0].ID != "t-ok" {
+		t.Fatalf("valid = %v, want only t-ok", valid)
+	}
+	if len(rejected) != 1 || rejected[0].ID != "t-long" {
+		t.Fatalf("rejected = %+v, want only t-long", rejected)
+	}
+	if !strings.Contains(rejected[0].Reason, "label") {
+		t.Errorf("reject reason = %q, want it to name the label", rejected[0].Reason)
+	}
+}
+
+// TestWriteRejectFileHardening pins the two write-path properties from
+// cross-vendor review: a pre-existing symlink at the quarantine path is
+// replaced as a link (never followed — the implicit <source>.rejected.jsonl
+// callers have no collision guard), and a pre-existing file with a laxer
+// mode is replaced with a fresh 0600 file rather than keeping its mode.
+func TestWriteRejectFileHardening(t *testing.T) {
+	rejects := []rejectedRecord{{Line: 1, Reason: "r", Kind: rejectValidate, raw: `{"id":"x"}`}}
+
+	t.Run("symlink at quarantine path is replaced, target untouched", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("symlink creation is a privileged operation on default Windows configurations")
+		}
+		dir := t.TempDir()
+		target := filepath.Join(dir, "precious.txt")
+		const keep = "do not clobber\n"
+		if err := os.WriteFile(target, []byte(keep), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		link := filepath.Join(dir, "issues.jsonl.rejected.jsonl")
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+
+		wrote, err := writeRejectFile(link, rejects)
+		if err != nil || !wrote {
+			t.Fatalf("writeRejectFile = (%v, %v), want (true, nil)", wrote, err)
+		}
+		if data, rerr := os.ReadFile(target); rerr != nil || string(data) != keep {
+			t.Errorf("symlink target changed: content=%q err=%v (quarantine write followed the link)", string(data), rerr)
+		}
+		if fi, lerr := os.Lstat(link); lerr != nil || fi.Mode()&os.ModeSymlink != 0 {
+			t.Errorf("quarantine path is still a symlink (or missing): mode=%v err=%v", fi.Mode(), lerr)
+		}
+	})
+
+	t.Run("pre-existing lax mode is replaced with 0600", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("requires POSIX file permission semantics")
+		}
+		dir := t.TempDir()
+		path := filepath.Join(dir, "rejects.jsonl")
+		if err := os.WriteFile(path, []byte("old\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		wrote, err := writeRejectFile(path, rejects)
+		if err != nil || !wrote {
+			t.Fatalf("writeRejectFile = (%v, %v), want (true, nil)", wrote, err)
+		}
+		fi, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fi.Mode().Perm() != 0o600 {
+			t.Errorf("quarantine mode = %o, want 0600 (rewrite must not inherit the old lax mode)", fi.Mode().Perm())
 		}
 	})
 }
