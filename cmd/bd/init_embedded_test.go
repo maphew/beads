@@ -55,13 +55,24 @@ func buildEmbeddedBD(t *testing.T) string {
 		cmd := exec.Command("go", "build", "-tags", "gms_pure_go", "-o", embeddedBD, ".")
 		// A compiled test binary can be launched from any directory. Build from
 		// this source file's package directory rather than inheriting that
-		// arbitrary process working directory.
-		_, sourceFile, _, ok := runtime.Caller(0)
-		if !ok {
-			embeddedBDErr = fmt.Errorf("locate embedded bd test source directory")
-			return
+		// arbitrary process working directory. Under -trimpath runtime.Caller
+		// records the import path, not a filesystem path, so fall back to
+		// resolving the package through whatever module context the cwd has.
+		if _, sourceFile, _, ok := runtime.Caller(0); ok && filepath.IsAbs(sourceFile) {
+			if dir := filepath.Dir(sourceFile); dir != "" {
+				if fi, statErr := os.Stat(dir); statErr == nil && fi.IsDir() {
+					cmd.Dir = dir
+				}
+			}
 		}
-		cmd.Dir = filepath.Dir(sourceFile)
+		if cmd.Dir == "" {
+			out, err := exec.Command("go", "list", "-f", "{{.Dir}}", "github.com/steveyegge/beads/cmd/bd").Output()
+			if err != nil || strings.TrimSpace(string(out)) == "" {
+				embeddedBDErr = fmt.Errorf("cannot locate the cmd/bd source directory (test binary built with -trimpath and no module context in the working directory); set BEADS_TEST_BD_BINARY to a prebuilt bd binary")
+				return
+			}
+			cmd.Dir = strings.TrimSpace(string(out))
+		}
 		if out, err := cmd.CombinedOutput(); err != nil {
 			embeddedBDErr = fmt.Errorf("go build failed: %v\n%s", err, out)
 		}
