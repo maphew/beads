@@ -53,6 +53,15 @@ func buildEmbeddedBD(t *testing.T) string {
 		}
 		embeddedBD = filepath.Join(tmpDir, name)
 		cmd := exec.Command("go", "build", "-tags", "gms_pure_go", "-o", embeddedBD, ".")
+		// A compiled test binary can be launched from any directory. Build from
+		// this source file's package directory rather than inheriting that
+		// arbitrary process working directory.
+		_, sourceFile, _, ok := runtime.Caller(0)
+		if !ok {
+			embeddedBDErr = fmt.Errorf("locate embedded bd test source directory")
+			return
+		}
+		cmd.Dir = filepath.Dir(sourceFile)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			embeddedBDErr = fmt.Errorf("go build failed: %v\n%s", err, out)
 		}
@@ -67,6 +76,13 @@ func bdEnv(dir string) []string {
 	var env []string
 	for _, e := range os.Environ() {
 		if strings.HasPrefix(e, "BEADS_") {
+			continue
+		}
+		// An ambient envelope opt-in would wrap every fixture command's JSON
+		// in {schema_version, data} and break the bare-array parsing all the
+		// bdList*JSON helpers do. Tests that want the envelope opt in per
+		// child command (exec.Cmd keeps the last duplicate env entry).
+		if strings.HasPrefix(e, "BD_JSON_ENVELOPE=") {
 			continue
 		}
 		env = append(env, e)
