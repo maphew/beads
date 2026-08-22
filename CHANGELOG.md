@@ -136,6 +136,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Incremental auto-export now actually takes the incremental path**
+  ([#5806](https://github.com/gastownhall/beads/pull/5806)). Change detection
+  compared `GetStateHash()` values — a hash of the entire database plus
+  working set (`DOLT_HASHOF_DB()`), not a commit — but `ChangedIssueIDs` feeds
+  both endpoints straight into `dolt_diff()`, which only accepts real commit
+  hashes or the literal `WORKING`. Every incremental attempt therefore failed
+  to resolve a diff and silently fell back to a full export: correct output,
+  but the incremental short-circuit this feature exists for never actually
+  ran. The "to" endpoint is now `WORKING` (dolt_diff's own literal for the
+  live working set) paired with the previous export's real commit hash as
+  "from", so the incremental path resolves and fires as designed.
+
+  Three format/scope regressions surfaced alongside the dead code path, since
+  nothing had ever exercised it end-to-end: the incremental patch could leak
+  **memories** into the auto-export output (full export filters them; the
+  patch path did not), could include the configured **owner**'s own issues
+  where full export excludes them, and omitted the `_type` discriminator field
+  full export always writes. All three are now pinned by tests that diff a
+  patched run's output against a from-scratch full export of the same state.
+  The patch write is also now atomic (write-temp + rename), matching the
+  full-export path's existing guarantee.
+
+  The owner and `_type` fixes match full export exactly. **Memory records
+  deliberately do not**, and the difference is worth stating: where the full
+  path *refuses* to overwrite an `issues.jsonl` that already contains memory
+  lines (`guardAutoExportOverwrite`), the incremental path *preserves* them
+  verbatim and proceeds. Preserving is the better behavior — a manually
+  seeded export survives patching byte-for-byte instead of wedging — so the
+  incremental path keeps it rather than adopting the refusal.
+
+  **Scope: this is a server-mode (`DiffStore`) improvement only.**
+  `EmbeddedDoltStore` implements neither `DiffStore` nor `StateHasher`, so in
+  the default embedded mode the incremental path is inert (`incremental
+  skipped — store does not implement DiffStore`) and every cycle is still a
+  full export. The deletion-proof guard below is likewise server-mode only, so
+  [#5896](https://github.com/gastownhall/beads/issues/5896) stays open for
+  embedded mode, where `bd delete` still wedges auto-export.
+
+  **Caveat: the diff anchor only advances on real commits.** In server mode
+  dolt auto-commit is off, so with no commits being made the anchor stays put
+  and the diff range grows with every cycle. That is correct but not free:
+  once the change set crosses the 5000-id threshold, every export falls back
+  to a full rewrite until something commits and the anchor moves forward.
+
+- **`bd delete` no longer wedges auto-export in server mode**
+  ([#5806](https://github.com/gastownhall/beads/pull/5806), part of
+  [#5896](https://github.com/gastownhall/beads/issues/5896)). Auto-export's
+  orphan guard refuses to overwrite an `issues.jsonl` holding issue records
+  absent from the local store — the #4988 protection against a JSONL that has
+  run ahead of the database. A normal `bd delete` produced exactly that shape,
+  so a single delete left `issues.jsonl` permanently stale, with a "refusing
+  to overwrite" warning on every later command. The guard now asks `dolt_diff`
+  whether each JSONL-only id was genuinely removed since the last export's
+  anchor and, when proven, stops treating it as corruption.
+
+  The proof is deliberately narrow. It requires `diff_type='removed'` on the
+  **issues** table itself, so a label-, dependency- or comment-only change, a
+  delete-then-recreate, a wisp, or any diff error all still refuse. It also
+  requires the anchor to still be reachable from `HEAD`: after a
+  `DOLT_RESET --hard`, a branch checkout, or any other data-dir rewind, a row
+  reads as "removed" without anyone having deleted it, and honoring that
+  would drop a live record. Both conditions must hold, or the guard refuses as
+  before.
+
 - **`bd import` reports which record was invalid, and `--skip-invalid` imports
   the rest of the file around it** (#4492, #5202). A single record the writer
   would refuse (for example `"status":"verify"` without that custom status
