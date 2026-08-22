@@ -358,18 +358,27 @@ func writeRejectFile(path string, rejected []rejectedRecord) (wrote bool, err er
 }
 
 // rejectPathCollidesWithSource reports whether rejectPath and sourcePath name
-// the same file once both are resolved to an absolute, symlink-free form.
+// the same existing file (including through hard links), or resolve to the
+// same absolute, symlink-free path when the reject path does not exist yet.
 // sourcePath is empty when importing from stdin, which has no file to collide
 // with.
 //
-// writeRejectFile truncates and rewrites rejectPath. --rejects is a
-// user-supplied path, and if it happens to name the import source — directly,
-// via a relative alias, or through a symlink — the source is destroyed and
-// replaced with only the rejected lines. Callers must check this before
-// writing.
+// writeRejectFile writes a temporary file and renames it over rejectPath.
+// --rejects is user-supplied, and a path that already names the import source
+// — directly, through an alias, or as a hard link — is still refused: replacing
+// that logical file with a quarantine is an ambiguous and destructive request.
+// Callers must check this before writing.
 func rejectPathCollidesWithSource(rejectPath, sourcePath string) (bool, error) {
 	if rejectPath == "" || sourcePath == "" {
 		return false, nil
+	}
+	// Canonical paths cannot distinguish hard links, so compare file identities
+	// whenever both paths already exist. os.Stat deliberately follows symlinks,
+	// which retains the existing symlink-alias protection too.
+	if rejectInfo, rejectErr := os.Stat(rejectPath); rejectErr == nil {
+		if sourceInfo, sourceErr := os.Stat(sourcePath); sourceErr == nil && os.SameFile(rejectInfo, sourceInfo) {
+			return true, nil
+		}
 	}
 	resolvedReject, err := resolveForCollisionCheck(rejectPath)
 	if err != nil {

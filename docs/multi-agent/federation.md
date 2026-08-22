@@ -258,6 +258,33 @@ permanently gone (or a node that was renamed and now sees its own old leases
 as foreign) — not a normal setting, since only the granting machine has a
 first-hand view of whether the holder is alive.
 
+**A heartbeat proves the holder is alive; it does not move the lease.** An
+ordinary heartbeat only *backfills* the granting replica when it is still empty
+— it does not overwrite a row that positively names one. So a lease normally
+keeps its granting replica for life, and states like these strand one where a
+local heartbeat is keeping it alive:
+
+- a replica that was **renamed** (`mini` → `mini2`) heartbeats its own leases,
+  which now read foreign forever;
+- a foreign lease that arrived through the JSONL interchange, whose holder name
+  also exists locally, gets heartbeated here but stays labelled with the remote
+  node;
+- an import that lands on an already-**expired** local lease row takes the whole
+  row from the snapshot, granting replica included — so this node's own stale
+  lease can come back labelled with a remote one.
+
+(The one path that moves a lease the other way is a heartbeat whose holder is a
+different *spelling* of the lease row's holder: it re-arms through the upsert,
+which stamps this node.)
+
+Recover a stranded lease with `bd reclaim --any-replica`, once you have
+confirmed the granting replica is not still reaping — that confirmation is the
+whole point of the guard, so prefer the narrow forms:
+`bd reclaim --any-replica --id <id>` for one issue, or `bd unclaim --force
+<id>`; the bare global form reverts *every* foreign stale lease, live peers
+included. `bd reclaim` names what it declined on stderr — one summary line per
+run, with `bd -v` expanding it to the first 20 leases individually.
+
 ## Planned Features
 
 The following operation has infrastructure support but is not yet exposed as

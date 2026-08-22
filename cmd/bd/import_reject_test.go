@@ -316,6 +316,16 @@ func TestRejectPathCollidesWithSource(t *testing.T) {
 		t.Fatalf("collide=%v err=%v, want true/nil for a relative alias of the same file", collide, err)
 	}
 
+	// A hard-link alias has a distinct canonical path but the same underlying
+	// file, so it must be refused too.
+	hardLinkPath := filepath.Join(dir, "hard-link.jsonl")
+	if err := os.Link(source, hardLinkPath); err != nil {
+		t.Skipf("hard links unsupported in this environment: %v", err)
+	}
+	if collide, err := rejectPathCollidesWithSource(hardLinkPath, source); err != nil || !collide {
+		t.Fatalf("collide=%v err=%v, want true/nil for a hard link to the source", collide, err)
+	}
+
 	// A different file in the same directory does not collide.
 	other := filepath.Join(dir, "issues.rejected.jsonl")
 	if collide, err := rejectPathCollidesWithSource(other, source); err != nil || collide {
@@ -460,10 +470,10 @@ func TestImportVocabularyFailsClosed(t *testing.T) {
 }
 
 // bd review (dual-vendor pass on PR 5202, P1): --rejects is user-supplied and
-// writeRejectFile truncates and rewrites it. If it names the import source —
-// directly or via a relative alias — the source must be refused, not
-// destroyed. This exercises the actual runImportFromReader wiring, not just
-// the rejectPathCollidesWithSource helper.
+// writeRejectFile temp-renames it into place. If it names the import source —
+// directly or via a relative alias — the source must still be refused rather
+// than replaced by a quarantine. This exercises the actual runImportFromReader
+// wiring, not just the rejectPathCollidesWithSource helper.
 func TestRunImportFromReaderRefusesRejectPathCollidingWithSource(t *testing.T) {
 	dir := t.TempDir()
 	source := filepath.Join(dir, "issues.jsonl")
