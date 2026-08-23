@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -31,6 +32,12 @@ var (
 // buildEmbeddedBD returns the path to an embedded bd binary for subprocess tests.
 // If BEADS_TEST_BD_BINARY is set, uses that pre-built binary (skipping the ~45s build).
 // CI can pre-build once and pass the path to all test invocations.
+// errEmbeddedBDSourceUnavailable: the test binary was built with -trimpath
+// (runtime.Caller records the import path, not a filesystem path) and the
+// process working directory has no module context to resolve the package
+// through, so there is no source tree to build bd from.
+var errEmbeddedBDSourceUnavailable = errors.New("cannot locate the cmd/bd source directory (test binary built with -trimpath and no module context in the working directory); set BEADS_TEST_BD_BINARY to a prebuilt bd binary")
+
 func buildEmbeddedBD(t *testing.T) string {
 	t.Helper()
 	embeddedBDOnce.Do(func() {
@@ -68,7 +75,7 @@ func buildEmbeddedBD(t *testing.T) string {
 		if cmd.Dir == "" {
 			out, err := exec.Command("go", "list", "-f", "{{.Dir}}", "github.com/steveyegge/beads/cmd/bd").Output()
 			if err != nil || strings.TrimSpace(string(out)) == "" {
-				embeddedBDErr = fmt.Errorf("cannot locate the cmd/bd source directory (test binary built with -trimpath and no module context in the working directory); set BEADS_TEST_BD_BINARY to a prebuilt bd binary")
+				embeddedBDErr = errEmbeddedBDSourceUnavailable
 				return
 			}
 			cmd.Dir = strings.TrimSpace(string(out))
@@ -77,6 +84,12 @@ func buildEmbeddedBD(t *testing.T) string {
 			embeddedBDErr = fmt.Errorf("go build failed: %v\n%s", err, out)
 		}
 	})
+	if errors.Is(embeddedBDErr, errEmbeddedBDSourceUnavailable) {
+		// Same posture as testenv.MustHaveGoBuild: a test that needs to build
+		// bd from source cannot run where the source is unreachable, and
+		// that is a skip with a pointer, not a failure of the code under test.
+		t.Skipf("skipping: %v", embeddedBDErr)
+	}
 	if embeddedBDErr != nil {
 		t.Fatalf("Failed to build embedded bd binary: %v", embeddedBDErr)
 	}
