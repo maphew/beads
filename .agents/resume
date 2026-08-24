@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+required_commands=(go gcc make node npm golangci-lint dolt uv bd)
+missing=()
+
+for command_name in "${required_commands[@]}"; do
+    command -v "$command_name" >/dev/null 2>&1 || missing+=("$command_name")
+done
+
+if ((${#missing[@]} > 0)); then
+    printf 'Orb toolchain is incomplete; rerun .agents/setup. Missing: %s\n' "${missing[*]}" >&2
+    exit 1
+fi
+
+printf 'Orb toolchain ready: %s; %s; %s; %s\n' \
+    "$(go version)" "$(dolt version | sed -n '1p')" "$(uv --version)" "$(bd version | sed -n '1p')"

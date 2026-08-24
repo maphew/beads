@@ -1,0 +1,169 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+go_version="$(sed -n 's/^go //p' "$repo_root/go.mod")"
+golangci_lint_version="2.10.1"
+uv_version="0.11.16"
+bd_version="$(sed -n 's/^[[:space:]]*"version": "\([^"]*\)",/\1/p' "$repo_root/npm-package/package.json")"
+
+step() {
+    local label="$1"
+    shift
+    local started=$SECONDS
+    printf '\n==> %s\n' "$label"
+    "$@"
+    printf '<== %s (%ss)\n' "$label" "$((SECONDS - started))"
+}
+
+install_system_packages() {
+    local -a packages=()
+    command -v curl >/dev/null 2>&1 || packages+=(curl ca-certificates)
+    command -v tar >/dev/null 2>&1 || packages+=(tar)
+    command -v gcc >/dev/null 2>&1 || packages+=(build-essential)
+    command -v make >/dev/null 2>&1 || packages+=(make)
+    command -v jq >/dev/null 2>&1 || packages+=(jq)
+
+    if ((${#packages[@]} == 0)); then
+        echo "System build tools already installed."
+        return
+    fi
+
+    sudo apt-get update
+    sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y "${packages[@]}"
+}
+
+platform_arch() {
+    case "$(uname -m)" in
+        x86_64 | amd64) echo "amd64" ;;
+        aarch64 | arm64) echo "arm64" ;;
+        *)
+            printf 'Unsupported architecture: %s\n' "$(uname -m)" >&2
+            return 1
+            ;;
+    esac
+}
+
+install_go() {
+    if command -v go >/dev/null 2>&1 && [[ "$(go version)" == "go version go${go_version} "* ]]; then
+        go version
+        return
+    fi
+
+    local arch asset workdir expected_checksum
+    arch="$(platform_arch)"
+    asset="go${go_version}.linux-${arch}.tar.gz"
+    workdir="$(mktemp -d)"
+    trap "rm -rf '$workdir'" EXIT
+
+    curl -fsSL --retry 3 -o "$workdir/$asset" "https://go.dev/dl/$asset"
+    expected_checksum="$(curl -fsSL --retry 3 'https://go.dev/dl/?mode=json&include=all' |
+        jq -r --arg asset "$asset" '.[] | .files[] | select(.filename == $asset) | .sha256')"
+    if [[ ! "$expected_checksum" =~ ^[[:xdigit:]]{64}$ ]]; then
+        printf 'Could not resolve the checksum for %s.\n' "$asset" >&2
+        return 1
+    fi
+    printf '%s  %s\n' "$expected_checksum" "$workdir/$asset" | sha256sum --check --status
+
+    sudo rm -rf /usr/local/go
+    sudo tar -C /usr/local -xzf "$workdir/$asset"
+    sudo ln -sfn /usr/local/go/bin/go /usr/local/bin/go
+    sudo ln -sfn /usr/local/go/bin/gofmt /usr/local/bin/gofmt
+    go version
+    rm -rf "$workdir"
+    trap - EXIT
+}
+
+install_golangci_lint() {
+    if command -v golangci-lint >/dev/null 2>&1 &&
+        golangci-lint version | grep -q "version ${golangci_lint_version}"; then
+        golangci-lint version
+        return
+    fi
+
+    local arch asset workdir
+    arch="$(platform_arch)"
+    asset="golangci-lint-${golangci_lint_version}-linux-${arch}.tar.gz"
+    workdir="$(mktemp -d)"
+    trap "rm -rf '$workdir'" EXIT
+
+    curl -fsSL --retry 3 -o "$workdir/$asset" \
+        "https://github.com/golangci/golangci-lint/releases/download/v${golangci_lint_version}/$asset"
+    tar -xzf "$workdir/$asset" -C "$workdir"
+    sudo install -m 0755 \
+        "$workdir/golangci-lint-${golangci_lint_version}-linux-${arch}/golangci-lint" \
+        /usr/local/bin/golangci-lint
+    golangci-lint version
+    rm -rf "$workdir"
+    trap - EXIT
+}
+
+install_uv() {
+    if command -v uv >/dev/null 2>&1 && [[ "$(uv --version)" == "uv ${uv_version}" ]]; then
+        uv --version
+        return
+    fi
+
+    local target asset workdir
+    case "$(platform_arch)" in
+        amd64) target="x86_64-unknown-linux-gnu" ;;
+        arm64) target="aarch64-unknown-linux-gnu" ;;
+    esac
+    asset="uv-${target}.tar.gz"
+    workdir="$(mktemp -d)"
+    trap "rm -rf '$workdir'" EXIT
+
+    curl -fsSL --retry 3 -o "$workdir/$asset" \
+        "https://github.com/astral-sh/uv/releases/download/${uv_version}/$asset"
+    tar -xzf "$workdir/$asset" -C "$workdir"
+    sudo install -m 0755 "$workdir/uv-${target}/uv" /usr/local/bin/uv
+    sudo install -m 0755 "$workdir/uv-${target}/uvx" /usr/local/bin/uvx
+    uv --version
+    rm -rf "$workdir"
+    trap - EXIT
+}
+
+install_dolt() {
+    local expected_version installed_version=""
+    expected_version="$(sed -n 's/^readonly version="\([^"]*\)"/\1/p' "$repo_root/scripts/ci/install-dolt.sh")"
+    if command -v dolt >/dev/null 2>&1; then
+        installed_version="$(dolt version | sed -n '1s/.* //p')"
+    fi
+    if [[ -n "$expected_version" && "$installed_version" == "$expected_version" ]]; then
+        dolt version
+        return
+    fi
+
+    "$repo_root/scripts/ci/install-dolt.sh"
+}
+
+install_bd() {
+    if npm list -g --depth=0 "@beads/bd@${bd_version}" >/dev/null 2>&1; then
+        bd version
+        return
+    fi
+
+    npm install -g --no-audit --no-fund "@beads/bd@${bd_version}"
+    bd version
+}
+
+download_go_modules() {
+    cd "$repo_root"
+    go mod download
+}
+
+sync_mcp_dependencies() {
+    cd "$repo_root/integrations/beads-mcp"
+    uv sync --all-groups --locked
+}
+
+step "Check system build tools" install_system_packages
+step "Install Go ${go_version}" install_go
+step "Install golangci-lint ${golangci_lint_version}" install_golangci_lint
+step "Install uv ${uv_version}" install_uv
+step "Install pinned Dolt CLI" install_dolt
+step "Install released bd ${bd_version}" install_bd
+step "Download Go modules" download_go_modules
+step "Sync MCP Python dependencies" sync_mcp_dependencies
+
+printf '\nOrb setup complete.\n'

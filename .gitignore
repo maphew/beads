@@ -120,7 +120,9 @@ state.json
 
 # Augment AI configuration (user-specific)
 .augment/
-.agents/
+.agents/*
+!.agents/setup
+!.agents/resume
 output
 bd_test
 .beads/export-state/
