@@ -36,6 +36,27 @@ func TestIsIndeterminateCommitResponse(t *testing.T) {
 	}
 }
 
+func TestIsUnknownDatabaseError(t *testing.T) {
+	unknown := &mysql.MySQLError{Number: 1049, Message: "Unknown database 'beads_test'"}
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "typed unknown database", err: unknown, want: true},
+		{name: "wrapped unknown database", err: fmt.Errorf("connect: %w", unknown), want: true},
+		{name: "same message wrong code", err: &mysql.MySQLError{Number: 1105, Message: unknown.Message}, want: false},
+		{name: "untyped matching text", err: errors.New(unknown.Error()), want: false},
+		{name: "nil", err: nil, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isUnknownDatabaseError(tc.err); got != tc.want {
+				t.Errorf("isUnknownDatabaseError(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestWrapSQLCommitError(t *testing.T) {
 	if err := wrapSQLCommitError("commit wisp", nil); err != nil {
 		t.Fatalf("wrapSQLCommitError(nil) = %v, want nil", err)

@@ -57,6 +57,14 @@ func isTableNotExistError(err error) bool {
 	return dberrors.IsTableNotExist(err)
 }
 
+// isUnknownDatabaseError reports MySQL error 1049. A normal server-mode open
+// connects directly to the configured database, so this typed handshake error
+// replaces a separate SHOW DATABASES existence probe.
+func isUnknownDatabaseError(err error) bool {
+	var mysqlErr *mysql.MySQLError
+	return errors.As(err, &mysqlErr) && mysqlErr.Number == 1049
+}
+
 // isBranchTrackingError returns true if the error indicates that DOLT_PULL
 // failed because upstream branch tracking is not configured. This happens
 // when a remote was added via DOLT_REMOTE('add') or bd dolt remote add

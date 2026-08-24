@@ -1740,9 +1740,11 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	// the DSN built in openServerConnection agree on the transport.
 	cfg.ServerSocket = ResolveSocketTransport(cfg.ServerSocket, cfg.ServerHost, cfg.ServerPort, 500*time.Millisecond)
 
-	// Fail-fast connectivity check before MySQL protocol initialization.
-	// This gives an immediate, clear error if the Dolt server isn't running,
-	// rather than waiting for MySQL driver timeouts.
+	// Fail-fast connectivity check before MySQL protocol initialization. This
+	// is useful only for a local endpoint, where a failed probe can trigger the
+	// repo-managed auto-start path below. A remote TCP endpoint cannot be
+	// auto-started, and probing it here would add a separate network round trip
+	// before the MySQL driver's own connect timeout and error handling.
 	var addr string
 	var conn net.Conn
 	var dialErr error
@@ -1751,7 +1753,9 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		conn, dialErr = net.DialTimeout("unix", cfg.ServerSocket, 500*time.Millisecond)
 	} else {
 		addr = net.JoinHostPort(cfg.ServerHost, fmt.Sprintf("%d", cfg.ServerPort))
-		conn, dialErr = net.DialTimeout("tcp", addr, 500*time.Millisecond)
+		if !isExternalServerHost(cfg.ServerHost) {
+			conn, dialErr = net.DialTimeout("tcp", addr, 500*time.Millisecond)
+		}
 	}
 	if dialErr != nil {
 		// Auto-start: if enabled and connecting locally via TCP, start a server.
@@ -1901,11 +1905,14 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 				addr, dialErr, hint)
 		}
 	}
-	// Drain the MySQL handshake before closing so Close() sends FIN, not RST
-	// (dolt sql-server crash risk otherwise, gastownhall/beads#4132, #4133).
-	// This single close site covers both the initial successful dial above
-	// and the post-auto-start retry dial in the branch just above.
-	doltserver.DrainAndCloseProbe(conn)
+	if conn != nil {
+		// Drain the MySQL handshake before closing so Close() sends FIN, not RST
+		// (dolt sql-server crash risk otherwise, gastownhall/beads#4132, #4133).
+		// This single close site covers both the initial successful dial above
+		// and the post-auto-start retry dial in the branch just above. Remote TCP
+		// endpoints skip the standalone probe and therefore have no conn here.
+		doltserver.DrainAndCloseProbe(conn)
+	}
 
 	// If this process already owns a test-started auto-start server, later
 	// stores sharing it must participate in the refcount so one Close() does
@@ -1914,15 +1921,29 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		autoStartedDir = serverDir
 	}
 
-	// TCP dial succeeded — record success to reset the breaker
-	if breaker != nil {
+	// A standalone local probe succeeded — record success to reset the breaker.
+	// Remote endpoints skip that probe and use the real MySQL connection below
+	// as their health signal instead.
+	if breaker != nil && conn != nil {
 		breaker.RecordSuccess()
 	}
 
 	// Server mode: connect via MySQL protocol to dolt sql-server
 	db, connStr, dbFacts, err := openServerConnection(ctx, cfg)
 	if err != nil {
+		if breaker != nil && conn == nil {
+			if isConnectionError(err) {
+				breaker.RecordFailure()
+			} else {
+				// Authentication, missing-database, and other protocol errors
+				// still prove that the remote endpoint is reachable.
+				breaker.RecordSuccess()
+			}
+		}
 		return nil, err
+	}
+	if breaker != nil && conn == nil {
+		breaker.RecordSuccess()
 	}
 
 	// Close the pool on any failure path below; cleared once ownership passes to the caller.
@@ -1932,11 +1953,6 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 			_ = db.Close()
 		}
 	}()
-
-	// Test connection
-	if err := db.PingContext(ctx); err != nil {
-		return nil, fmt.Errorf("failed to ping Dolt database: %w", err)
-	}
 
 	beadsDir := cfg.BeadsDir
 	if beadsDir == "" && cfg.Path != "" {
@@ -2026,7 +2042,7 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 			return nil, fmt.Errorf("failed to initialize schema: %w", err)
 		}
 		// initSchema runs migrations over a separate pool (openMigrationDB).
-		// The Ping above already pinned a connection in store.db to the
+		// openServerConnection already pinned a connection in store.db to the
 		// pre-migration session root; without a rebuild, the first read
 		// through that stale connection returns 0 rows / table-not-found
 		// and does not self-heal on retry (be-itm5). Only a migrating open
@@ -2352,11 +2368,11 @@ type serverConnFacts struct {
 	bootstrapHeal *schema.FreshBootstrapHealCapability
 
 	// alreadyExisted reports whether the database was proven to exist on the
-	// server before this call: either the SHOW DATABASES probe found it, or
-	// our CREATE DATABASE was refused with "database exists" (1007). Callers
-	// use it to decide whether project-identity verification applies even
-	// when CreateIfMissing is true (see the newServerMode gate around
-	// verifyProjectIdentity, GH#4637).
+	// server before this call: a direct target-database connection succeeded,
+	// the SHOW DATABASES probe found it, or our CREATE DATABASE was refused
+	// with "database exists" (1007). Callers use it to decide whether
+	// project-identity verification applies even when CreateIfMissing is true
+	// (see the newServerMode gate around verifyProjectIdentity, GH#4637).
 	alreadyExisted bool
 }
 
@@ -2410,6 +2426,30 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, se
 		return db, connStr, serverConnFacts{}, nil
 	}
 
+	// Validate before either the fast existing-database path or the
+	// create-if-missing path uses the database name.
+	if err := ValidateDatabaseName(cfg.Database); err != nil {
+		return nil, "", serverConnFacts{}, fmt.Errorf("invalid database name %q: %w", cfg.Database, err)
+	}
+
+	// Normal command opens are not allowed to create databases. Connecting to
+	// the target database proves existence in the common case and MySQL error
+	// 1049 proves absence, so a second no-database pool plus SHOW DATABASES
+	// would only add a handshake and a query round trip. Initialization keeps
+	// the explicit existence/creation arbitration below.
+	if !cfg.CreateIfMissing {
+		if err := db.PingContext(ctx); err != nil {
+			if isUnknownDatabaseError(err) {
+				return nil, "", serverConnFacts{}, databaseNotFoundError(cfg)
+			}
+			return nil, "", serverConnFacts{}, fmt.Errorf(
+				"failed to connect to Dolt server at %s:%d (database %q): %w",
+				cfg.ServerHost, cfg.ServerPort, cfg.Database, err)
+		}
+		connReady = true
+		return db, connStr, serverConnFacts{alreadyExisted: true}, nil
+	}
+
 	// Ensure database exists (may need to create it)
 	// First connect without database to create it
 	initConnStr := buildServerDSN(cfg, "")
@@ -2418,11 +2458,6 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, se
 		return nil, "", serverConnFacts{}, fmt.Errorf("failed to open init connection: %w", err)
 	}
 	defer func() { _ = initDB.Close() }()
-
-	// Validate database name to prevent SQL injection via backtick escaping
-	if err := ValidateDatabaseName(cfg.Database); err != nil {
-		return nil, "", serverConnFacts{}, fmt.Errorf("invalid database name %q: %w", cfg.Database, err)
-	}
 
 	// FIREWALL: Never create test databases on the production server.
 	// This is the last line of defense against test pollution (Clown Shows #12-#18).
