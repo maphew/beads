@@ -603,26 +603,18 @@ func exportToFile(ctx context.Context, path string, includeMemories bool) (issue
 
 	// Bulk-load relational data
 	if len(issues) > 0 {
-		issueIDs := make([]string, len(issues))
-		for i, issue := range issues {
-			issueIDs[i] = issue.ID
-		}
-		labelsMap, _ := store.GetLabelsForIssues(ctx, issueIDs)
-		allDeps, _ := store.GetDependencyRecordsForIssues(ctx, issueIDs)
-		commentsMap, _ := store.GetCommentsForIssues(ctx, issueIDs)
-		commentCounts, _ := store.GetCommentCounts(ctx, issueIDs)
-		depCounts, _ := store.GetDependencyCounts(ctx, issueIDs)
+		relations, _ := (storeExportSource{}).LoadExportRelations(ctx, issues)
 
 		for _, issue := range issues {
-			issue.Labels = labelsMap[issue.ID]
-			issue.Dependencies = allDeps[issue.ID]
-			issue.Comments = commentsMap[issue.ID]
+			issue.Labels = relations.labels[issue.ID]
+			issue.Dependencies = relations.deps[issue.ID]
+			issue.Comments = relations.comments[issue.ID]
 		}
 
 		// Write issues
 		enc := json.NewEncoder(w)
 		for _, issue := range issues {
-			counts := depCounts[issue.ID]
+			counts := relations.depCounts[issue.ID]
 			if counts == nil {
 				counts = &types.DependencyCounts{}
 			}
@@ -633,7 +625,7 @@ func exportToFile(ctx context.Context, path string, includeMemories bool) (issue
 					Issue:           issue,
 					DependencyCount: counts.DependencyCount,
 					DependentCount:  counts.DependentCount,
-					CommentCount:    commentCounts[issue.ID],
+					CommentCount:    relations.commentCounts[issue.ID],
 				},
 			}
 			if err := enc.Encode(record); err != nil {

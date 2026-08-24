@@ -1832,8 +1832,11 @@ var rootCmd = &cobra.Command{
 					}
 				}
 
-				// Auto-backup: sync a Dolt-native backup if enabled and due
-				runPostRunAutoBackup(rootCtx)
+				// Auto-backup: a read-only command cannot have produced state worth
+				// backing up, so do not pay its commit-check round trip.
+				if shouldRunPostCommandAutoBackup(cmd) {
+					runPostRunAutoBackup(rootCtx)
+				}
 
 				// Auto-export: write git-tracked JSONL for portability if enabled and due.
 				// Read-only commands must not perform post-run maintenance writes or emit
@@ -1943,6 +1946,13 @@ var rootCmd = &cobra.Command{
 }
 
 func shouldRunPostCommandAutoExport(cmd *cobra.Command) bool {
+	if cmd == nil {
+		return true
+	}
+	return !isReadOnlyCommand(cmd.Name())
+}
+
+func shouldRunPostCommandAutoBackup(cmd *cobra.Command) bool {
 	if cmd == nil {
 		return true
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dberrors"
@@ -110,13 +111,24 @@ func (storeExportSource) LoadExportRelations(ctx context.Context, issues []*type
 		issueIDs[i] = issue.ID
 	}
 
-	// Individual bulk-load failures deliberately degrade to empty maps rather
-	// than aborting the export — unchanged from the pre-seam classic behavior.
-	labelsMap, _ := store.GetLabelsForIssues(ctx, issueIDs)
-	allDeps, _ := store.GetDependencyRecordsForIssues(ctx, issueIDs)
-	commentsMap, _ := store.GetCommentsForIssues(ctx, issueIDs)
-	commentCounts, _ := store.GetCommentCounts(ctx, issueIDs)
-	depCounts, _ := store.GetDependencyCounts(ctx, issueIDs)
+	// These reads are independent and already use separate read transactions.
+	// Run them concurrently so a remote SQL server pays one WAN-latency window
+	// rather than five serial windows. Individual failures deliberately degrade
+	// to empty maps rather than aborting the export, preserving classic behavior.
+	var (
+		labelsMap     map[string][]string
+		allDeps       map[string][]*types.Dependency
+		commentsMap   map[string][]*types.Comment
+		commentCounts map[string]int
+		depCounts     map[string]*types.DependencyCounts
+		wg            sync.WaitGroup
+	)
+	wg.Go(func() { labelsMap, _ = store.GetLabelsForIssues(ctx, issueIDs) })
+	wg.Go(func() { allDeps, _ = store.GetDependencyRecordsForIssues(ctx, issueIDs) })
+	wg.Go(func() { commentsMap, _ = store.GetCommentsForIssues(ctx, issueIDs) })
+	wg.Go(func() { commentCounts, _ = store.GetCommentCounts(ctx, issueIDs) })
+	wg.Go(func() { depCounts, _ = store.GetDependencyCounts(ctx, issueIDs) })
+	wg.Wait()
 
 	return exportRelations{
 		labels:        labelsMap,

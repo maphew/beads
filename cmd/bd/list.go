@@ -320,9 +320,13 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 			return nil
 		}
 
-		allDeps, depErr := activeStore.GetAllDependencyRecords(ctx)
-		if depErr != nil && in.depsMode != "" {
-			return HandleError("loading dependencies for --deps: %v", depErr)
+		var allDeps map[string][]*types.Dependency
+		if len(issues) > 0 {
+			var depErr error
+			allDeps, depErr = activeStore.GetAllDependencyRecords(ctx)
+			if depErr != nil && in.depsMode != "" {
+				return HandleError("loading dependencies for --deps: %v", depErr)
+			}
 		}
 		displayPrettyListWithDepsMode(issues, false, allDeps, in.depsMode, truncated, in.ReadyFlag)
 		printTruncationHint(truncated, in.effectiveLimit)

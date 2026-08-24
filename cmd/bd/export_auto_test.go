@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -196,6 +197,92 @@ func TestShouldRunPostCommandAutoExportSkipsReadOnlyCommands(t *testing.T) {
 	}
 	if !shouldRunPostCommandAutoExport(&cobra.Command{Use: "create"}) {
 		t.Fatal("write commands should still trigger post-command auto-export")
+	}
+}
+
+func TestShouldRunPostCommandAutoBackupSkipsReadOnlyCommands(t *testing.T) {
+	if shouldRunPostCommandAutoBackup(&cobra.Command{Use: "search"}) {
+		t.Fatal("search is read-only and must not trigger post-command auto-backup")
+	}
+	if !shouldRunPostCommandAutoBackup(&cobra.Command{Use: "create"}) {
+		t.Fatal("write commands should still trigger post-command auto-backup")
+	}
+}
+
+type concurrentExportRelationsStore struct {
+	storage.DoltStorage
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (s *concurrentExportRelationsStore) wait() {
+	s.entered <- struct{}{}
+	<-s.release
+}
+
+func (s *concurrentExportRelationsStore) GetLabelsForIssues(context.Context, []string) (map[string][]string, error) {
+	s.wait()
+	return nil, nil
+}
+
+func (s *concurrentExportRelationsStore) GetDependencyRecordsForIssues(context.Context, []string) (map[string][]*types.Dependency, error) {
+	s.wait()
+	return nil, nil
+}
+
+func (s *concurrentExportRelationsStore) GetCommentsForIssues(context.Context, []string) (map[string][]*types.Comment, error) {
+	s.wait()
+	return nil, nil
+}
+
+func (s *concurrentExportRelationsStore) GetCommentCounts(context.Context, []string) (map[string]int, error) {
+	s.wait()
+	return nil, nil
+}
+
+func (s *concurrentExportRelationsStore) GetDependencyCounts(context.Context, []string) (map[string]*types.DependencyCounts, error) {
+	s.wait()
+	return nil, nil
+}
+
+func TestStoreExportSourceLoadsRelationsConcurrently(t *testing.T) {
+	originalStore := store
+	t.Cleanup(func() { store = originalStore })
+
+	fake := &concurrentExportRelationsStore{
+		entered: make(chan struct{}, 5),
+		release: make(chan struct{}),
+	}
+	store = fake
+
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(fake.release) }) }
+	t.Cleanup(release)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := (storeExportSource{}).LoadExportRelations(
+			context.Background(), []*types.Issue{{ID: "bd-1"}},
+		)
+		done <- err
+	}()
+
+	for range 5 {
+		select {
+		case <-fake.entered:
+		case <-time.After(time.Second):
+			t.Fatal("relation loaders did not all start before the first completed")
+		}
+	}
+	release()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("LoadExportRelations: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("relation loaders did not finish after release")
 	}
 }
 
