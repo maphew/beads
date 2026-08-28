@@ -619,6 +619,15 @@ func MigrateUp(ctx context.Context, db DBConn) (int, error) {
 		return 0, fmt.Errorf("reading pre-migration status: %w", err)
 	}
 	delete(dirtyBefore, "dolt_ignore")
+	// Captured before the main migrations run: the aux re-key uses it to
+	// distinguish the lineage's first rekey-aware migration (run the pass) from
+	// a fresh clone of an already-converged lineage (record the marker only,
+	// bd-578h9.4). Read up front because the dirtyBefore exemption just below is
+	// derived from it (auxRekeyExemptTables).
+	mainVersionBefore, err := mainSource.currentVersion(ctx, db)
+	if err != nil {
+		return 0, fmt.Errorf("reading pre-migration schema version: %w", err)
+	}
 	// A previous pass that crashed mid-aux-rekey left its partial UPDATEs
 	// dirty in the working set with the in-progress sentinel still recorded
 	// (bd-578h9.16). Those tables are this pass's own migration state, not
@@ -631,18 +640,20 @@ func MigrateUp(ctx context.Context, db DBConn) (int, error) {
 	// changed-signature guard below reads dirty tables through dolt_diff, which
 	// decodes exactly the cells that panic — so leaving a drifted table in
 	// dirtyBefore would fail the pass on the read, re-creating the unopenable
-	// database this exemption path exists to rescue. Only the recorded tables
-	// are exempted there, since only those will be touched.
-	auxRekeyOwed, err := readAnyAuxRekeyState(ctx, db)
+	// database this exemption path exists to rescue.
+	//
+	// auxRekeyExemptTables returns exactly the tables the upcoming
+	// rekeyAuxRowIDsAllPasses will rewrite, computed from the same per-pass
+	// selection the rewrite uses. Scoping the exemption to that set — rather
+	// than blanket-exempting all four aux tables whenever any rewrite is in
+	// flight — keeps a post-marker resume, which touches only the recorded
+	// drifted subset, from dropping a non-drifted aux table's pre-existing user
+	// edits out of dirtyBefore and into the migration commit (#4380).
+	auxRekeyExempt, err := auxRekeyExemptTables(ctx, db, mainVersionBefore)
 	if err != nil {
-		return 0, fmt.Errorf("reading aux rekey state: %w", err)
+		return 0, err
 	}
-	if auxRekeyOwed.resume {
-		for _, t := range auxRekeyTables {
-			delete(dirtyBefore, t.name)
-		}
-	}
-	for _, name := range auxRekeyOwed.drifted {
+	for name := range auxRekeyExempt {
 		delete(dirtyBefore, name)
 	}
 	touchedDirtyTables, err := mainSource.pendingMigrationDirtyTables(ctx, db, dirtyBefore)
@@ -655,14 +666,6 @@ func MigrateUp(ctx context.Context, db DBConn) (int, error) {
 	dirtyBeforeSignatures, err := dirtyTableSignatures(ctx, db, dirtyBefore)
 	if err != nil {
 		return 0, fmt.Errorf("reading pre-migration dirty table diffs: %w", err)
-	}
-	// Captured before the main migrations run: the aux re-key uses it to
-	// distinguish the lineage's first rekey-aware migration (run the pass)
-	// from a fresh clone of an already-converged lineage (record the marker
-	// only, bd-578h9.4).
-	mainVersionBefore, err := mainSource.currentVersion(ctx, db)
-	if err != nil {
-		return 0, fmt.Errorf("reading pre-migration schema version: %w", err)
 	}
 
 	applied, mainColumnAdded, err := mainSource.migrate(ctx, db, 0)
@@ -756,6 +759,15 @@ func MigrateUp(ctx context.Context, db DBConn) (int, error) {
 	return applied, nil
 }
 
+// migrationWorkNeeded deliberately does NOT consult the aux-rekey drift record
+// (auxRowRekeyDriftedKey): the #4380 retry is opportunistic, not eager. A
+// database that is otherwise fully current re-enters the rekey path only on the
+// next pass that has other migration work to do, so a table left divergent by
+// repaired-but-not-yet-reconverged drift converges then rather than on the very
+// next open. This keeps steady-state opens free of a local_metadata probe; the
+// skip log already tells the user convergence is deferred to a later migration
+// pass (see rekeyAuxRowIDsPending). Making a repaired DB re-converge immediately
+// would mean folding that drift record in here — a deliberate non-goal for now.
 func migrationWorkNeeded(ctx context.Context, db DBConn) (bool, error) {
 	if !mainSource.atLatest(ctx, db) || !ignoredSource.atLatest(ctx, db) {
 		return true, nil

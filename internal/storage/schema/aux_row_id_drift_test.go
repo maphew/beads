@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -272,6 +273,106 @@ func TestRekeyAuxRowIDsResumeStaysScopedAfterCrash(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+// TestAuxRekeyExemptTablesScopedToRewrittenTables pins the #4380 dirtyBefore
+// fix at its source: MigrateUp drops exactly auxRekeyExemptTables' set from the
+// pre-existing-dirty guard before the re-key runs, so a table that is exempt is
+// a table whose uncommitted user edits stageSchemaTables is then free to sweep
+// into the "schema: apply migrations" commit. The exemption must therefore never
+// name a table the re-key will not itself rewrite.
+//
+// The regression is the post-marker resume: a drift retry whose crash left the
+// in-flight sentinel set, with the drift record naming only a subset. The old
+// collapsed "some rewrite is in flight" bit exempted all four aux tables there;
+// a non-drifted table (comments, say) then lost its dirty protection while the
+// rewrite touched only events, carrying the user's comments edits into the
+// migration commit. Asserting the exempt set equals the drifted subset — and, on
+// a converged database, is empty — is asserting those non-drifted tables stay in
+// dirtyBefore and so never reach the commit.
+func TestAuxRekeyExemptTablesScopedToRewrittenTables(t *testing.T) {
+	allFour := []string{"comments", "compaction_snapshots", "events", "issue_snapshots"}
+	cases := []struct {
+		name              string
+		mainVersionBefore int
+		setup             func(sqlmock.Sqlmock)
+		want              []string
+	}{
+		{
+			// The bug's exact state: marker already recorded (nothing ignored
+			// pending), a drift record for events alone, and pass initial's
+			// crash sentinel still set. Exemption must be {events}, not all four.
+			name:              "post-marker resume with crashed sentinel exempts only the drifted subset",
+			mainVersionBefore: auxRekeyPassDerivedInsert.shippedMainVersion,
+			setup: func(mock sqlmock.Sqlmock) {
+				expectCursorProbe(mock, "ignored_schema_migrations", true)
+				expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations",
+					"version", LatestIgnoredVersion())
+				expectIgnoredSentinelProbes(mock, true)
+				// Pass initial died mid-resume (sentinel set); the shared drift
+				// record names events, so pass derived-insert reads it too.
+				expectAuxRekeyStateForPass(mock, auxRekeyPassInitial, true, "events")
+				expectAuxRekeyStateForPass(mock, auxRekeyPassDerivedInsert, false, "events")
+			},
+			want: []string{"events"},
+		},
+		{
+			// A markerPending pass is the one-time convergence and legitimately
+			// rewrites — and so exempts — all four.
+			name:              "marker-pending first pass exempts all four",
+			mainVersionBefore: auxRekeyPassInitial.shippedMainVersion - 1,
+			setup: func(mock sqlmock.Sqlmock) {
+				expectCursorProbe(mock, "ignored_schema_migrations", true)
+				expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations",
+					"version", auxRekeyPassInitial.markerVersion-1)
+				expectIgnoredSentinelProbes(mock, true)
+				expectAuxRekeyStateForPass(mock, auxRekeyPassInitial, false)
+				expectAuxRekeyStateForPass(mock, auxRekeyPassDerivedInsert, false)
+			},
+			want: allFour,
+		},
+		{
+			// Converged and current, nothing owed: no exemption at all, so a
+			// dirty aux table is fully protected on a healthy database.
+			name:              "converged database exempts nothing",
+			mainVersionBefore: auxRekeyPassDerivedInsert.shippedMainVersion,
+			setup: func(mock sqlmock.Sqlmock) {
+				expectCursorProbe(mock, "ignored_schema_migrations", true)
+				expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations",
+					"version", LatestIgnoredVersion())
+				expectIgnoredSentinelProbes(mock, true)
+				expectAuxRekeyStateForPass(mock, auxRekeyPassInitial, false)
+				expectAuxRekeyStateForPass(mock, auxRekeyPassDerivedInsert, false)
+			},
+			want: nil,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("sqlmock.New: %v", err)
+			}
+			defer db.Close()
+			tc.setup(mock)
+
+			exempt, err := auxRekeyExemptTables(context.Background(), db, tc.mainVersionBefore)
+			if err != nil {
+				t.Fatalf("auxRekeyExemptTables: %v", err)
+			}
+			got := make([]string, 0, len(exempt))
+			for name := range exempt {
+				got = append(got, name)
+			}
+			slices.Sort(got)
+			if !slices.Equal(got, tc.want) {
+				t.Fatalf("exempt = %v, want %v", got, tc.want)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("unmet sql expectations: %v", err)
+			}
+		})
 	}
 }
 

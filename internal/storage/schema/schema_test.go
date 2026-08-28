@@ -84,9 +84,20 @@ func TestMigrateUpReturnsDirtyTablesErrorForPreExistingDirtyTable(t *testing.T) 
 	// committableDirtyTables -> dirtyTables(ctx, db, true): same dirty state.
 	expectDirtyDoltStatusRow(mock, "dependencies", false)
 
-	// readAnyAuxRekeyState: no local_metadata table, so no resume in flight.
-	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.TABLES`).
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	// MigrateUp now captures the pre-pass main cursor up front (it drives the
+	// aux-rekey dirtyBefore exemption); v42 (behind latest) is read here.
+	expectCursorProbe(mock, "schema_migrations", true)
+	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", 42)
+	// auxRekeyExemptTables reads the ignored cursor to see which passes' markers
+	// are pending, then each pass's clone-local re-key state. This mocked world
+	// has no ignored cursor table and no local_metadata, so every read stops at
+	// its existence probe and nothing aux is exempted — and `dependencies` is
+	// not an aux table anyway, so it stays in dirtyBefore.
+	expectCursorProbe(mock, "ignored_schema_migrations", false)
+	for range auxRekeyPasses {
+		mock.ExpectQuery(`SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.TABLES`).
+			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	}
 
 	// pendingMigrationDirtyTables re-reads the current version and finds
 	// migration 0043 touches the dirty `dependencies` table.

@@ -371,14 +371,23 @@ func expectOnePendingMigration(t *testing.T, mock sqlmock.Sqlmock) {
 	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', 'schema: seed dolt_ignore patterns')")).
 		WillReturnRows(sqlmock.NewRows([]string{"hash"}))
 	expectDoltStatusRows(mock)
-	// MigrateUp probes the aux-rekey crash sentinel (bd-578h9.16); this
-	// mocked world has no local_metadata table, so no crashed pass.
-	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.TABLES`).
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
-	// MigrateUp captures the pre-pass main cursor for the aux re-key
-	// watershed (bd-578h9.4) before the main migrations run.
+	// MigrateUp captures the pre-pass main cursor for the aux re-key watershed
+	// (bd-578h9.4) before the main migrations run — read up front now because the
+	// dirtyBefore exemption below is derived from it.
 	expectCursorProbe(mock, "schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", latest-1)
+	// auxRekeyExemptTables scopes the aux-table dirtyBefore exemption to exactly
+	// the tables the upcoming re-key rewrites: it reads the ignored cursor to see
+	// which passes' markers are pending, then each pass's clone-local state. This
+	// mocked world has no local_metadata table, so each per-pass read stops at
+	// the existence probe and nothing is exempted.
+	expectCursorProbe(mock, "ignored_schema_migrations", true)
+	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", latestIgnored)
+	expectIgnoredSentinelProbes(mock, true)
+	for range auxRekeyPasses {
+		mock.ExpectQuery(`SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.TABLES`).
+			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	}
 	mock.ExpectExec("(?s)^CREATE TABLE IF NOT EXISTS schema_migrations").
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	expectContentHashColumnExists(mock)
@@ -533,9 +542,20 @@ func expectDirtyGuardRefusal(t *testing.T, mock sqlmock.Sqlmock) {
 	// Nothing staged -> no unstage exec; seed was a no-op -> no seed commit.
 	// committableDirtyTables re-reads dolt_status (ignored tables excluded).
 	expectDoltStatusDirtyEvents(mock)
-	// readAnyAuxRekeyState: no local_metadata table, no crashed rekey pass.
-	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.TABLES`).
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	// MigrateUp captures the pre-pass main cursor up front now (it drives the
+	// aux-rekey dirtyBefore exemption); the guard refusal is still reached
+	// before the main migrations run.
+	expectCursorProbe(mock, "schema_migrations", true)
+	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", cursor)
+	// auxRekeyExemptTables: read the ignored cursor, then each pass's clone-local
+	// re-key state. No ignored cursor table and no local_metadata here, so
+	// nothing is exempted — in particular the dirty `events` aux table stays in
+	// dirtyBefore and still trips the pending-0062 guard below.
+	expectCursorProbe(mock, "ignored_schema_migrations", false)
+	for range auxRekeyPasses {
+		mock.ExpectQuery(`SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.TABLES`).
+			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	}
 	// pendingMigrationDirtyTables: cursor read, then pending 0062's SQL
 	// touches `events` -> DirtyTablesError.
 	expectCursorProbe(mock, "schema_migrations", true)
