@@ -31,8 +31,17 @@ var (
 // legitimately not have, which is the set a wisp query may treat as "no wisps"
 // rather than a failure. Both stacks read it so the two cannot disagree about
 // what a missing table means.
+//
+// wisp_comments is on the list because the schema's own migrations
+// (0053_repair_rig_wisps, 0056_add_comments_keyset_index) guard for a
+// database that has wisps but not wisp_comments, so that shape is reachable;
+// without the tolerance, IssueFilter.AllFields (whose comments arm reads
+// wisp_comments) would hard-error on the wisps leg of a database where the
+// default search works (GH#2883 review).
 func OptionalWispTable(name string) bool {
-	return strings.EqualFold(name, "wisps") || strings.EqualFold(name, "wisp_dependencies")
+	return strings.EqualFold(name, "wisps") ||
+		strings.EqualFold(name, "wisp_dependencies") ||
+		strings.EqualFold(name, "wisp_comments")
 }
 
 // DepTargetExpr resolves a dependency row's target across the three

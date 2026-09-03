@@ -26,6 +26,10 @@ Text queries search titles. Use --all-fields to search the whole issue —
 title, ID, external ref, description, design, acceptance criteria, notes,
 close reason, and comments — with each hit annotated by the field it
 matched in. Use --desc-contains for description-only filtering.
+--all-fields is a full scan of the issues and comments tables (no index
+serves an unanchored substring match), so on a large database prefer a
+distinctive query, or narrow with --status / --label. When a default-scope
+search finds nothing, a one-line hint about --all-fields goes to stderr.
 Use --status open (etc.) to narrow; closed issues are included by default
 so "was this already filed/fixed?" cannot silently answer no. Matches
 beyond --limit are dropped status-blind, so when hunting live work in a
@@ -391,14 +395,18 @@ func allFieldsColumnValue(issue *types.Issue, col string) string {
 
 // outputSearchResults formats and displays search results. allFields controls
 // two --all-fields affordances: matched-in provenance on each hit, and — when
-// it is off and nothing matched — a hint that the wider scope exists, so a
-// title/ID miss cannot silently read as "nothing anywhere mentions this"
-// (GH#2883).
+// it is off and nothing matched — a hint on stderr that the wider scope
+// exists, so a title/ID miss cannot silently read as "nothing anywhere
+// mentions this" (GH#2883). The hint fires on any empty default-scope result,
+// including one narrowed to nothing by --status or --label; it is advice
+// about scope, not a claim about why the result is empty.
 func outputSearchResults(issues []*types.Issue, query string, longFormat bool, allFields bool) {
 	if len(issues) == 0 {
 		fmt.Printf("No issues found matching '%s'\n", query)
 		if !allFields {
-			fmt.Println("(searched title and ID only; retry with --all-fields to include description, notes, comments, and other text fields)")
+			// stderr, so a caller parsing text output sees no new stdout
+			// line; the hint is advice, not a result.
+			fmt.Fprintln(os.Stderr, "(searched title and ID only; retry with --all-fields to include description, notes, comments, and other text fields)")
 		}
 		return
 	}

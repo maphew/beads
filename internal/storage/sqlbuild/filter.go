@@ -397,9 +397,10 @@ var AllFieldsTextColumns = []string{
 // prefix for ID-like queries, substring otherwise — a superset of the default
 // clause's id handling), and a correlated comments-table subquery keyed by
 // issue_id, per this file's invariant. tables.Comments resolves to comments or
-// wisp_comments depending on the leg; note wisp_comments is NOT on the
-// OptionalWispTable tolerance list, so a wisps leg whose comments table is
-// missing fails loud rather than silently narrowing the search. (GH#2883)
+// wisp_comments depending on the leg; wisp_comments is on the OptionalWispTable
+// tolerance list because the schema migrations allow a database with wisps
+// but no wisp_comments, and that shape must not turn --all-fields into a hard
+// error where the default search works. (GH#2883)
 func allFieldsQueryClause(query string, tables FilterTables) (string, []any) {
 	lowerQuery := strings.ToLower(query)
 	pattern := containsLikePattern(lowerQuery)

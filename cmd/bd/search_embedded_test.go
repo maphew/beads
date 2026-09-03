@@ -26,6 +26,21 @@ func bdSearch(t *testing.T, bd, dir string, args ...string) string {
 	return stdout.String()
 }
 
+// bdSearchStreams runs "bd search" and returns stdout and stderr separately,
+// for assertions about which stream a line lands on.
+func bdSearchStreams(t *testing.T, bd, dir string, args ...string) (string, string) {
+	t.Helper()
+	fullArgs := append([]string{"search"}, args...)
+	cmd := exec.Command(bd, fullArgs...)
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	stdout, stderr, err := runCommandBuffers(t, cmd)
+	if err != nil {
+		t.Fatalf("bd search %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
+	}
+	return stdout.String(), stderr.String()
+}
+
 // bdSearchFail runs "bd search" and returns combined output from an expected failure.
 func bdSearchFail(t *testing.T, bd, dir string, args ...string) string {
 	t.Helper()
@@ -510,13 +525,21 @@ func TestEmbeddedSearch(t *testing.T) {
 	})
 
 	t.Run("empty_result_hints_at_all_fields", func(t *testing.T) {
-		out := bdSearch(t, bd, dir, "quorbex flimzil")
-		if !strings.Contains(out, "--all-fields") {
-			t.Errorf("empty default-scope result should hint at --all-fields, got:\n%s", out)
+		// The hint is advice, not a result: it goes to stderr so a caller
+		// parsing text output sees no new stdout line (PR review).
+		out, errOut := bdSearchStreams(t, bd, dir, "quorbex flimzil")
+		if !strings.Contains(errOut, "--all-fields") {
+			t.Errorf("empty default-scope result should hint at --all-fields on stderr, got stderr:\n%s", errOut)
 		}
-		outAll := bdSearch(t, bd, dir, "zz-nonexistent-zz", "--all-fields")
-		if strings.Contains(outAll, "retry with --all-fields") {
-			t.Errorf("hint must not appear when --all-fields already set, got:\n%s", outAll)
+		if strings.Contains(out, "--all-fields") {
+			t.Errorf("hint must not land on stdout, got stdout:\n%s", out)
+		}
+		if !strings.Contains(out, "No issues found") {
+			t.Errorf("stdout should still carry the no-results line, got:\n%s", out)
+		}
+		outAll, errAll := bdSearchStreams(t, bd, dir, "zz-nonexistent-zz", "--all-fields")
+		if strings.Contains(outAll+errAll, "retry with --all-fields") {
+			t.Errorf("hint must not appear when --all-fields already set, got stdout:\n%s\nstderr:\n%s", outAll, errAll)
 		}
 	})
 
