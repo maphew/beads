@@ -176,7 +176,7 @@ func CreateIssueFromFormValues(ctx context.Context, s storage.DoltStorage, fv *c
 		}
 
 		if err := validateDependencyType(canonicalDependencyType(rawType)); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: invalid dependency type '%s' (valid: blocks, related, parent-child, discovered-from)\n", rawType)
+			fmt.Fprintf(os.Stderr, "Warning: invalid dependency type '%s' (valid: %s)\n", rawType, createDepsAcceptedTypeList())
 			continue
 		}
 
@@ -198,7 +198,7 @@ func CreateIssueFromFormValues(ctx context.Context, s storage.DoltStorage, fv *c
 		spec.SwapDirection = false
 		depEntries = append(depEntries, depSpecEntry{spec: spec, rawType: rawType})
 	}
-	depSpecs, err := dedupeDepSpecs(depEntries)
+	depSpecs, err := dedupeDepSpecs(dropConflictingFormDeps(depEntries))
 	if err != nil {
 		return nil, err
 	}
@@ -227,6 +227,34 @@ func CreateIssueFromFormValues(ctx context.Context, s storage.DoltStorage, fv *c
 	}
 
 	return issue, nil
+}
+
+// dropConflictingFormDeps applies the form's lenient posture to the
+// same-target/different-type collision that dedupeDepSpecs rejects. On the
+// `bd create --deps` path a hard failure is right: the caller re-runs with the
+// flag fixed. In the interactive form the user has already typed every field,
+// and an error at this point throws all of it away (review on #5648), so the
+// form keeps the FIRST entry for each target, warns with the spellings as
+// typed, and drops the rest. Identical repeats (e.g. blocked-by and depends-on
+// both normalizing to blocks) are left for dedupeDepSpecs to collapse.
+func dropConflictingFormDeps(entries []depSpecEntry) []depSpecEntry {
+	seen := make(map[string]depSpecEntry, len(entries))
+	kept := make([]depSpecEntry, 0, len(entries))
+	for _, e := range entries {
+		key := fmt.Sprintf("%t|%s", e.spec.SwapDirection, e.spec.TargetID)
+		prev, ok := seen[key]
+		switch {
+		case !ok:
+			seen[key] = e
+			kept = append(kept, e)
+		case prev.spec.Type != e.spec.Type:
+			fmt.Fprintf(os.Stderr, "Warning: dropping %q on %s: it already carries %q and a target can only carry one dependency type at a time (GH#4626)\n",
+				e.rawType, e.spec.TargetID, prev.rawType)
+		default:
+			kept = append(kept, e)
+		}
+	}
+	return kept
 }
 
 var createFormCmd = &cobra.Command{

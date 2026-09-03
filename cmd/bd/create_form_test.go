@@ -583,8 +583,11 @@ func TestCreateIssueFromFormValues(t *testing.T) {
 
 	// GH#4626/#4833: two form Deps entries with different types targeting the
 	// same issue used to silently keep only one edge. `bd create --deps`
-	// hard-fails this case via dedupeDepSpecs; the form path must now match.
-	t.Run("SameTargetDifferentTypeConflictRejected", func(t *testing.T) {
+	// hard-fails this case via dedupeDepSpecs; the form instead warns and
+	// keeps the FIRST entry for that target, because an error here would
+	// discard everything the user already typed into the form (review on
+	// #5648). Either way the collision is no longer silent.
+	t.Run("SameTargetDifferentTypeConflictWarnsAndKeepsFirst", func(t *testing.T) {
 		targetFv := &createFormValues{
 			Title:     "Conflict target",
 			Priority:  1,
@@ -595,35 +598,39 @@ func TestCreateIssueFromFormValues(t *testing.T) {
 			t.Fatalf("failed to create target: %v", err)
 		}
 
-		childFv := &createFormValues{
-			Title:     "Conflict child",
-			Priority:  1,
-			IssueType: "task",
-			// "blocked-by" is the raw spelling the user typed; the error
-			// must report it, not the canonical type it normalizes to.
-			Dependencies: []string{"discovered-from:" + target.ID, "blocked-by:" + target.ID},
-		}
-		_, err = CreateIssueFromFormValues(ctx, s, childFv, "test")
-		if err == nil {
-			t.Fatal("expected same-target-different-type conflict to be rejected, got nil error")
-		}
-		if !strings.Contains(err.Error(), "blocked-by") {
-			t.Errorf("conflict error should carry the raw typed spelling %q, got: %v", "blocked-by", err)
-		}
-		if strings.Contains(err.Error(), "discovered-from") == false {
-			t.Errorf("conflict error should also name the other side's typed spelling, got: %v", err)
-		}
+		// "blocked-by" is the raw spelling the user typed; the warning must
+		// report it, not the canonical type it normalizes to.
+		stderr := captureStderr(t, func() {
+			childFv := &createFormValues{
+				Title:        "Conflict child",
+				Priority:     1,
+				IssueType:    "task",
+				Dependencies: []string{"discovered-from:" + target.ID, "blocked-by:" + target.ID},
+			}
+			child, err := CreateIssueFromFormValues(ctx, s, childFv, "test")
+			if err != nil {
+				t.Fatalf("form should warn and keep the first entry on a same-target-different-type conflict, got error: %v", err)
+			}
 
-		// The conflict is caught by parseDepSpecs before CreateIssueFromFormValues
-		// calls createIssueWithDeps, so no issue row is ever written for this
-		// case — unlike the atomic-rollback contract createIssueWithDeps itself
-		// guarantees for failures discovered after the write starts.
-		results, searchErr := s.SearchIssues(ctx, "Conflict child", types.IssueFilter{})
-		if searchErr != nil {
-			t.Fatalf("failed to search issues: %v", searchErr)
+			deps, err := s.GetDependenciesWithMetadata(ctx, child.ID)
+			if err != nil {
+				t.Fatalf("failed to get dependencies: %v", err)
+			}
+			var got []types.DependencyType
+			for _, d := range deps {
+				if d.ID == target.ID {
+					got = append(got, d.DependencyType)
+				}
+			}
+			if len(got) != 1 || got[0] != types.DepDiscoveredFrom {
+				t.Errorf("expected exactly one %q edge to %s (the first entry wins), got %v", types.DepDiscoveredFrom, target.ID, got)
+			}
+		})
+		if !strings.Contains(stderr, "blocked-by") {
+			t.Errorf("conflict warning should carry the raw typed spelling %q, got: %q", "blocked-by", stderr)
 		}
-		if len(results) != 0 {
-			t.Errorf("issue \"Conflict child\" persisted despite rejected same-target-different-type deps: %+v", results)
+		if !strings.Contains(stderr, "discovered-from") {
+			t.Errorf("conflict warning should also name the kept side's typed spelling, got: %q", stderr)
 		}
 	})
 
