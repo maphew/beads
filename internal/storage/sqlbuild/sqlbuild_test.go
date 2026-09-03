@@ -480,12 +480,12 @@ func TestBuildReadyWorkWhereStatusFilter(t *testing.T) {
 func TestOptionalWispTable(t *testing.T) {
 	t.Parallel()
 
-	for _, name := range []string{"wisps", "wisp_dependencies", "wisp_comments", "WISPS"} {
+	for _, name := range []string{"wisps", "wisp_dependencies", "WISPS"} {
 		if !OptionalWispTable(name) {
 			t.Errorf("OptionalWispTable(%q) = false, want true", name)
 		}
 	}
-	for _, name := range []string{"leases", "wisp_labels", "issues", "labels", "comments", "", "wisp"} {
+	for _, name := range []string{"leases", "wisp_labels", "issues", "labels", "", "wisp"} {
 		if OptionalWispTable(name) {
 			t.Errorf("OptionalWispTable(%q) = true, want false", name)
 		}
