@@ -296,12 +296,29 @@ func rejectFilePath(sourcePath string) string {
 //
 // The file is rewritten (not appended) so it always describes the most recent
 // import of that source rather than accumulating across runs. When this run has
-// nothing to quarantine, any file a previous run left at path is removed rather
-// than left in place: a leftover quarantine file from an earlier, worse import
-// would otherwise sit there looking current after a rerun that fixed every
-// record. wrote reports whether path holds this run's content, so callers only
-// advertise the path (JSON/stderr) when it does.
-func writeRejectFile(path string, rejected []rejectedRecord) (wrote bool, err error) {
+// nothing to quarantine the stale file a previous run left at path is handled
+// according to who named it:
+//
+//   - explicit (a user-supplied --rejects path): truncate to zero bytes. Unlinking
+//     would silently delete an unrelated file on a clean import — the flag help
+//     promises only "write skipped invalid records to this file", and nothing
+//     tells the user the path is a bd-managed file that gets unlinked.
+//   - implicit (rejectFilePath(), i.e. <source>.rejected.jsonl): unlink. This path
+//     is bd-owned, derived from the import source, so removing it is safe, and an
+//     empty file there cannot look current either.
+//
+// Either way the goal of not leaving a stale quarantine behind is preserved
+// without a user-named file disappearing. wrote reports whether path holds this
+// run's content, so callers only advertise the path (JSON/stderr) when it does.
+//
+// The write itself still goes through a temp file + rename (see below), so a
+// pre-existing SYMLINK at path is replaced as a link rather than followed — the
+// implicit callers have no CLI collision guard in front of this write, so
+// following a planted link would truncate an unrelated file. The truncation
+// branch above is the one place os.WriteFile is used deliberately: it targets a
+// path the user named, and only when there is nothing to quarantine, so the
+// symlink-replacement guarantee is unaffected.
+func writeRejectFile(path string, rejected []rejectedRecord, explicit bool) (wrote bool, err error) {
 	if path == "" {
 		return false, nil
 	}
@@ -316,7 +333,11 @@ func writeRejectFile(path string, rejected []rejectedRecord) (wrote bool, err er
 		n++
 	}
 	if n == 0 {
-		if rmErr := os.Remove(path); rmErr != nil && !os.IsNotExist(rmErr) {
+		if explicit {
+			if werr := os.WriteFile(path, nil, 0o600); werr != nil {
+				return false, fmt.Errorf("clearing stale %s: %w", path, werr)
+			}
+		} else if rmErr := os.Remove(path); rmErr != nil && !os.IsNotExist(rmErr) {
 			return false, fmt.Errorf("removing stale %s: %w", path, rmErr)
 		}
 		return false, nil

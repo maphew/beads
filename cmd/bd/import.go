@@ -284,10 +284,13 @@ func runImportFromReader(ctx context.Context, r io.Reader, source string, source
 			var invalid []rejectedRecord
 			issues, invalid = partitionImportRecords(issues, sources, customStatuses, customTypes)
 			rejected = append(rejected, invalid...)
-		} else if importSkipInvalid {
+		} else {
 			// Without the vocabulary a custom status is indistinguishable
 			// from a typo, so leave the batch alone and let the writer's
-			// error stand (mirrors the classic branch below).
+			// error stand. Say so regardless of mode: in strict mode the
+			// pre-filter stood down silently and the user got the old
+			// opaque batch abort with no hint about why the new machinery
+			// was not used (cross-vendor review NIT-5).
 			fmt.Fprintf(os.Stderr, "warning: skipping import pre-validation: %v\n", vocabErr)
 		}
 		rejects, rerr := resolveImportRejects(rejected, source, sourceFilePath)
@@ -309,9 +312,13 @@ func runImportFromReader(ctx context.Context, r io.Reader, source string, source
 		var invalid []rejectedRecord
 		issues, invalid = partitionImportRecords(issues, sources, customStatuses, customTypes)
 		rejected = append(rejected, invalid...)
-	} else if importSkipInvalid {
-		// Without the vocabulary a custom status is indistinguishable from a
-		// typo, so leave the batch alone and let the writer's error stand.
+	} else {
+		// Without the vocabulary a custom status is indistinguishable
+		// from a typo, so leave the batch alone and let the writer's
+		// error stand. Say so regardless of mode: in strict mode the
+		// pre-filter stood down silently and the user got the old
+		// opaque batch abort with no hint about why the new machinery
+		// was not used (cross-vendor review NIT-5).
 		fmt.Fprintf(os.Stderr, "warning: skipping import pre-validation: %v\n", vocabErr)
 	}
 	rejects, rerr := resolveImportRejects(rejected, source, sourceFilePath)
@@ -357,7 +364,10 @@ func resolveImportRejects(rejected []rejectedRecord, source, sourceFilePath stri
 	rejectsWritten := false
 	if !importDryRun {
 		var werr error
-		rejectsWritten, werr = writeRejectFile(rejectPath, rejected)
+		// --rejects is a path the user named, so a clean run truncates it
+		// rather than unlinking it: removing it would silently delete an
+		// unrelated file (cross-vendor review finding).
+		rejectsWritten, werr = writeRejectFile(rejectPath, rejected, true)
 		if werr != nil {
 			return importRejectOutcome{}, werr
 		}

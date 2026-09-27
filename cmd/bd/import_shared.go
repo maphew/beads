@@ -1525,11 +1525,14 @@ func importFromLocalJSONLWithOpts(ctx context.Context, store storage.DoltStorage
 	} else {
 		// Without the vocabulary we cannot tell a custom status from a typo, so
 		// leave the batch alone and let the writer's error stand as before.
+		// Say so regardless of mode: in strict mode the pre-filter stood down
+		// silently and the user got the old opaque batch abort with no hint
+		// about why the new machinery was not used.
 		fmt.Fprintf(os.Stderr, "warning: skipping import pre-validation: %v\n", vocabErr)
 	}
 	rejected = orderRejects(rejected)
 	quarantine := rejectFilePath(localPath)
-	wrote, werr := writeRejectFile(quarantine, rejected)
+	wrote, werr := writeRejectFile(quarantine, rejected, false)
 	if werr != nil {
 		fmt.Fprintf(os.Stderr, "warning: %v\n", werr)
 		quarantine = ""

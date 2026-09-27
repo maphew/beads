@@ -302,7 +302,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `rejects_written_to`. Whole-database restore paths (`bd bootstrap`,
   `bd init --from-jsonl`, upgrade auto-import) keep failing loudly on corrupt
   lines but no longer let one writer-refused row discard the rest of the file.
-  A dry run no longer writes (or removes) the `--rejects` file.
+  A dry run no longer writes (or removes) the `--rejects` file. The strict
+  default now also runs on a dry run, so `bd import --dry-run
+  file-with-one-bad-status.jsonl` exits nonzero where it previously printed a
+  plan and exited 0 — a dry run predicts the real run, and validation never
+  ran on the old path. The `--rejects` path is truncated (not unlinked) when a
+  clean run has nothing to quarantine, so a user-named file is never silently
+  deleted; `.beads/*.rejected.jsonl` is gitignored.
 
 - **Disabling telemetry no longer strands the queued eventsData backlog
   forever** (GH#5712). `bd send-metrics` early-returned on disabled metrics

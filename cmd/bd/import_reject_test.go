@@ -222,7 +222,7 @@ func TestWriteRejectFileIsVerbatimAndRewrites(t *testing.T) {
 		{Line: 1, raw: `{"a":1}`},
 		{Line: 2, raw: ""}, // no captured source — must be skipped, not invented
 		{Line: 3, raw: `{"b":2}`},
-	})
+	}, false)
 	if err != nil {
 		t.Fatalf("writeRejectFile: %v", err)
 	}
@@ -239,7 +239,7 @@ func TestWriteRejectFileIsVerbatimAndRewrites(t *testing.T) {
 
 	// A later import of the same source must describe that import, not append
 	// to the previous one.
-	if wrote, err := writeRejectFile(path, []rejectedRecord{{Line: 1, raw: `{"c":3}`}}); err != nil {
+	if wrote, err := writeRejectFile(path, []rejectedRecord{{Line: 1, raw: `{"c":3}`}}, false); err != nil {
 		t.Fatalf("writeRejectFile (rewrite): %v", err)
 	} else if !wrote {
 		t.Fatalf("writeRejectFile (rewrite) wrote = false, want true")
@@ -255,46 +255,61 @@ func TestWriteRejectFileIsVerbatimAndRewrites(t *testing.T) {
 
 func TestWriteRejectFileSkipsWhenNothingCaptured(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "rejects.jsonl")
-	wrote, err := writeRejectFile(path, []rejectedRecord{{Line: 1, raw: "  "}})
+	wrote, err := writeRejectFile(path, []rejectedRecord{{Line: 1, raw: "  "}}, true)
 	if err != nil {
 		t.Fatalf("writeRejectFile: %v", err)
 	}
 	if wrote {
 		t.Fatalf("writeRejectFile wrote = true, want false: no record had captured raw text")
 	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatalf("expected no quarantine file when no raw line was captured, stat err = %v", err)
+	// Nothing was captured, so the quarantine is an empty file rather than no
+	// file: truncating (not unlinking) is what keeps a user-named --rejects
+	// path from deleting an unrelated file on a clean import.
+	data, rerr := os.ReadFile(path)
+	if rerr != nil {
+		t.Fatalf("ReadFile: %v", rerr)
+	}
+	if len(data) != 0 {
+		t.Fatalf("quarantine = %q, want empty", string(data))
 	}
 }
 
 // bd review (dual-vendor pass on PR 5202): a rerun that produces zero rejects
 // must not leave a stale rejects file from a previous run in place looking
-// current.
-func TestWriteRejectFileRemovesStaleFileWhenNothingToWrite(t *testing.T) {
+// current. The handling differs by who named the path.
+func TestWriteRejectFileClearsStaleFileWhenNothingToWrite(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "rejects.jsonl")
-	if wrote, err := writeRejectFile(path, []rejectedRecord{{Line: 1, raw: `{"a":1}`}}); err != nil || !wrote {
+	if wrote, err := writeRejectFile(path, []rejectedRecord{{Line: 1, raw: `{"a":1}`}}, true); err != nil || !wrote {
 		t.Fatalf("writeRejectFile (seed): wrote=%v err=%v, want true/nil", wrote, err)
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("seed file missing: %v", err)
 	}
 
-	// A rerun with nothing to quarantine (empty batch, or every raw text
-	// uncaptured) must remove the stale file rather than leave it behind.
-	wrote, err := writeRejectFile(path, nil)
+	// An explicit --rejects path is truncated to zero bytes, not unlinked:
+	// removing it would silently delete an unrelated file on a clean import.
+	wrote, err := writeRejectFile(path, nil, true)
 	if err != nil {
 		t.Fatalf("writeRejectFile (rerun): %v", err)
 	}
 	if wrote {
 		t.Fatalf("writeRejectFile (rerun) wrote = true, want false: nothing to write")
 	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatalf("stale rejects file still present after a clean rerun, stat err = %v", err)
+	data, rerr := os.ReadFile(path)
+	if rerr != nil {
+		t.Fatalf("ReadFile: %v", rerr)
+	}
+	if len(data) != 0 {
+		t.Fatalf("stale rejects file not cleared, content = %q", string(data))
 	}
 
-	// Removing a file that was never there is not an error.
-	if wrote, err := writeRejectFile(path, nil); err != nil || wrote {
+	// An implicit <source>.rejected.jsonl path is unlinked: bd owns it, and an
+	// empty file there cannot look current either.
+	if wrote, err := writeRejectFile(path, nil, false); err != nil || wrote {
 		t.Fatalf("writeRejectFile (no file, nothing to write): wrote=%v err=%v, want false/nil", wrote, err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("implicit rejects file still present after a clean rerun, stat err = %v", err)
 	}
 }
 
@@ -572,6 +587,32 @@ func TestResolveImportRejectsDryRunLeavesRejectsFileAlone(t *testing.T) {
 			t.Errorf("pre-existing rejects file content changed: %q", string(data))
 		}
 	})
+
+	t.Run("strict mode with one reject errors before touching the filesystem", func(t *testing.T) {
+		// The default-polarity decision (strict by default, --skip-invalid opts
+		// in) is the whole point of this PR, and until now nothing running
+		// outside the proxied harness pinned it: dropping the strict gate at
+		// cmd/bd/import.go:337 left this entire 24-test set green (cross-vendor
+		// review NIT-1). resolveImportRejects is shared by both routes, so a
+		// unit test here covers the decision cheaply.
+		importDryRun = false
+		importSkipInvalid = false
+		importRejects = ""
+
+		rejects := []rejectedRecord{
+			{Line: 3, Reason: "bad status", Kind: rejectValidate, raw: `{"id":"x"}`},
+		}
+		outcome, err := resolveImportRejects(rejects, "fixture.jsonl", "")
+		if err == nil {
+			t.Fatalf("resolveImportRejects: want strict-mode error, got nil (outcome = %+v)", outcome)
+		}
+		if len(outcome.rejected) != 0 {
+			t.Errorf("outcome.rejected = %d, want 0 (strict failure returns no outcomes)", len(outcome.rejected))
+		}
+		if outcome.writtenTo != "" {
+			t.Errorf("writtenTo = %q, want empty (strict failure must not write)", outcome.writtenTo)
+		}
+	})
 }
 
 // TestPartitionImportRecordsRejectsOverlengthLabel pins the label half of
@@ -622,7 +663,7 @@ func TestWriteRejectFileHardening(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		wrote, err := writeRejectFile(link, rejects)
+		wrote, err := writeRejectFile(link, rejects, false)
 		if err != nil || !wrote {
 			t.Fatalf("writeRejectFile = (%v, %v), want (true, nil)", wrote, err)
 		}
@@ -643,7 +684,7 @@ func TestWriteRejectFileHardening(t *testing.T) {
 		if err := os.WriteFile(path, []byte("old\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		wrote, err := writeRejectFile(path, rejects)
+		wrote, err := writeRejectFile(path, rejects, true)
 		if err != nil || !wrote {
 			t.Fatalf("writeRejectFile = (%v, %v), want (true, nil)", wrote, err)
 		}
@@ -653,6 +694,39 @@ func TestWriteRejectFileHardening(t *testing.T) {
 		}
 		if fi.Mode().Perm() != 0o600 {
 			t.Errorf("quarantine mode = %o, want 0600 (rewrite must not inherit the old lax mode)", fi.Mode().Perm())
+		}
+	})
+
+	t.Run("explicit path with nothing to write is truncated, not unlinked", func(t *testing.T) {
+		dir := t.TempDir()
+		// A file the user named that has nothing to do with the import.
+		precious := filepath.Join(dir, "notes.md")
+		const keep = "do not delete me\n"
+		if err := os.WriteFile(precious, []byte(keep), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if fi, err := os.Stat(precious); err != nil || !fi.Mode().IsRegular() {
+			t.Fatalf("seed: %v", err)
+		}
+
+		// A clean import (zero rejects) with an explicit --rejects path must
+		// not unlink the file: it truncates to zero bytes instead. Unlinking
+		// here would silently delete an unrelated file (cross-vendor review
+		// MAJOR-1).
+		wrote, err := writeRejectFile(precious, nil, true)
+		if err != nil || wrote {
+			t.Fatalf("writeRejectFile = (%v, %v), want (false, nil)", wrote, err)
+		}
+		data, rerr := os.ReadFile(precious)
+		if rerr != nil {
+			t.Fatalf("ReadFile: %v", rerr)
+		}
+		if len(data) != 0 {
+			t.Errorf("quarantine = %q, want empty (truncated, not unlinked)", string(data))
+		}
+		// The path still exists, so a subsequent import can still write to it.
+		if fi, err := os.Stat(precious); err != nil || !fi.Mode().IsRegular() || fi.Size() != 0 {
+			t.Errorf("path not a regular empty file: stat err=%v size=%d", err, fi.Size())
 		}
 	})
 }
