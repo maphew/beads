@@ -812,6 +812,8 @@ never reused, per the v1.1.1 precedent.)
   mid-batch half reading the graph back at zero edges. `RemoveDependency` is
   unaffected: a removal that finds no edge is a success, not a refusal.
 
+### Changed
+
 - **Text-input commands now REFUSE two sources instead of silently picking
   one** (#5332). `bd comment`, `bd note` and `bd comments add` used to apply a
   precedence order when a caller gave both positional text and `--stdin` or
