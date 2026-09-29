@@ -341,7 +341,7 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 		return false, fmt.Errorf("failed to check existing dependency: %w", err)
 	}
 
-	createdAt := dependencyCreatedAt(dep)
+	createdAt := DependencyCreatedAt(dep)
 
 	// id is derived deterministically from the natural edge key (issue_id,
 	// target) so the same edge gets the same primary key on every clone and the
