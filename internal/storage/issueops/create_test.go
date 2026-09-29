@@ -69,7 +69,10 @@ func TestPersistCommentsNormalizesImportedTimestampToUTC(t *testing.T) {
 	ctx := context.Background()
 	db, mock, tx := beginMockTx(t)
 	defer db.Close()
-	createdAt := offsetTime(t, "2026-07-11T18:42:00+10:00")
+	// Sub-second parts on purpose: comments.created_at is second-granular, so the
+	// stored text drops them and the returned EventComment must agree with the row
+	// rather than keeping a precision the column cannot hold.
+	createdAt := offsetTime(t, "2026-07-11T18:42:00.123456789+10:00")
 	wantUTCText := FormatAuxTime(createdAt)
 	if want := "2026-07-11 08:42:00"; wantUTCText != want {
 		t.Fatalf("FormatAuxTime = %q, want %q", wantUTCText, want)
@@ -91,6 +94,21 @@ func TestPersistCommentsNormalizesImportedTimestampToUTC(t *testing.T) {
 	}
 	if !result.ChangedTables["comments"] {
 		t.Fatalf("ChangedTables = %#v, want comments changed", result.ChangedTables)
+	}
+	// persistedComments is the branch's only distinct observable: it is marshalled
+	// into bd_events_journal.comment_json, so an un-normalized value ships to a
+	// durable surface no SQL-argument assertion can see. It must match the stored
+	// row exactly -- UTC, second-granular.
+	if len(result.persistedComments) != 1 {
+		t.Fatalf("persistedComments = %d, want 1", len(result.persistedComments))
+	}
+	got := result.persistedComments[0].CreatedAt
+	if got.Location() != time.UTC {
+		t.Errorf("persistedComments[0].CreatedAt location = %v, want UTC", got.Location())
+	}
+	if want := createdAt.UTC().Truncate(time.Second); !got.Equal(want) {
+		t.Errorf("persistedComments[0].CreatedAt = %s, want %s (the stored row's value)",
+			got.Format(time.RFC3339Nano), want.Format(time.RFC3339Nano))
 	}
 	mock.ExpectRollback()
 	if err := tx.Rollback(); err != nil {
@@ -330,16 +348,25 @@ func TestPersistDependenciesClassifiesBareCrossPrefixTargetAsExternal(t *testing
 
 func TestDependencyCreatedAtNormalizesToUTC(t *testing.T) {
 	createdAt := offsetTime(t, "2026-07-11T18:41:00+10:00")
-	got := dependencyCreatedAt(&types.Dependency{CreatedAt: createdAt})
+	got := DependencyCreatedAt(&types.Dependency{CreatedAt: createdAt})
 	if got.Location() != time.UTC {
 		t.Fatalf("Location = %v, want UTC", got.Location())
 	}
 	if want := "2026-07-11T08:41:00Z"; got.Format(time.RFC3339) != want {
-		t.Fatalf("dependencyCreatedAt = %s, want %s", got.Format(time.RFC3339), want)
+		t.Fatalf("DependencyCreatedAt = %s, want %s", got.Format(time.RFC3339), want)
+	}
+
+	// dependencies.created_at is DATETIME with no fractional-seconds precision, so
+	// the helper truncates rather than letting the server round a sub-second bind.
+	subSecond := offsetTime(t, "2026-07-11T18:41:00.987654321+10:00")
+	truncated := DependencyCreatedAt(&types.Dependency{CreatedAt: subSecond})
+	if want := subSecond.UTC().Truncate(time.Second); !truncated.Equal(want) {
+		t.Fatalf("DependencyCreatedAt = %s, want %s (truncated to the second)",
+			truncated.Format(time.RFC3339Nano), want.Format(time.RFC3339Nano))
 	}
 
 	before := time.Now().UTC().Add(-time.Second)
-	defaulted := dependencyCreatedAt(&types.Dependency{})
+	defaulted := DependencyCreatedAt(&types.Dependency{})
 	after := time.Now().UTC().Add(time.Second)
 	if defaulted.Before(before) || defaulted.After(after) || defaulted.Location() != time.UTC {
 		t.Fatalf("default dependency time = %v, want current UTC instant", defaulted)
@@ -376,7 +403,9 @@ func TestAddDependencyInTxBindsCreatedAtUTC(t *testing.T) {
 		db, mock, tx := beginMockTx(t)
 		defer db.Close()
 		dep := &types.Dependency{IssueID: "source", DependsOnID: "target", Type: types.DepRelated}
-		before := time.Now().UTC()
+		// Truncated because the default is truncated to the second too, so an
+		// un-truncated lower bound would sit up to a second after the bound value.
+		before := time.Now().UTC().Truncate(time.Second)
 		createdAt := utcTimeBetween{before: before, after: before.Add(5 * time.Second)}
 
 		expectAddDependencyInsert(mock, dep, createdAt)
@@ -394,7 +423,7 @@ func expectAddDependencyInsert(mock sqlmock.Sqlmock, dep *types.Dependency, crea
 	mock.ExpectQuery("SELECT issue_type FROM issues WHERE id = \\?").
 		WithArgs(dep.DependsOnID).
 		WillReturnRows(sqlmock.NewRows([]string{"issue_type"}).AddRow(types.TypeTask))
-	mock.ExpectQuery("SELECT type FROM dependencies").
+	mock.ExpectQuery("SELECT type, metadata FROM dependencies").
 		WithArgs(dep.IssueID, dep.DependsOnID).
 		WillReturnError(sql.ErrNoRows)
 	mock.ExpectExec("INSERT INTO dependencies").
