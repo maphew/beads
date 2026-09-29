@@ -3017,6 +3017,16 @@ func TestCheckGitignore_WarnsOnLoosePermsWhenPatternComplete(t *testing.T) {
 	if check.Status != "warning" {
 		t.Fatalf("Status = %q, want %q (pattern-complete file at 0644 must warn so doctor --fix schedules FixGitignore)", check.Status, "warning")
 	}
+	// Pin the warning to the permission branch. CheckGitignore also warns for a
+	// missing file and for missing patterns, so asserting only that *a* warning
+	// fired would keep this test green for the wrong reason if GitignoreTemplate
+	// ever drifted out of requiredPatterns and the pattern branch returned first.
+	if check.Message != "Unexpected permissions on .beads/.gitignore" {
+		t.Errorf("Message = %q, want the permission-branch warning", check.Message)
+	}
+	if !strings.Contains(check.Detail, "0644") {
+		t.Errorf("Detail = %q, want the observed mode 0644", check.Detail)
+	}
 	if check.Fix == "" {
 		t.Error("expected a Fix suggestion for loose permissions")
 	}

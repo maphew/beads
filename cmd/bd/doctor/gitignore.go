@@ -180,7 +180,7 @@ func CheckGitignore(repoPath string) DoctorCheck {
 			return DoctorCheck{
 				Name:    "Gitignore",
 				Status:  "warning",
-				Message: "Loose permissions on .beads/.gitignore",
+				Message: "Unexpected permissions on .beads/.gitignore",
 				Detail:  fmt.Sprintf("Mode is %04o, want 0600", info.Mode().Perm()),
 				Fix:     "Run: bd doctor --fix or bd init (safe to re-run)",
 			}
@@ -240,8 +240,11 @@ func EnsureGitignoreForBeadsDir(beadsDir string) error {
 		return fmt.Errorf("ensure .beads/.gitignore: %w", err)
 	}
 
-	// Tighten permissions on pre-existing files: os.WriteFile's mode argument
-	// only applies at creation, and the file may predate the 0600 policy.
+	// Residual guard for the one case the hoisted block above cannot cover: if
+	// its os.Stat failed, no chmod ran. Either the file was removed between the
+	// ReadFile and that Stat -- os.WriteFile then creates it, and its 0600 mode
+	// argument is filtered by umask -- or it still exists at its old mode, which
+	// os.WriteFile leaves untouched. Both converge to 0600 here.
 	if err := os.Chmod(gitignorePath, 0600); err != nil {
 		return fmt.Errorf("chmod .beads/.gitignore: %w", err)
 	}
