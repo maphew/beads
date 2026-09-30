@@ -4,11 +4,13 @@ import (
 	"context"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/server"
 )
 
@@ -51,6 +53,67 @@ func TestWaitForServerReady_GreetedServerIsReady(t *testing.T) {
 	s := newGreetingTestServer(t)
 	require.NoError(t, waitForServerReady(context.Background(), s, time.Second))
 	require.EqualValues(t, 1, s.Snapshot().AcceptedConns)
+}
+
+// TestWaitForServerReady_SlowExternalGreetingIsReady covers an external
+// upstream whose greeting lands after DrainAndCloseProbe's 100ms loopback
+// window, as it does from a remote host where the greeting trails the dial by
+// a round trip. The probe must wait for it within the dial budget instead of
+// reading a healthy upstream as mute on every retry.
+func TestWaitForServerReady_SlowExternalGreetingIsReady(t *testing.T) {
+	t.Parallel()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+	var accepts atomic.Int32
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			accepts.Add(1)
+			go func() {
+				defer func() { _ = conn.Close() }()
+				time.Sleep(300 * time.Millisecond)
+				_, _ = conn.Write(proxyTestGreeting)
+			}()
+		}
+	}()
+
+	upstream, err := server.NewExternalDoltServer(configfile.ExternalDoltConfig{
+		Host: "127.0.0.1",
+		Port: ln.Addr().(*net.TCPAddr).Port,
+	})
+	require.NoError(t, err)
+	require.NoError(t, upstream.Start(context.Background()))
+
+	require.NoError(t, waitForServerReady(context.Background(), upstream, time.Second))
+	require.EqualValues(t, 1, accepts.Load(), "the first probe must wait out the slow greeting, not redial")
+}
+
+// TestWaitForServerReady_CancelEndsGreetingWait proves the dial-sized
+// greeting wait still honors cancellation: a stop or signal aborts the ready
+// wait promptly rather than riding out the dial budget against a mute
+// upstream.
+func TestWaitForServerReady_CancelEndsGreetingWait(t *testing.T) {
+	t.Parallel()
+
+	s := server.New()
+	s.Handler = server.DiscardHandler
+	require.NoError(t, s.Start(context.Background()))
+	t.Cleanup(func() { _ = s.Stop(context.Background()) })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	time.AfterFunc(100*time.Millisecond, cancel)
+	started := time.Now()
+	err := waitForServerReady(ctx, s, serverReadyTimeout)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Less(t, time.Since(started), readyDialTimeout/2,
+		"cancellation must end the greeting wait, not ride out the dial budget")
+	require.EqualValues(t, 1, s.Snapshot().AcceptedConns, "the cancellation must land during the first probe's greeting wait")
 }
 
 // closeHookConn invalidates a readiness condition precisely when the probe
