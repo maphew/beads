@@ -44,6 +44,10 @@ func TestDetermineAutoRoutedRepoPath_ContributorToPlanning(t *testing.T) {
 	if err := os.Chdir(repoDir); err != nil {
 		t.Fatalf("chdir repoDir: %v", err)
 	}
+	// Role detection reads the process-wide RepoContext cache, which an
+	// earlier test in this binary may have built for its own, now-deleted
+	// repo. Rebuild it from repoDir.
+	resetRepoContextCachesForTest(t)
 
 	got, rule := determineAutoRoutedRepoPath(ctx, sourceStore)
 	if got != planningDir {
@@ -56,6 +60,12 @@ func TestDetermineAutoRoutedRepoPath_ContributorToPlanning(t *testing.T) {
 
 func TestDetermineAutoRoutedRepoPath_UsesSelectedBeadsDirRole(t *testing.T) {
 	initConfigForTest(t)
+	// Viper binds BEADS_ROUTING_MODE / BD_ROUTING_MODE onto the routing.mode
+	// key (internal/config), which outranks the routing.mode=auto this test
+	// writes into the store. Hosts that export either var (developer shells and
+	// agent runtimes do) would otherwise read routing.mode=off and get "." back.
+	t.Setenv("BEADS_ROUTING_MODE", "")
+	t.Setenv("BD_ROUTING_MODE", "")
 	beads.ResetCaches()
 	git.ResetCaches()
 	t.Cleanup(func() {
@@ -133,6 +143,10 @@ func TestDetermineAutoRoutedRepoPath_MaintainerToPlanning(t *testing.T) {
 	if err := os.Chdir(repoDir); err != nil {
 		t.Fatalf("chdir repoDir: %v", err)
 	}
+	// Role detection reads the process-wide RepoContext cache, which an
+	// earlier test in this binary may have built for its own, now-deleted
+	// repo. Rebuild it from repoDir.
+	resetRepoContextCachesForTest(t)
 
 	got, rule := determineAutoRoutedRepoPath(ctx, sourceStore)
 	if got != planningDir {
@@ -216,6 +230,10 @@ func TestOpenRoutedReadStore_ContributorRouting(t *testing.T) {
 	if err := os.Chdir(repoDir); err != nil {
 		t.Fatalf("chdir repoDir: %v", err)
 	}
+	// Role detection reads the process-wide RepoContext cache, which an
+	// earlier test in this binary may have built for its own, now-deleted
+	// repo. Rebuild it from repoDir.
+	resetRepoContextCachesForTest(t)
 
 	routedStore, routed, rule, err := openRoutedReadStore(ctx, sourceStore)
 	if err != nil {

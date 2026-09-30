@@ -472,7 +472,18 @@ func loadBeadsEnvFile(beadsDir string) {
 	if _, err := os.Stat(envFile); err != nil {
 		return
 	}
+	// A .env-provided BEADS_DIR is user-authored selection wherever it is
+	// imported from, not only via loadBeadsSelectionEnvFile: that loader
+	// early-returns whenever BEADS_DB or BD_DB is already exported
+	// (loadSelectionEnvironment), and this broad loader then imports the very
+	// same .env line. Marking provenance here keeps one .env line meaning one
+	// thing, instead of target-role or CWD-role depending on the caller's
+	// unrelated BEADS_DB export.
+	beadsDirWasSet := os.Getenv("BEADS_DIR") != ""
 	_ = gotenv.Load(envFile)
+	if !beadsDirWasSet && os.Getenv("BEADS_DIR") != "" {
+		beadsDirProvidedAtStartup = true
+	}
 }
 
 func logConfigDiscovery(beadsDir, reason string) {
