@@ -115,6 +115,9 @@ By default, shows only open gates. Use --all to include closed gates.`,
 		}
 
 		if jsonOutput {
+			if issues == nil {
+				issues = []*types.Issue{}
+			}
 			return outputJSON(issues)
 		}
 
