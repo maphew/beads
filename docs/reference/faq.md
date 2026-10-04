@@ -275,9 +275,7 @@ Beads is a single static binary with no runtime dependencies — the Dolt engine
 
 Yes, three ways: `bd query` for the built-in query language (compound filters, boolean operators, date expressions), `bd sql` for raw SQL against the underlying database, and `--json` output on every command for building integrations.
 
-When `bd sql` can prove a query is read-only, it skips automatic JSONL import,
-so after a `git pull` the query may show the database state from before the
-newly pulled JSONL was imported.
+When `bd sql` can prove a query is read-only, it opens the database read-only, as `bd list` and the other read commands do. Like them, it then skips the automatic JSONL import that fills an empty database.
 
 ### Does beads support Windows?
 

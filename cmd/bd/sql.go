@@ -37,6 +37,10 @@ committed batch and report "OK", and --database runs the query against a
 different server database (equivalent to a session USE) without changing the
 project's configured database.
 
+When the query is provably read-only (a single SELECT and similar), the database
+is opened read-only, as for 'bd list' and the other read commands. Like them, the
+query then skips the automatic JSONL import that fills an empty database.
+
 WARNING: Direct database access bypasses the storage layer. Use with caution.`,
 	Args:          cobra.ExactArgs(1),
 	SilenceUsage:  true,

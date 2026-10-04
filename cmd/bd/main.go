@@ -1640,19 +1640,6 @@ var rootCmd = &cobra.Command{
 		policy := effectiveRootStorePolicy(cmd.Name(), readonlyMode)
 		useReadOnly := policy.readOnly || previewMode
 
-		// `bd sql` with a single provably read-only statement opens the store
-		// read-only, matching the readOnlyCommands classification (GH#4121).
-		// The classifier is conservative: writes, multi-statement batches, and
-		// anything unrecognized keep the writable open, so write SQL behavior
-		// (including CheckReadonly) is unchanged. Proxied-server mode is
-		// unaffected in practice: its sql path runs through the UOW provider,
-		// not this store, and ReadOnly here matches what classified read
-		// commands like `bd list` already pass in that mode.
-		if sqlCommandWantsReadOnlyStore(cmd.Name(), args) {
-			useReadOnly = true
-			sqlOpenedReadOnly.Store(true)
-		}
-
 		// dc-6jaq: consult the migration freeze marker here, before any of
 		// this hook's own store-touching side effects — trackBdVersion below
 		// (writes .local_version), autoMigrateOnVersionBump (opens its own
@@ -1688,6 +1675,32 @@ var rootCmd = &cobra.Command{
 			if err := migrationFreezeGate(cmd, strings.TrimPrefix(cmd.CommandPath(), cmd.Root().Name()+" "), commandFreeze); err != nil {
 				return err
 			}
+		}
+
+		// `bd sql` with a single provably read-only statement opens the store
+		// read-only, matching the readOnlyCommands classification (GH#4121).
+		// The classifier is conservative: writes, multi-statement batches, and
+		// anything unrecognized keep the writable open, so write SQL behavior
+		// (including CheckReadonly) is unchanged. Proxied-server mode is
+		// unaffected in practice: its sql path runs through the UOW provider,
+		// not this store, and ReadOnly here matches what classified read
+		// commands like `bd list` already pass in that mode.
+		//
+		// Resolved deliberately BELOW the migration freeze gate, not beside
+		// the other read-only classifications above it. useReadOnly is that
+		// gate's skip condition, and the skip set the gate's own rationale
+		// enumerates is static — strict --readonly, the readOnlyCommands
+		// allowlist, an explicit preview — all decided by the invocation's
+		// shape before any query runs. Promoting the flag from SQL query TEXT
+		// above the gate would widen a fail-closed safety gate to admit
+		// `bd sql 'SELECT …'` during a freeze, a policy change this store-open
+		// optimization has no business making as a side effect. Nothing
+		// between the gate and the store open below reads useReadOnly, so the
+		// read-only open is unaffected by the later position.
+		// TestSQLBlockedDuringMigrationFreeze pins both halves.
+		if sqlCommandWantsReadOnlyStore(cmd.Name(), args) {
+			useReadOnly = true
+			sqlOpenedReadOnly.Store(true)
 		}
 
 		// dc-6jaq (review round 2, ask #1): a command classified read-only —

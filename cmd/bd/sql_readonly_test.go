@@ -54,13 +54,18 @@ func TestIsReadOnlySQLQuery(t *testing.T) {
 		{"dolt_reset", "SELECT DOLT_RESET('soft')", false},
 		{"dolt_checkout", "SELECT DOLT_CHECKOUT('feature')", false},
 		{"dolt_merge_qualified", "SELECT dolt.DOLT_MERGE('feature')", false},
-		// MySQL string escapes must not desync the CTE scanner (gate review P1):
-		// a backslash-escaped quote inside the CTE body previously lost the
-		// parenthesis depth and let a trailing DELETE classify read-only.
+		// An escaped quote inside a CTE body must not hide a trailing write.
+		// The backslash form is rejected by the backslash fail-closed check
+		// before sqlclass sees it; the doubled-quote form reaches sqlclass,
+		// which parses the CTE with the MySQL grammar and classifies by the
+		// main statement. (These cases predate that classifier: the
+		// hand-rolled CTE scanner it replaced once lost the parenthesis depth
+		// on the backslash form; see the note below this test.)
 		{"with_backslash_escape_delete", `WITH t AS (SELECT 'a\'(' AS x) DELETE FROM issues WHERE id = 'victim'`, false},
 		{"with_doubled_quote_escape_delete", `WITH t AS (SELECT 'a''(' AS x) DELETE FROM issues WHERE id = 'victim'`, false},
-		// Backslashes fail closed regardless of scanner correctness: escape
-		// semantics depend on server sql_mode (NO_BACKSLASH_ESCAPES).
+		// Backslashes fail closed even for a genuine read: escape semantics
+		// depend on the server's sql_mode (NO_BACKSLASH_ESCAPES), which is
+		// unknowable before the store opens.
 		{"with_backslash_escape_select", `WITH t AS (SELECT 'a\'(' AS x) SELECT * FROM t`, false},
 		{"with_doubled_quote_escape_select", `WITH t AS (SELECT 'a''(' AS x) SELECT * FROM t`, true},
 		// Comments fail closed: the pre-open gate stays stricter than the
