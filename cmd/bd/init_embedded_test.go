@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -23,7 +22,47 @@ import (
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/stretchr/testify/require"
 )
+
+func TestEmbeddedInitHooksRouting(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt init tests")
+	}
+	bd := buildEmbeddedBD(t)
+	target, decoy, home := newInitRoleFixture(t)
+	global := filepath.Join(home, ".gitconfig")
+	initRoleFixtureGit(t, target, "config", "--file", global, "user.name", "Hook Fixture")
+	initRoleFixtureGit(t, target, "config", "--file", global, "user.email", "hooks@example.invalid")
+	require.NoError(t, os.WriteFile(filepath.Join(decoy, "seed"), []byte("decoy\n"), 0600))
+	initRoleFixtureGit(t, decoy, "add", "seed")
+	t.Setenv("GIT_DIR", filepath.Join(home, "missing.git"))
+	t.Setenv("GIT_WORK_TREE", decoy)
+	t.Setenv("GIT_INDEX_FILE", filepath.Join(decoy, ".git", "index"))
+	preserveInitRoleInputs(t, filepath.Join(decoy, ".git", "config"), filepath.Join(decoy, ".git", "index"), global)
+	storage := filepath.Join(home, "separate storage", ".beads")
+	require.NoError(t, os.MkdirAll(filepath.Dir(storage), 0750))
+	cmd := exec.Command(bd, "init", "--prefix", "hookfixture", "--quiet", "--non-interactive", "--skip-agents", "--role", "maintainer")
+	env := bdEnv(home)
+	for _, key := range []string{"BEADS_DIR", "BEADS_DB", "BD_DB", "BD_DOLT_HOST", "BD_DOLT_PORT"} {
+		env = envWithout(env, key)
+	}
+	cmd.Dir, cmd.Env = target, append(env, "BEADS_DIR="+storage, "DOLT_ROOT_PATH="+home, "BD_DOLT_MODE=embedded", "BD_EVENTS_JOURNAL=false")
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "embedded hook init: %s", out)
+	cfg, err := configfile.Load(storage)
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+	require.Equal(t, configfile.DoltModeEmbedded, cfg.DoltMode)
+	info, err := os.Stat(filepath.Join(storage, "embeddeddolt", "hookfixture", ".dolt"))
+	require.NoError(t, err)
+	require.True(t, info.IsDir())
+	for _, name := range managedHookNames {
+		require.Contains(t, string(readInitHooksFile(t, filepath.Join(storage, "hooks", name))), hookSectionBeginPrefix)
+	}
+	got := initRoleFixtureGit(t, target, "config", "--local", "--get", "core.hooksPath")
+	require.Equal(t, filepath.Clean(filepath.Join(storage, "hooks")), filepath.Clean(got))
+}
 
 var (
 	embeddedBDOnce sync.Once
@@ -34,12 +73,6 @@ var (
 // buildEmbeddedBD returns the path to an embedded bd binary for subprocess tests.
 // If BEADS_TEST_BD_BINARY is set, uses that pre-built binary (skipping the ~45s build).
 // CI can pre-build once and pass the path to all test invocations.
-// errEmbeddedBDSourceUnavailable: the test binary was built with -trimpath
-// (runtime.Caller records the import path, not a filesystem path) and the
-// process working directory has no module context to resolve the package
-// through, so there is no source tree to build bd from.
-var errEmbeddedBDSourceUnavailable = errors.New("cannot locate the cmd/bd source directory (test binary built with -trimpath and no module context in the working directory); set BEADS_TEST_BD_BINARY to a prebuilt bd binary")
-
 func buildEmbeddedBD(t *testing.T) string {
 	t.Helper()
 	embeddedBDOnce.Do(func() {
@@ -62,37 +95,11 @@ func buildEmbeddedBD(t *testing.T) string {
 			name = "bd.exe"
 		}
 		embeddedBD = filepath.Join(tmpDir, name)
-		cmd := exec.Command("go", "build", "-tags", "gms_pure_go", "-o", embeddedBD, ".")
-		// A compiled test binary can be launched from any directory. Build from
-		// this source file's package directory rather than inheriting that
-		// arbitrary process working directory. Under -trimpath runtime.Caller
-		// records the import path, not a filesystem path, so fall back to
-		// resolving the package through whatever module context the cwd has.
-		if _, sourceFile, _, ok := runtime.Caller(0); ok && filepath.IsAbs(sourceFile) {
-			if dir := filepath.Dir(sourceFile); dir != "" {
-				if fi, statErr := os.Stat(dir); statErr == nil && fi.IsDir() {
-					cmd.Dir = dir
-				}
-			}
-		}
-		if cmd.Dir == "" {
-			out, err := exec.Command("go", "list", "-f", "{{.Dir}}", "github.com/steveyegge/beads/cmd/bd").Output()
-			if err != nil || strings.TrimSpace(string(out)) == "" {
-				embeddedBDErr = errEmbeddedBDSourceUnavailable
-				return
-			}
-			cmd.Dir = strings.TrimSpace(string(out))
-		}
+		cmd := goBuildBDCommand(embeddedBD)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			embeddedBDErr = fmt.Errorf("go build failed: %v\n%s", err, out)
 		}
 	})
-	if errors.Is(embeddedBDErr, errEmbeddedBDSourceUnavailable) {
-		// Same posture as testenv.MustHaveGoBuild: a test that needs to build
-		// bd from source cannot run where the source is unreachable, and
-		// that is a skip with a pointer, not a failure of the code under test.
-		t.Skipf("skipping: %v", embeddedBDErr)
-	}
 	if embeddedBDErr != nil {
 		t.Fatalf("Failed to build embedded bd binary: %v", embeddedBDErr)
 	}
@@ -329,7 +336,12 @@ func requireNoFile(t *testing.T, path string) {
 	}
 }
 
-func TestEmbeddedInit(t *testing.T) {
+// TestEmbeddedInitA, TestEmbeddedInitB, and TestEmbeddedInitC were split from
+// TestEmbeddedInit (originally ~356s, measured under --config=embedded) into
+// 3 top-level tests over disjoint subtest groups, for CI shard balance (see
+// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every original
+// subtest is preserved exactly once.
+func TestEmbeddedInitA(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt init tests")
 	}
@@ -363,6 +375,14 @@ func TestEmbeddedInit(t *testing.T) {
 		}
 		if strings.Contains(out, "bd initialized") {
 			t.Error("--quiet should suppress success message")
+		}
+		// The project installers (Claude, Codex, Cursor) run here (agents
+		// are not skipped); --quiet drops their progress too.
+		requireFile(t, filepath.Join(dir, ".claude", "settings.json"))
+		for _, chatter := range []string{"Installing Claude hooks", "Beads agent skill installed", "Cursor integration installed"} {
+			if strings.Contains(out, chatter) {
+				t.Errorf("--quiet should suppress installer output %q, got:\n%s", chatter, out)
+			}
 		}
 
 		// bd_version is in local_metadata (dolt-ignored), not metadata
@@ -744,6 +764,15 @@ func TestEmbeddedInit(t *testing.T) {
 			t.Fatalf("config.yaml should persist --remote URL %q:\n%s", remoteURL, configYAML)
 		}
 	})
+}
+
+func TestEmbeddedInitB(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt init tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
 
 	t.Run("remote_behind_schema_gate", func(t *testing.T) {
 		// bd-4mpy7 / #4516: bootstrapping from a remote whose database is
@@ -1167,6 +1196,15 @@ func TestEmbeddedInit(t *testing.T) {
 			t.Fatalf("imported issue title missing from show output:\n%s", out)
 		}
 	})
+}
+
+func TestEmbeddedInitC(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt init tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
 
 	t.Run("server_flags_ignored", func(t *testing.T) {
 		_, beadsDir, _ := bdInit(t, bd, "--prefix", "sv",
