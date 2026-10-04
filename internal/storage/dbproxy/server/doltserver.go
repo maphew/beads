@@ -580,23 +580,24 @@ func (s *DoltServer) startAttempt(ctx context.Context, prepare bool) error {
 // waitReady waits until the dolt sql-server this Start launched is accepting
 // connections on its configured listener.
 //
-// A successful dial is not enough on its own: the port is chosen before dolt
-// binds it, and if another process takes it in between, the dial reaches that
-// process while dolt fails to bind and exits. So when the config's log level
-// lets dolt log its ready line (info or more verbose, which every
-// Beads-generated config uses), the dial only counts after that line has
-// appeared on this child's own output. Under a quieter log level there is no
-// such signal and the dial alone decides, as before; that is also the escape
-// hatch for a dolt whose output never carries the line (a wrapper that
-// filters it, a reworded release), which otherwise fails after
-// startReadyTimeout with an error naming the missing line. Either way, a
-// child that exits first is reported, as ErrPortInUse when it said its port
-// was taken.
+// A dial only counts once the listener has sent its MySQL greeting: one that
+// accepts but stays mute has no MySQL engine serving yet. Even a greeted dial
+// is not enough on its own: the port is chosen before dolt binds it, and if
+// another process takes it in between, the dial reaches that process while
+// dolt fails to bind and exits. So when the config's log level lets dolt log
+// its ready line (info or more verbose, which every Beads-generated config
+// uses), the dial only counts after that line has appeared on this child's
+// own output. Under a quieter log level there is no such signal and the
+// greeted dial alone decides; that is also the escape hatch for a dolt whose
+// output never carries the line (a wrapper that filters it, a reworded
+// release), which otherwise fails after startReadyTimeout with an error
+// naming the missing line. Either way, a child that exits first is reported,
+// as ErrPortInUse when it said its port was taken.
 //
 // There is deliberately no "answered for a while, accept anyway" fallback:
 // dolt only reaches its port check after its own startup, which under load
 // can take longer than any grace period, and until then a foreign listener
-// answers exactly like a ready server.
+// can answer exactly like a ready server.
 func (s *DoltServer) waitReady(ctx context.Context, watch *startupWatch) error {
 	needReadyLine := logLevelEmitsReadyLine(s.config.LogLevel())
 	deadline := time.Now().Add(startReadyTimeout)
