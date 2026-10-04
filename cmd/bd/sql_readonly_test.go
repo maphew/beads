@@ -31,8 +31,12 @@ func TestIsReadOnlySQLQuery(t *testing.T) {
 		{"with_select", "WITH t AS (SELECT id FROM issues) SELECT * FROM t", true},
 		{"with_select_lowercase", "with t as (select 1) select * from t", true},
 		{"with_multiple_ctes_select", "WITH a AS (SELECT 1), b AS (SELECT 2) SELECT * FROM a, b", true},
-		// Parity with the proxied-server read classification (sqlQueryIsRead).
-		{"pragma", "PRAGMA table_info('issues')", true},
+		// Parity with the proxied-server read classification (sqlclass.Classify).
+		// PRAGMA is SQLite syntax the MySQL grammar does not parse, so the
+		// shared classifier reports it unclassifiable rather than read. That
+		// keeps today's writable open for it, which is the conservative
+		// direction this classifier is documented to fail in.
+		{"pragma", "PRAGMA table_info('issues')", false},
 
 		// Writes.
 		{"insert", "INSERT INTO issues (id) VALUES ('x')", false},
@@ -59,8 +63,8 @@ func TestIsReadOnlySQLQuery(t *testing.T) {
 		// semantics depend on server sql_mode (NO_BACKSLASH_ESCAPES).
 		{"with_backslash_escape_select", `WITH t AS (SELECT 'a\'(' AS x) SELECT * FROM t`, false},
 		{"with_doubled_quote_escape_select", `WITH t AS (SELECT 'a''(' AS x) SELECT * FROM t`, true},
-		// Comments fail closed: the depth scanner does not parse comment
-		// syntax, so any comment keeps the writable open.
+		// Comments fail closed: the pre-open gate stays stricter than the
+		// statement classifier, so any comment keeps the writable open.
 		{"inline_block_comment_select", "SELECT /* note */ 1", false},
 		{"cte_comment_hidden_paren_delete", "WITH t AS (SELECT 1 /* ) */) DELETE FROM issues", false},
 		{"trailing_line_comment_select", "SELECT 1 -- done", false},
@@ -96,16 +100,12 @@ func TestIsReadOnlySQLQuery(t *testing.T) {
 	}
 }
 
-// TestSQLQueryIsReadRejectsEscapedQuoteCTEWrite pins the proxied SQL
-// classifier directly. The pre-open classifier rejects all backslashes before
-// reaching this scanner, so testing only isReadOnlySQLQuery would not catch a
-// regression in withOuterStatementIsRead.
-func TestSQLQueryIsReadRejectsEscapedQuoteCTEWrite(t *testing.T) {
-	query := `WITH t AS (SELECT 'a\'(' AS x) DELETE FROM issues WHERE id = 'victim'`
-	if sqlQueryIsRead(query) {
-		t.Fatalf("sqlQueryIsRead(%q) = true, want false", query)
-	}
-}
+// The escaped-quote CTE-write vector this file used to pin directly
+// (TestSQLQueryIsReadRejectsEscapedQuoteCTEWrite, against the hand-rolled
+// sqlQueryIsRead/withOuterStatementIsRead scanner) now belongs to the shared
+// classifier that replaced that scanner: see the "cte escaped quote hides
+// delete" case in internal/storage/sqlclass/sqlclass_test.go, which asserts
+// the same vector classifies as a write.
 
 func TestCommandIsEffectivelyReadOnlyScopesDynamicSQLFlag(t *testing.T) {
 	sqlOpenedReadOnly.Store(true)

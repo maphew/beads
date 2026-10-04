@@ -239,11 +239,11 @@ func sqlCommandWantsReadOnlyStore(cmdName string, args []string) bool {
 }
 
 // isReadOnlySQLQuery reports whether query is a single statement that only
-// reads from the database. It reuses the proxied-server classification
-// (sqlQueryIsRead / topLevelStatementCount) so both paths agree on what a read
-// is, then tightens EXPLAIN: EXPLAIN ANALYZE executes its target statement, so
-// EXPLAIN only classifies as read-only when the explained statement is itself
-// a SELECT.
+// reads from the database. It reuses the shared statement classification
+// (sqlclass.Classify / topLevelStatementCount) so both paths agree on what a
+// read is, then tightens EXPLAIN: EXPLAIN ANALYZE executes its target
+// statement, so EXPLAIN only classifies as read-only when the explained
+// statement is itself a SELECT.
 //
 // The classification is deliberately conservative. Writes, multi-statement
 // batches, comment-prefixed input, and anything unrecognized classify as
@@ -255,9 +255,10 @@ func isReadOnlySQLQuery(query string) bool {
 	if topLevelStatementCount(query) != 1 {
 		return false
 	}
-	// Fail closed on any SQL comment: the CTE depth scanner does not parse
-	// comment syntax, so parentheses inside /* */ or -- / # comments could
-	// desync it. A commented read merely keeps today's writable open.
+	// Fail closed on any SQL comment. This pre-open gate decides whether the
+	// store may be opened read-only at all, so it stays stricter than the
+	// statement classifier it delegates to. A commented read merely keeps
+	// today's writable open.
 	if strings.Contains(query, "/*") || strings.Contains(query, "--") || strings.Contains(query, "#") {
 		return false
 	}
@@ -283,7 +284,7 @@ func isReadOnlySQLQuery(query string) bool {
 		}
 		return explainTargetIsSelect(rest)
 	}
-	return sqlQueryIsRead(query)
+	return sqlclass.Classify(query) == sqlclass.Read
 }
 
 // explainTargetIsSelect reports whether the (upper-cased) remainder of an
