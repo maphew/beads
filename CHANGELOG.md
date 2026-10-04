@@ -687,9 +687,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The stderr truncation hint was gated on stderr being a terminal, so pipes and
   `--json` callers - exactly the consumers that cannot tell a partial page is
   partial - got a silently capped list. The hint now always fires when the
-  effective limit cut the page. Piped `bd list` does not apply its default
-  limit (since #4094), while `bd query` still has an effective default of 50
-  even when piped. Under `BD_JSON_ENVELOPE=1` both commands carry the same
+  effective limit cut the page. Neither command applies a default limit to
+  piped output (since #4094 and #6229), so a piped page is cut only by an
+  explicit `--limit N` or, for `bd list`, a configured `list.limit`
+  (`BD_LIST_LIMIT`). Under `BD_JSON_ENVELOPE=1` both commands carry the same
   `pagination {returned, truncated}` key `bd ready` gained in #4892. Stdout is
   untouched on every route.
 

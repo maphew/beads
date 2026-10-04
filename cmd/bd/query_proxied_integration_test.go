@@ -183,6 +183,18 @@ func TestProxiedServerQuery(t *testing.T) {
 		}
 	})
 
+	t.Run("limit_pagination_envelope", func(t *testing.T) {
+		// GH#5102: runQuery is the third emit site and both query routes funnel
+		// through it, so its pagination wiring needs its own assertion.
+		assertTruncatedPagination(t,
+			bdProxiedEnvelopeJSON(t, bd, p, "query", "priority>=0", "--json", "--all", "--limit", "2"), 2)
+
+		// Absent when nothing was cut, so callers can test for presence.
+		if env := bdProxiedEnvelopeJSON(t, bd, p, "query", "priority>=0", "--json", "--all", "--limit", "0"); env["pagination"] != nil {
+			t.Errorf("unexpected pagination key on untruncated page: %s", env["pagination"])
+		}
+	})
+
 	// This used to be offset_rejected_for_predicate_query. The refusal existed
 	// because an offset into a window that had already dropped matches meant
 	// nothing; the window is gone, the predicate now sees every candidate row,

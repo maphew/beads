@@ -185,6 +185,49 @@ func bdProxiedRunBuffersWithEnv(t *testing.T, bd, dir string, envExtras []string
 	return stdout.String(), stderr.String(), err
 }
 
+// bdProxiedEnvelopeJSON runs a proxied bd command with the JSON envelope opted
+// in and returns the decoded top-level envelope. GH#5102 wires the pagination
+// key at three separate outputJSONWithPagination calls, so each route needs to
+// assert its own rather than inherit the direct route's coverage. The opt-in
+// is passed per child because bdProxiedEnv scrubs an ambient one.
+func bdProxiedEnvelopeJSON(t *testing.T, bd string, p proxiedProject, args ...string) map[string]json.RawMessage {
+	t.Helper()
+	stdout, stderr, err := bdProxiedRunBuffersWithEnv(t, bd, p.dir, []string{"BD_JSON_ENVELOPE=1"}, args...)
+	if err != nil {
+		t.Fatalf("bd %s failed: %v\nstdout:\n%s\nstderr:\n%s",
+			strings.Join(args, " "), err, stdout, stderr)
+	}
+	start := strings.Index(stdout, "{")
+	if start < 0 {
+		t.Fatalf("no JSON envelope found in output:\n%s", stdout)
+	}
+	var env map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(stdout[start:]), &env); err != nil {
+		t.Fatalf("failed to parse JSON envelope: %v\nraw: %s", err, stdout[start:])
+	}
+	return env
+}
+
+// assertTruncatedPagination checks the pagination entry a truncated page must
+// carry under the envelope (GH#5102), with wantReturned the rows it emitted.
+func assertTruncatedPagination(t *testing.T, env map[string]json.RawMessage, wantReturned int) {
+	t.Helper()
+	raw, ok := env["pagination"]
+	if !ok {
+		t.Fatalf("truncated page must carry a pagination key, got: %v", env)
+	}
+	var pag struct {
+		Returned  int  `json:"returned"`
+		Truncated bool `json:"truncated"`
+	}
+	if err := json.Unmarshal(raw, &pag); err != nil {
+		t.Fatalf("parse pagination: %v", err)
+	}
+	if !pag.Truncated || pag.Returned != wantReturned {
+		t.Errorf("pagination = %+v, want truncated=true returned=%d", pag, wantReturned)
+	}
+}
+
 // bdProxiedRunDeadline is bdProxiedRunBuffers for a command that may never exit
 // on its own — `bd list --watch` polls until it is interrupted. It reports
 // whether the deadline was what stopped it, so a case can tell "kept running"

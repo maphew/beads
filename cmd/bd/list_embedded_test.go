@@ -271,6 +271,13 @@ func TestEmbeddedListFiltering(t *testing.T) {
 			t.Errorf("truncation hint leaked into stdout:\n%s", stdout)
 		}
 
+		// --quiet does not silence it: a silently partial page is a wrong
+		// answer, not chatter (see printTruncationHint).
+		_, stderrQuiet := bdListCapture(t, bd, dir, "--limit", "2", "--quiet")
+		if !strings.Contains(stderrQuiet, "more results matched") {
+			t.Errorf("--quiet suppressed the truncation hint:\nstderr: %q", stderrQuiet)
+		}
+
 		// Not truncated: --limit 0 (unlimited) must not emit the hint.
 		_, stderrAll := bdListCapture(t, bd, dir, "--limit", "0")
 		if strings.Contains(stderrAll, "more results matched") {
@@ -326,6 +333,14 @@ func TestEmbeddedListFiltering(t *testing.T) {
 		// Not truncated: the key must be absent so callers can test presence.
 		if envAll := runEnvelope("--limit", "0"); envAll["pagination"] != nil {
 			t.Errorf("unexpected pagination key on untruncated page: %s", envAll["pagination"])
+		}
+
+		// The --skip-labels arm wraps an object instead of a bare array
+		// (cmd/bd/list.go), so it is a separate outputJSONWithPagination call
+		// and needs its own assertion or the key can go missing there alone.
+		assertTruncatedPagination(t, runEnvelope("--limit", "2", "--skip-labels"), 2)
+		if envSkipAll := runEnvelope("--limit", "0", "--skip-labels"); envSkipAll["pagination"] != nil {
+			t.Errorf("unexpected pagination key on untruncated --skip-labels page: %s", envSkipAll["pagination"])
 		}
 	})
 

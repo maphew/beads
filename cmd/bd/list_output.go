@@ -18,10 +18,15 @@ import (
 //
 // The notice is deliberately NOT gated on stderr being a terminal, matching
 // bd ready's unconditional hint (GH#4892): piped consumers are exactly the
-// ones that cannot see a partial page is partial (GH#5102). Since GH#4094
-// piped `bd list` stdout never applies its default limit. This fires whenever
-// the effective limit cut the page; `bd query` has an effective default of 50
-// even when piped. Stdout stays clean either way.
+// ones that cannot see a partial page is partial (GH#5102). Neither bd list
+// nor bd query applies a default limit to piped stdout (GH#4094, GH#6229), so
+// a piped page is cut only by an explicit --limit N or bd list's configured
+// list.limit; at a terminal the default page size can cut it too. This fires
+// whenever the effective limit cut the page. Stdout stays clean either way.
+//
+// The notice also deliberately outranks --quiet, unlike the advisory output
+// that convention suppresses: a page that is silently partial is a wrong
+// answer to the caller's question, not chatter.
 func printTruncationHint(truncated bool, effectiveLimit int) {
 	if !truncated || effectiveLimit <= 0 {
 		return
@@ -34,7 +39,24 @@ func truncationHintText(effectiveLimit int) string {
 }
 
 func formatTruncationHint(effectiveLimit int) string {
-	return composeTruncationHint(ui.RenderWarn, truncationHintText(effectiveLimit))
+	return composeTruncationHint(truncationHintRenderer(ui.IsStderrTerminal()), truncationHintText(effectiveLimit))
+}
+
+// truncationHintRenderer picks the hint's renderer from the stderr TTY state,
+// because stderr is where the hint is written while ui.ShouldUseColor decides
+// color on STDOUT. With an interactive stdout and a redirected stderr the
+// styles are live, so styling unconditionally would write raw ANSI escapes
+// into the redirect. Dropping the emission gate (GH#5102) is what exposed
+// this, so the terminal check moved from whether to emit to whether to style.
+//
+// The stderr state is a parameter, the same shape ui.shouldUseHyperlinks uses,
+// so both arms are assertable: package ui initializes its styles once at init
+// from stdout, so a test process can never observe the styled arm end to end.
+func truncationHintRenderer(stderrIsTerminal bool) func(string) string {
+	if stderrIsTerminal {
+		return ui.RenderWarn
+	}
+	return func(s string) string { return s }
 }
 
 // composeTruncationHint keeps newlines outside the renderer. lipgloss pads
