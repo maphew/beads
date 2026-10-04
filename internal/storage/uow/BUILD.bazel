@@ -7,6 +7,7 @@ go_library(
         "batch_applier.go",
         "batch_closer.go",
         "batch_creator.go",
+        "blocked_recheck.go",
         "blockingannotator.go",
         "bootstrapper.go",
         "commenter.go",
@@ -79,9 +80,11 @@ go_library(
 go_test(
     name = "uow_test",
     srcs = [
+        "batch_applier_retry_budget_test.go",
         "batch_apply_contract_test.go",
         "batch_closer_contract_test.go",
         "batch_creator_contract_test.go",
+        "blocked_recheck_race_test.go",
         "blocking_annotator_contract_test.go",
         "bootstrapper_contract_test.go",
         "claimer_contract_test.go",
@@ -145,6 +148,7 @@ go_test(
         "testmain_test.go",
         "tree_walker_contract_test.go",
         "tx_test.go",
+        "upstream_outage_window_test.go",
         "version_reconcile_boot_test.go",
         "version_reconcile_integration_test.go",
         "version_reconciler_contract_test.go",
